@@ -1,0 +1,18 @@
+# Dependencies and build output
+node_modules/
+lib/
+*.tsbuildinfo
+
+# SECRETS — never commit these
+.env
+.env.*
+!.env.example
+
+# SDD runtime state (per-project, may contain session cookies)
+.sdd/
+specs/**/state.json
+stop.md
+
+# OS / editor noise
+.DS_Store
+__pycache__/

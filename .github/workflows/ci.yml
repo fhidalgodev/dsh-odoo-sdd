@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dev dependencies (peers are host-provided, optional)
+        run: npm install --no-audit --no-fund
+
+      # The @deepseek-ai host packages (cordis, schemastery, dsh-tools via
+      # dsh-base) arrive transitively from the public registry through the
+      # dsh launcher, matching the declared peer ranges.
+      - name: Install host packages for typecheck
+        run: npm install --no-save --no-audit --no-fund @deepseek-ai/dsh@^0.1.2-rc.1
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke tests (state machine + security invariants)
+        run: npm test

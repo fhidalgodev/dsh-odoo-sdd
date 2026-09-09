@@ -5,7 +5,9 @@ kind: "package-bundle"
 
 [English](README.md) | Español
 
-# dsh-odoo-sdd
+# Spec-Driven Development para Odoo
+
+*De una idea a un módulo Odoo probado — con o sin intervención humana.*
 
 <!-- Los badges se resuelven al publicar en npm y hacer público el repo en
      GitHub bajo fhidalgodev/dsh-odoo-sdd. Actualiza los enlaces si publicas

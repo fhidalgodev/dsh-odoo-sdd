@@ -18,7 +18,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
+          # No npm cache: the plugin intentionally has no package-lock.json
+          # (peers are optional + a host package is installed ad-hoc below).
+          # `cache: npm` would fail with "lock file is not found".
+          cache: ''
 
       - name: Install dev dependencies (peers are host-provided, optional)
         run: npm install --no-audit --no-fund

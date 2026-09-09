@@ -1,13 +1,8 @@
----
-description: "Pipeline Spec-Driven Development para Odoo como plugin de DSH: bucle de feedback cerrado contra una instancia Odoo provista por el desarrollador (JSON-RPC) con gates de seguridad fail-closed — aprobaciones, veredictos honestos, bucles de corrección acotados y base de conocimiento persistida en disco."
-kind: "package-bundle"
----
-
-[English](README.md) | Español
-
 # Spec-Driven Development para Odoo
 
 *De una idea a un módulo Odoo probado — con o sin intervención humana.*
+
+[English](README.md) | Español
 
 <!-- Los badges se resuelven al publicar en npm y hacer público el repo en
      GitHub bajo fhidalgodev/dsh-odoo-sdd. Actualiza los enlaces si publicas

@@ -259,7 +259,7 @@ the SDD workflow. Contributors:
 
 <p align="center">
   <a href="https://github.com/fhidalgodev/dsh-odoo-sdd/graphs/contributors">
-    <img src="https://contrib.rocks/image?repo=fhidalgodev/dsh-odoo-sdd&max=100&columns=12" alt="Contributors to fhidalgodev/dsh-odoo-sdd" width="860"/>
+    <img src="https://contrib.rocks/image?repo=fhidalgodev/dsh-odoo-sdd&max=100&columns=12" alt="Contributors to fhidalgodev/dsh-odoo-sdd" width="480"/>
   </a>
 </p>
 

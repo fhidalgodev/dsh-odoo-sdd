@@ -219,15 +219,13 @@ del servidor, razones de rechazo de gates e instrucciones de remediación.
 
 <a href="https://www.star-history.com/?repos=fhidalgodev%2Fdsh-odoo-sdd&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/fhidalgodev/dsh-odoo-sdd/star-history/assets/star-history/star-history-dark.svg" />
-   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/fhidalgodev/dsh-odoo-sdd/star-history/assets/star-history/star-history-light.svg" />
-   <img alt="Star History Chart" src="https://raw.githubusercontent.com/fhidalgodev/dsh-odoo-sdd/star-history/assets/star-history/star-history-light.svg" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=fhidalgodev/dsh-odoo-sdd&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=fhidalgodev/dsh-odoo-sdd&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=fhidalgodev/dsh-odoo-sdd&type=date&legend=top-left" />
  </picture>
 </a>
 
-> El gráfico se regenera cuando el repo acumula datos de estrellas/forks y
-> star-history.com emite la rama `star-history` desde
-> `fhidalgodev/dsh-odoo-sdd`.
+> Gráfico generado en vivo por la API de [star-history.com](https://star-history.com).
 
 ## Agradecimientos
 

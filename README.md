@@ -239,15 +239,13 @@ reasons and remediation instructions.
 
 <a href="https://www.star-history.com/?repos=fhidalgodev%2Fdsh-odoo-sdd&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/fhidalgodev/dsh-odoo-sdd/star-history/assets/star-history/star-history-dark.svg" />
-   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/fhidalgodev/dsh-odoo-sdd/star-history/assets/star-history/star-history-light.svg" />
-   <img alt="Star History Chart" src="https://raw.githubusercontent.com/fhidalgodev/dsh-odoo-sdd/star-history/assets/star-history/star-history-light.svg" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=fhidalgodev/dsh-odoo-sdd&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=fhidalgodev/dsh-odoo-sdd&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=fhidalgodev/dsh-odoo-sdd&type=date&legend=top-left" />
  </picture>
 </a>
 
-> The chart pull regenerates once the repo accumulates stars/fork data and
-> star-history.com emits the `star-history` branch from
-> `fhidalgodev/dsh-odoo-sdd`.
+> Chart generated live by the [star-history.com](https://star-history.com) API.
 
 ## Acknowledgments
 

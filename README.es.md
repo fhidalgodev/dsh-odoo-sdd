@@ -16,6 +16,7 @@
 </p>
 
 [English](README.md) | Español
+
 **Autor:** [Franyer Hidalgo](https://github.com/fhidalgodev) — `fhidalgo.dev@gmail.com`
 
 ## Resumen

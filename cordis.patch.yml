@@ -1,0 +1,19 @@
+# dsh-odoo-sdd bundle patch.
+#
+# This bundle is a single Cordis plugin (name "odoo-sdd"): its apply()
+# registers the odoo_* + sdd_phase tools. To mount it into a profile, this
+# patch inserts the one row the Loader resolves against `dsh-odoo-sdd`.
+#
+# The profile's own cordis.patch.yml may override `config` by row id
+# (`odoo-sdd`) — e.g. to set a concrete projectRoot or allowlist.
+#
+# Security: executeAllowlist defaults to EMPTY, so odoo_execute mutations
+# (create/write/unlink) are denied until the deployment lists models.
+
+- insert:
+    - id: odoo-sdd
+      name: 'dsh-odoo-sdd'
+      config:
+        projectRoot: ''
+        specsDir: 'specs'
+        executeAllowlist: []

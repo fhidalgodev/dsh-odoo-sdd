@@ -245,9 +245,9 @@ reasons and remediation instructions.
  </picture>
 </a>
 
-> The chart renders once the repository is public on GitHub and the
-> `star-history` branch exists (see https://star-history.com). Until then the
-> image is a placeholder.
+> The chart pull regenerates once the repo accumulates stars/fork data and
+> star-history.com emits the `star-history` branch from
+> `fhidalgodev/dsh-odoo-sdd`.
 
 ## Acknowledgments
 

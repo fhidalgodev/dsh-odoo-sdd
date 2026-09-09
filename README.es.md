@@ -225,9 +225,9 @@ del servidor, razones de rechazo de gates e instrucciones de remediación.
  </picture>
 </a>
 
-> El gráfico se muestra cuando el repo es público en GitHub y existe la rama
-> `star-history` (ver https://star-history.com). Hasta entonces, es un
-> placeholder.
+> El gráfico se regenera cuando el repo acumula datos de estrellas/forks y
+> star-history.com emite la rama `star-history` desde
+> `fhidalgodev/dsh-odoo-sdd`.
 
 ## Agradecimientos
 

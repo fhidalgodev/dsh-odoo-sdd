@@ -7,8 +7,6 @@ English | [Español](README.es.md)
 
 # dsh-odoo-sdd
 
-**Author:** [Franyer Hidalgo](https://github.com/fhidalgodev) — `fhidalgo.dev@gmail.com`
-
 <!-- Badges resolve once the package is published to npm and the repository is
      public on GitHub under fhidalgodev/dsh-odoo-sdd. Update the links if you
      publish under a different owner. -->
@@ -21,6 +19,8 @@ English | [Español](README.es.md)
   <a href="https://github.com/fhidalgodev/dsh-odoo-sdd/graphs/contributors"><img src="https://img.shields.io/github/contributors/fhidalgodev/dsh-odoo-sdd.svg?style=flat-square&color=bc8cff&labelColor=161b22&logo=github&logoColor=white" alt="contributors"/></a>
   <a href="https://github.com/fhidalgodev/dsh-odoo-sdd/discussions"><img src="https://img.shields.io/github/discussions/fhidalgodev/dsh-odoo-sdd.svg?style=flat-square&color=58a6ff&labelColor=161b22&logo=github&logoColor=white" alt="Discussions"/></a>
 </p>
+
+**Author:** [Franyer Hidalgo](https://github.com/fhidalgodev) — `fhidalgo.dev@gmail.com`
 
 ## Summary
 

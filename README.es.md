@@ -2,8 +2,6 @@
 
 *De una idea a un módulo Odoo probado — con o sin intervención humana.*
 
-[English](README.md) | Español
-
 <!-- Los badges se resuelven al publicar en npm y hacer público el repo en
      GitHub bajo fhidalgodev/dsh-odoo-sdd. Actualiza los enlaces si publicas
      bajo otro propietario. -->
@@ -17,6 +15,7 @@
   <a href="https://github.com/fhidalgodev/dsh-odoo-sdd/discussions"><img src="https://img.shields.io/github/discussions/fhidalgodev/dsh-odoo-sdd.svg?style=flat-square&color=58a6ff&labelColor=161b22&logo=github&logoColor=white" alt="Discussions"/></a>
 </p>
 
+[English](README.md) | Español
 **Autor:** [Franyer Hidalgo](https://github.com/fhidalgodev) — `fhidalgo.dev@gmail.com`
 
 ## Resumen

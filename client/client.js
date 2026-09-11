@@ -136,6 +136,14 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", name: "odoo-sdd", factory: (r
 	}
 
 	exports.REQUIRED_PRIMITIVES = ["@deepseek-ai/dsh-client-ui-primitives"];
+	exports.missingPrimitives = function (available) {
+		var missing = [];
+		for (var i = 0; i < exports.REQUIRED_PRIMITIVES.length; i++) {
+			var name = exports.REQUIRED_PRIMITIVES[i];
+			if (!available || !available[name]) missing.push(name);
+		}
+		return missing;
+	};
 	exports.apply = apply;
 	exports.name = "odoo-sdd";
 

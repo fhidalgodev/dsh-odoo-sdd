@@ -128,6 +128,23 @@ Configuración opcional vía la capa de parches (`cordis.patch.yml`):
 `projectRoot` (raíz del workspace) y `specsDir` (carpeta de specs, por defecto
 `specs/`).
 
+Los bundles cuyo `dsh.bundle.patch` apunta a `cordis.patch.yml` insertan su
+propia fila, así que no hace falta agregarla a mano una vez instalado el paquete.
+
+¿Instalando desde un clon de git? `lib/` es salida de build y **no** se
+versiona, y pnpm omite los scripts de build de dependencias por defecto —
+compila una vez antes de agregar:
+
+```bash
+git clone https://github.com/fhidalgodev/dsh-odoo-sdd && cd dsh-odoo-sdd
+npm install && npm run build     # genera lib/ (obligatorio: el main es lib/index.js)
+dsh plugin --profile odoo add .
+```
+
+El resto de campos (allowlist de ejecución, repositorios, autonomía,
+licenciamiento, guards de política) se ajustan con la tool `odoo_config` o en
+**Settings → Odoo SDD**.
+
 ### 3. Tools registradas (model-facing)
 
 | Tool | Propósito |
@@ -139,7 +156,10 @@ Configuración opcional vía la capa de parches (`cordis.patch.yml`):
 | `odoo_validate` | Validación LOCAL del módulo sin instancia: `__manifest__.py` + depends, los XML declarados existen, `security/ir.model.access.csv` cuando hay modelos. Devuelve findings file:line. |
 | `odoo_errors` | Lee errores recientes del servidor (`ir.logging`) — el equivalente remoto de obtener los logs del entorno. |
 | `odoo_session` | Mintea una sesión web sin contraseña (patrón `connect_as_user`) guardada en `.sdd/session.json` (chmod 600) para pruebas UI con Playwright. La cookie nunca se devuelve. |
-| `sdd_phase` | Máquina de fases: `init`, `status` (incluye resumen del logbook), `mark_spec_loaded`, `advance` (gates fail-closed + provenance `approval_source`), `fail` (escalera de fallos + veredicto FAILED), `succeed` (veredicto PASSED). |
+| `sdd_phase` | Máquina de fases: `init`, `status` (incluye resumen del logbook), `mark_spec_loaded`, `advance` (gates fail-closed + provenance `approval_source`), `fail` (escalera de fallos + veredicto FAILED), `succeed` (veredicto PASSED), `rollback` (restaura un checkpoint y vuelve a WRITE_CODE). |
+| `sdd_checkpoint` | La superficie de rollback: `create` (snapshot del workspace, queda activo), `list`, `restore` (archivos y, con `restore_data=true` + `confirm_destructive=true`, las mutaciones de datos registradas), `drop`, `journal`. |
+| `odoo_security_scan` | Revisión de seguridad estática local (sin instancia): SQL concatenado, `eval`/`exec`/`pickle`, secretos hardcodeados, `sudo()` sin justificar, `auth="none"`, CSRF desactivado, `t-raw` en QWeb. Hallazgos con `file:line` + sugerencia; cualquier ERROR bloquea `DONE`. |
+| `sdd_handoff` | Escribe `specs/<id>/handoff.md` (fase final, veredicto, decisiones, blockers, checkpoints, journal, config efectiva, próximos pasos) al cerrar la ejecución. |
 
 ### 3b. Modo de delegación (de una idea, supervisado o autónomo)
 
@@ -166,9 +186,39 @@ por proyecto con `odoo_setup mode=autonomy decision=...`:
 | **knowledge** | skills de patrones Odoo pinneados por versión (delegados, verificados por el skill) |
 | **skills** | `SKILL.md` — el flujo de orquestación en 5 fases |
 | **logbook** | `kb.json` — decisiones, descartadas, blockers; se lee antes de proponer |
-| **audit** | `.sdd/audit.jsonl` — log de actividad append-only sanitizado |
+| **audit** | `.sdd/audit.jsonl` — log de actividad append-only sanitizado, escrito por un listener global `tools/result` (no solo por las tools de Odoo) |
+| **rollback** | `.sdd/checkpoints/<id>/` — manifest + snapshot de archivos + journal de datos, restaurable por spec |
+| **security** | reglas de `odoo_security_scan` + la persona `security-reviewer` + la entrevista de seguridad obligatoria en CLARIFY |
 | **test** | `tests/smoke.mjs` — suite de invariantes sin instancia |
 
+### 3d. Seguridad, rollback y trazabilidad
+
+El pipeline asume que el agente se va a equivocar en algún momento, así que cada
+camino de mutación tiene vuelta atrás y forma de probar qué pasó.
+
+- **Checkpoint antes de mutar.** Con `requireCheckpointBeforeMutation` activo
+  (default), las mutaciones de `odoo_execute` se deniegan hasta que
+  `sdd_checkpoint create` haya hecho snapshot de la spec activa — y se deniegan
+  directamente antes de `WRITE_CODE`.
+- **Rollback de archivos.** `sdd_checkpoint restore` devuelve los archivos del
+  snapshot tal cual eran; `sdd_phase rollback` retorna la spec a `WRITE_CODE`
+  con el fallo registrado, para reiniciar desde un estado conocido.
+- **Rollback de datos (best effort).** Cada `create`/`write`/`unlink` vía
+  `odoo_execute` guarda su pre-imagen en el journal del checkpoint; `restore
+  restore_data=true confirm_destructive=true` la reaplica en orden inverso.
+  Cubre los datos escritos a través del plugin — **no** los efectos de un
+  install/upgrade de módulo, que no se revierten a nivel de base de datos.
+- **Seguridad por construcción.** CLARIFY debe responder la entrevista de
+  seguridad (grupos, ACLs, record rules, justificación de `sudo()`, rutas
+  públicas) antes de aprobar ARCHITECTURE; `securityGaps()` tumba el gate si
+  esas respuestas faltan en `architecture.md`, y `securityReviewRequired` obliga
+  el pase del `security-reviewer` antes de `DONE`.
+- **Trazabilidad.** `.sdd/audit.jsonl` registra cada llamada con resultado
+  (`ok` / `error` / `denied`), duración y fase; `sdd_phase status` imprime el
+  logbook; `sdd_handoff` congela la ejecución completa en `handoff.md`.
+- **Frenos de emergencia.** `stop.md` (en `.sdd/stop.md` o
+  `specs/<activa>/stop.md`) detiene todas las tools; los techos de iteración y
+  la escalera de diagnóstico llevan a `BLOCKED` en vez de iterar sin fin.
 
 ### 4. Protocolo de trabajo
 
@@ -193,21 +243,28 @@ specs/<NNN>-<slug>/
 
 ## Experiencia del modelo
 
-El agente ve 5 tools con descripciones autocontenidas. El flujo típico:
-`sdd_phase init` → leer spec → `odoo_connect` → fases con gate mediante
-`APPROVED` → código → `odoo_module install` → si hay traceback, `odoo_errors`
-+ `sdd_phase fail` (puede exigir diagnóstico) → corregir → re-verificar →
-`sdd_phase succeed` → `DONE`. Las respuestas son texto accionable: tracebacks
-del servidor, razones de rechazo de gates e instrucciones de remediación.
+El agente ve 12 tools con descripciones autocontenidas. El flujo típico:
+`sdd_phase init` → entrevista de seguridad + `odoo_connect` → fases con gate
+mediante `APPROVED` → `sdd_checkpoint create` → código → `odoo_security_scan` →
+`odoo_module install` → si hay traceback, `odoo_errors` + `sdd_phase fail`
+(puede exigir diagnóstico) → corregir (o `sdd_phase rollback`) → re-verificar →
+`sdd_phase succeed` → `sdd_handoff` → `DONE`. Las respuestas son texto
+accionable: tracebacks del servidor, razones de rechazo de gates e instrucciones
+de remediación.
 
 ## Limitaciones conocidas y trabajo diferido
 
 - **Tests remotos**: sin acceso shell a la instancia no se puede ejecutar
   `--test-enable`; la capa 2 es pruebas vía RPC/UI. Pendiente: una tool
   opcional `odoo_run_tests` si el desarrollador expone un runner.
-- **Rollback de datos**: las pruebas escriben en la BD conectada; no hay
-  clonación efímera (decisión de diseño: la BD la provee y gestiona el
-  desarrollador). Mitigación documentada: usar BD desechable.
+- **Rollback de datos best effort**: las pruebas escriben en la BD conectada; no
+  hay clonación efímera (decisión de diseño: la BD la provee y gestiona el
+  desarrollador). `sdd_checkpoint` revierte los datos escritos vía
+  `odoo_execute`, pero un install/upgrade de módulo **no** se revierte a nivel de
+  base de datos. Se mantiene la mitigación: usar BD desechable.
+- **Alcance del scan de seguridad**: `odoo_security_scan` es basado en reglas
+  sobre el texto fuente (sin AST ni taint tracking), así que atrapa los errores
+  típicos de Odoo, no todos; complementa la revisión humana, no la reemplaza.
 - **Multi-instancia**: un solo target por proyecto (`.env`). Pendiente:
   perfiles de instancia (`dev`, `staging`).
 - Sin renderer rico `presentCall`/UI en la GUI web de DSH (solo texto).

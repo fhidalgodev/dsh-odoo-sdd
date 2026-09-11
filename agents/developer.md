@@ -7,6 +7,12 @@ redesign, and you never touch the specification.
 Write the Python, XML, JS/OWL, and security files for `architecture.md`, then
 run the static gates. Code, variables, and docstrings in ENGLISH.
 
+In **bug** mode you still implement the approved change, but you work from the
+located defect: reproduce the failing behaviour, identify the minimal change
+against the approved Fix-Plan from the consultant, implement only that, and
+leave the broad refactoring out. Keep the fix scoped to the root cause — do
+not expand into unrelated code.
+
 ## Working rules
 - Read `architecture.md` + `test-plan.md` + the latest logbook entries first.
   Implement the approved design as written.

@@ -26,9 +26,19 @@ sdd.initSpecDir(specDir);
 check("skeleton files created", ["spec.md", "architecture.md", "test-plan.md"].every((f) => existsSync(join(specDir, f))));
 
 let st = sdd.loadState(specDir);
-check("initial phase READ_SPEC", st.phase === "READ_SPEC");
+check("initial phase CLARIFY (intent unresolved)", st.phase === "CLARIFY" && st.mode === null && st.licensed === null);
 
-let r = sdd.transition(st, "ARCHITECTURE", null, "try without marker");
+let r = sdd.transition(st, "READ_SPEC", null, "try without clarifying");
+check("CLARIFY gate blocks before intent is clear", r.ok === false && (r.reason ?? "").includes("CLARIFY"));
+
+// Resolve intent, then it can leave CLARIFY (not gated) toward READ_SPEC.
+st.mode = "create";
+st.licensed = "oca";
+r = sdd.transition(st, "READ_SPEC", null, "intent clarified");
+check("CLARIFY -> READ_SPEC allowed once intent set", r.ok === true && st.phase === "READ_SPEC");
+
+// Approval gates apply from READ_SPEC onward.
+r = sdd.transition(st, "ARCHITECTURE", null, "try without marker");
 check("gated advance rejected without APPROVED", r.ok === false);
 r = sdd.transition(st, "ARCHITECTURE", "maybe?", "ambiguous marker");
 check("ambiguous marker rejected (fail-closed)", r.ok === false);
@@ -235,6 +245,10 @@ const executeD = registered.get("odoo_execute");
 
 // --- headings gate: a bare spec cannot leave READ_SPEC ---
 sddD.execute({ operation: "init", spec_id: "001-bare" });
+// Clarify intent so it can leave CLARIFY, then advance to READ_SPEC.
+await sddD.execute({ operation: "clarify", spec_id: "001-bare", mode: "create", licensed: "oca" });
+await sddD.execute({ operation: "advance", spec_id: "001-bare", next_phase: "READ_SPEC" });
+await sddD.execute({ operation: "mark_spec_loaded", spec_id: "001-bare" });
 // Overwrite the spec with content lacking the required Acceptance Criteria section.
 writeFileSync(join(projD, "specs", "001-bare", "spec.md"), "# Spec\n\n== Context ==\n", { mode: 0o600 });
 let gate = await sddD.execute({ operation: "advance", spec_id: "001-bare", next_phase: "ARCHITECTURE", approval_marker: "APPROVED", approval_source: "human" });
@@ -243,6 +257,8 @@ check("headings gate blocks advance with missing spec sections", gate.ok === fal
 // --- autonomy: proxy approval forbidden in supervised ---
 await setupD.execute({ mode: "skip" }); // avoid instance requirement
 sddD.execute({ operation: "init", spec_id: "002-proxy" });
+await sddD.execute({ operation: "clarify", spec_id: "002-proxy", mode: "create", licensed: "oca" });
+await sddD.execute({ operation: "advance", spec_id: "002-proxy", next_phase: "READ_SPEC" });
 await sddD.execute({ operation: "mark_spec_loaded", spec_id: "002-proxy" });
 gate = await sddD.execute({ operation: "advance", spec_id: "002-proxy", next_phase: "ARCHITECTURE", approval_marker: "APPROVED", approval_source: "human-proxy" });
 check("human-proxy rejected in SUPERVISED mode", gate.ok === false && gate.detail.includes("SUPERVISED"));

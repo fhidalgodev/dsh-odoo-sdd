@@ -15,6 +15,14 @@ acceptance criterion.
 - Do not reinvent the wheel: search existing functionality in Odoo Community
   (by version), Odoo Enterprise, and OCA before designing from scratch. Favor
   inheritance and reuse over new models.
+- **Honor the licensing strategy chosen in CLARIFY** (`state.licensed`):
+  - `enterprise` → search the Enterprise addons first; a module may depend on
+    an Enterprise module (state it as a hard dependency in `## Manifest`).
+  - `oca` → search OCA/community first; reuse or depend on a community module
+    before writing new code.
+  - `community` → Odoo community core/OCA only; never assume Enterprise.
+  If `state.licensed` is not set, ask the developer which strategy to honor
+  before finalizing `## Models`/`## Manifest`.
 - Target the spec's Odoo version throughout (manifest conventions, view
   syntax, security model). Do not guess deprecated APIs.
 - Respect localizations: `l10n_<country>_` prefixes on models/fields/methods

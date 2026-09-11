@@ -3,11 +3,15 @@ name: odoo-sdd-workflow
 description: Spec-Driven Development pipeline for Odoo modules on top of the dsh-odoo-sdd plugin. Use when developing, verifying, or fixing an Odoo module against a live instance with formal acceptance criteria. Enforces the 5-phase protocol with fail-closed gates, honest verdicts, and bounded fix loops.
 ---
 
-# Odoo SDD Workflow (5 phases)
+# Odoo SDD Workflow (CLARIFY + 5 phases)
 
 Mandatory protocol when using the `dsh-odoo-sdd` plugin. The specification is
 the single source of truth and immutable: **the code adapts to the spec, the
 spec never adapts to the code**.
+
+Nothing starts (implementation, or even spec drafting) until **CLARIFY** has
+resolved the intent — unless the pipeline is in AUTONOMOUS mode, where the
+intent is detected from the request.
 
 ## Global rules (non-negotiable)
 
@@ -63,6 +67,35 @@ Before phase 3, check the agent's skill catalog:
   (`kb.json`) — prior decisions, discarded options, blockers. Respect settled
   decisions or explicitly justify overriding one. `sdd_phase status` shows the
   recent logbook summary.
+
+## Phase 0 — CLARIFY (intent first)
+
+Run `sdd_phase status`. The pipeline starts in `CLARIFY` and **cannot leave it
+until `mode` and `licensed` are confirmed** (the `sdd_phase clarify` gate is
+fail-closed — in SUPERVISED mode it never auto-advances).
+
+1. **Mode** — what is this run for?
+   - `create` — build a new module from a spec.
+   - `bug` — resolve a defect on an existing module. Record the bug, locate the
+     affected module/files, reproduce if possible, then the failure ladder +
+     consultant root-cause (phase 5) drive to a fix.
+2. **Licensing / search strategy** — ASK the developer which source to honor
+   when reusing functionality (do not decide for them):
+   - `enterprise` — Odoo Enterprise is available: search the Enterprise
+     addons path and GitHub first, then favor its modules.
+   - `oca` — no Enterprise; search OCA/community first and reuse a community
+     module (depend on it or mirror its pattern) before writing from scratch.
+   - `community` — strict Odoo community only; never assume Enterprise.
+3. **SUPERVISED mode**: you MUST interview the developer with
+   `ask_user_question` — (a) create or bug, (b) licensing strategy, and (c) an
+   explicit confirmation "proceed?" — and record the answer with
+   `sdd_phase clarify mode=... licensed=...`. Do NOT start any work before this
+   confirmation. If the developer is vague, restate the plan and ask again.
+4. **AUTONOMOUS mode**: detect `mode` and `licensed` from the request text; if
+   they cannot be determined confidently, go `sdd_phase advance next_phase=BLOCKED`
+   ("intent ambiguous") — never invent them.
+
+Once clarified: `sdd_phase advance next_phase=READ_SPEC`.
 
 ## Phase 1 — READ_SPEC
 

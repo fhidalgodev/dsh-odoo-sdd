@@ -31,8 +31,9 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 
-/** Ordered pipeline phases (the 5 SDD steps + terminal states). */
+/** Ordered pipeline phases (the 5 SDD steps + the CLARIFY entry + terminals). */
 export const PHASES = [
+	"CLARIFY",
 	"READ_SPEC",
 	"ARCHITECTURE",
 	"WRITE_CODE",
@@ -43,6 +44,10 @@ export const PHASES = [
 ] as const;
 
 export type Phase = (typeof PHASES)[number];
+/** Pipeline modality: create a new module, or resolve a bug on an existing one. */
+export type PipelineMode = "create" | "bug";
+/** Licensing / search strategy for reused functionality. */
+export type LicenseStrategy = "enterprise" | "oca" | "community";
 
 /** Non-terminal phases that require an explicit human/agent approval gate. */
 export const GATED_PHASES: readonly Phase[] = ["READ_SPEC", "ARCHITECTURE"];
@@ -62,6 +67,10 @@ export interface SddState {
 	version: 1;
 	specDir: string;
 	phase: Phase;
+	/** What job this pipeline run is doing. */
+	mode: PipelineMode | null;
+	/** Licensing strategy for reused functionality. */
+	licensed: LicenseStrategy | null;
 	/** Consecutive failures in the current verify/fix cycle. */
 	failureCount: number;
 	/** Total verify/fix iterations consumed for the current criterion set. */
@@ -98,7 +107,14 @@ export function initialState(specDir: string, overrides: Partial<SddState> = {})
 	return {
 		version: 1,
 		specDir,
-		phase: "READ_SPEC",
+		// The pipeline starts UNCLARIFIED, in the CLARIFY phase. mode and
+		// licensed stay null (fail-closed) until the user answers the intent
+		// questions via sdd_phase operation=clarify — nothing starts before
+		// the intent is clear, except in AUTONOMOUS mode where they are
+		// detected from the request.
+		phase: "CLARIFY",
+		mode: null,
+		licensed: null,
 		failureCount: 0,
 		iterationsUsed: 0,
 		maxIterations: Number(process.env["ODOO_SDD_MAX_ITERATIONS"] ?? 5),
@@ -266,6 +282,28 @@ export function transition(
 					"required to advance. Ambiguous or missing approval never counts " +
 					"(fail-closed). Re-review the phase output and retry with the " +
 					"marker.",
+				state,
+			};
+		}
+	}
+
+	// CLARIFY gate: nothing starts until the intent is clear. Leaving CLARIFY
+	// requires the modality (create|bug) and licensing strategy to be
+	// confirmed. In SUPERVISED mode that happens only after the user answers
+	// the clarifying interview; an unresolved CLARIFY never auto-advances.
+	if (state.phase === "CLARIFY" && next !== "BLOCKED") {
+		const unresolved: string[] = [];
+		if (state.mode !== "create" && state.mode !== "bug") unresolved.push("mode");
+		if (state.licensed !== "enterprise" && state.licensed !== "oca" && state.licensed !== "community") unresolved.push("licensed");
+		if (unresolved.length > 0) {
+			return {
+				ok: false,
+				reason:
+					`CLARIFY incomplete: before any work, the intent must be clear. ` +
+					`Missing: ${unresolved.join(", ")}. In SUPERVISED mode, ask the ` +
+					"developer (create vs bug; enterprise/OCA/community licensing " +
+					"strategy). In AUTONOMOUS mode, detect them from the request " +
+					"before proceeding.",
 				state,
 			};
 		}

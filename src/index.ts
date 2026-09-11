@@ -61,6 +61,7 @@ import {
 	recordFailedVerdict,
 	summarize,
 	kbRead,
+	kbAppend,
 	type Phase,
 	PHASES,
 } from "./sdd-state.js";
@@ -679,13 +680,23 @@ export function apply(ctx: { tools: ToolRegistry }, config: OdooSddConfig): void
 			operation: {
 				type: "string",
 				required: true,
-				enum: ["init", "status", "mark_spec_loaded", "advance", "fail", "succeed"],
+				enum: ["init", "clarify", "status", "mark_spec_loaded", "advance", "fail", "succeed"],
 				description: "State-machine operation to perform.",
 			},
 			spec_id: {
 				type: "string",
 				required: true,
 				description: "Spec directory id, e.g. '001-sale-order-approval'.",
+			},
+			mode: {
+				type: "string",
+				enum: ["create", "bug"],
+				description: "Job type (for operation=clarify): create a new module, or resolve a bug on an existing one.",
+			},
+			licensed: {
+				type: "string",
+				enum: ["enterprise", "oca", "community"],
+				description: "Licensing/search strategy (for operation=clarify): enterprise available, or reuse from OCA/community.",
 			},
 			next_phase: {
 				type: "string",
@@ -725,8 +736,10 @@ export function apply(ctx: { tools: ToolRegistry }, config: OdooSddConfig): void
 			},
 		},
 		async execute(args: {
-			operation: "init" | "status" | "mark_spec_loaded" | "advance" | "fail" | "succeed";
+			operation: "init" | "clarify" | "status" | "mark_spec_loaded" | "advance" | "fail" | "succeed";
 			spec_id: string;
+			mode?: "create" | "bug";
+			licensed?: "enterprise" | "oca" | "community";
 			next_phase?: Phase;
 			approval_marker?: string;
 			approval_source?: "human" | "human-proxy";
@@ -746,6 +759,27 @@ export function apply(ctx: { tools: ToolRegistry }, config: OdooSddConfig): void
 					operation: "init" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
 					summary: summarize(state),
 					detail: `Spec directory initialized at ${displayPath(specDir)} (spec.md, architecture.md, test-plan.md, state.json). Fill spec.md, then mark_spec_loaded.`,
+				};
+			}
+			if (args.operation === "clarify") {
+				const stateC = loadState(specDir);
+				if (args.mode === undefined || args.licensed === undefined) {
+					return {
+						operation: "clarify" as string, phase: stateC.phase as string, ok: false, requireDiagnosis: false,
+						summary: summarize(stateC),
+						detail: "operation=clarify requires BOTH mode (create|bug) and licensed (enterprise|oca|community) to record the intent.",
+					};
+				}
+				stateC.mode = args.mode;
+				stateC.licensed = args.licensed;
+				kbAppend(stateC, "decision", `Intent clarified: mode=${stateC.mode}, licensed=${stateC.licensed}. ${note}`);
+				saveState(stateC);
+				return {
+					operation: "clarify" as string, phase: stateC.phase as string, ok: true, requireDiagnosis: false,
+					summary: summarize(stateC),
+					detail:
+						`Intent recorded: mode=${stateC.mode}, licensed=${stateC.licensed}. ` +
+						"The CLARIFY gate is satisfied — advance to READ_SPEC (approval_marker='APPROVED' in the relevant mode).",
 				};
 			}
 			const state = loadState(specDir);

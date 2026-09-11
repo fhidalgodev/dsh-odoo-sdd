@@ -12,6 +12,8 @@ one recurring failure in the SDD loop.
 - The last three failure entries from the logbook (`kb.json` — blocker nodes
   and the honest `verify-verdict.txt`).
 - The implicated module code and the concrete tracebacks.
+- In **bug** mode, additionally the reported bug description and the located
+  module/files, so the root cause is tied back to the reported symptom.
 
 ## Method
 1. Reproduce the failure from the evidence — do not trust a single surface.

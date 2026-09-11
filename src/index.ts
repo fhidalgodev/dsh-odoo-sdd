@@ -901,6 +901,147 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	}));
 
 	// ---------------------------------------------------------------------
+	// odoo_config — read/update persistent plugin configuration (repos, etc.)
+	// Persists to <projectRoot>/.sdd/config.json — the same plugin-owned dir
+	// as the rest of the SDD state. No secrets here (credentials live in .env).
+	// ---------------------------------------------------------------------
+	const configFile = (): string => join(root(config), ".sdd", "config.json");
+	const loadConfigFile = (): Record<string, unknown> => {
+		const file = configFile();
+		if (!existsSync(file)) return {};
+		try {
+			const parsed = JSON.parse(readFileSync(file, "utf8"));
+			return parsed && typeof parsed === "object" ? parsed : {};
+		} catch {
+			return {};
+		}
+	};
+	const saveConfigFile = (data: Record<string, unknown>): void => {
+		const file = configFile();
+		mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+		writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+		try {
+			chmodSync(file, 0o600);
+		} catch {
+			// best effort
+		}
+	};
+
+	ctx.tools.register(defineTool({
+		name: "odoo_config",
+		description:
+			"Read or update the persistent plugin configuration stored in <projectRoot>/.sdd/config.json. " +
+			"mode=read returns the current values (community/enterprise repository URL + OS path, " +
+			"projectRoot, specsDir, executeAllowlist). mode=set updates them — provide only the fields to " +
+			"change. Singleton call for each repository source. Never accepts or returns secrets (those " +
+			"live in the .env).",
+		parameters: {
+			mode: {
+				type: "string",
+				required: true,
+				enum: ["read", "set"],
+				description: "read (show current config) | set (update provided fields).",
+			},
+			communityRepoUrl: { type: "string", description: "Odoo Community repository URL (e.g. https://github.com/odoo/odoo)." },
+			communityRepoPath: { type: "string", description: "Odoo Community local OS path (overrides URL when set)." },
+			enterpriseRepoUrl: { type: "string", description: "Odoo Enterprise repository URL (e.g. https://github.com/odoo/enterprise)." },
+			enterpriseRepoPath: { type: "string", description: "Odoo Enterprise local OS path (overrides URL when set)." },
+			projectRoot: { type: "string", description: "Workspace root used by the tools." },
+			specsDir: { type: "string", description: "Specs folder (default 'specs')." },
+			executeAllowlist: { type: "array", items: { type: "string" }, description: "Models permitted for odoo_execute mutations." },
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					mode: { type: "string", required: true },
+					ok: { type: "boolean", required: true },
+					config: {
+						type: "object",
+						required: true,
+						additionalProperties: false,
+						properties: {
+							communityRepoUrl: { type: "string", required: true },
+							communityRepoPath: { type: "string", required: true },
+							enterpriseRepoUrl: { type: "string", required: true },
+							enterpriseRepoPath: { type: "string", required: true },
+							projectRoot: { type: "string", required: true },
+							specsDir: { type: "string", required: true },
+							executeAllowlist: { type: "array", required: true, items: { type: "string" } },
+						},
+					},
+					detail: { type: "string", required: true },
+				},
+			},
+			render: (_args: unknown, value: unknown) => {
+				const v = value as { config: Record<string, unknown>; detail: string; ok: boolean };
+				return [text((v.ok ? "Config:\n" : "PROBLEM:\n") + JSON.stringify(v.config, null, 2) + "\n" + v.detail)];
+			},
+		},
+		async execute(args: {
+			mode: "read" | "set";
+			communityRepoUrl?: string;
+			communityRepoPath?: string;
+			enterpriseRepoUrl?: string;
+			enterpriseRepoPath?: string;
+			projectRoot?: string;
+			specsDir?: string;
+			executeAllowlist?: string[];
+		}) {
+			/** Project the stored JSON onto the known, typed configuration shape. */
+			const normalize = (data: Record<string, unknown>) => {
+				const asString = (v: unknown, fallback: string): string => (typeof v === "string" ? v : fallback);
+				const asList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+				return {
+					communityRepoUrl: asString(data["communityRepoUrl"], "https://github.com/odoo/odoo"),
+					communityRepoPath: asString(data["communityRepoPath"], ""),
+					enterpriseRepoUrl: asString(data["enterpriseRepoUrl"], "https://github.com/odoo/enterprise"),
+					enterpriseRepoPath: asString(data["enterpriseRepoPath"], ""),
+					projectRoot: asString(data["projectRoot"], ""),
+					specsDir: asString(data["specsDir"], "specs"),
+					executeAllowlist: asList(data["executeAllowlist"]),
+				};
+			};
+
+			if (args.mode === "read") {
+				return {
+					mode: "read" as string,
+					ok: true,
+					config: normalize(loadConfigFile()),
+					detail: `Stored at ${displayPath(configFile())}.`,
+				};
+			}
+			// mode=set
+			const current = loadConfigFile();
+			const updates: Record<string, unknown> = {};
+			if (args.communityRepoUrl !== undefined) updates["communityRepoUrl"] = args.communityRepoUrl;
+			if (args.communityRepoPath !== undefined) updates["communityRepoPath"] = args.communityRepoPath;
+			if (args.enterpriseRepoUrl !== undefined) updates["enterpriseRepoUrl"] = args.enterpriseRepoUrl;
+			if (args.enterpriseRepoPath !== undefined) updates["enterpriseRepoPath"] = args.enterpriseRepoPath;
+			if (args.projectRoot !== undefined) updates["projectRoot"] = args.projectRoot;
+			if (args.specsDir !== undefined) updates["specsDir"] = args.specsDir;
+			if (args.executeAllowlist !== undefined) updates["executeAllowlist"] = args.executeAllowlist;
+			if (Object.keys(updates).length === 0) {
+				return {
+					mode: "set" as string,
+					ok: false,
+					config: normalize(current),
+					detail: "mode=set requires at least one field to update.",
+				};
+			}
+			const merged = Object.assign({}, current, updates);
+			saveConfigFile(merged);
+			return {
+				mode: "set" as string,
+				ok: true,
+				config: normalize(merged),
+				detail: `Updated ${displayPath(configFile())}.`,
+			};
+		},
+	}));
+
+	// ---------------------------------------------------------------------
 	// Runtime tools: odoo_execute (CRUD/RPC allowlist) + odoo_validate (local)
 	// ---------------------------------------------------------------------
 	registerRuntimeTools(ctx, {

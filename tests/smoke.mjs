@@ -301,5 +301,30 @@ check("odoo_execute denies non-allowlisted model for mutation", ex.denied === tr
 ex = await executeD.execute({ model: "res.users", method: "search_read" });
 check("odoo_execute read on non-allowlisted model rejected as unconfigured (no instance)", ex.denied === true);
 
+
+console.log("== odoo_config (repos + persistent config) ==");
+const projE = join(dir, "projE");
+plugin.apply(fakeCtx, { projectRoot: projE });
+const cfg = registered.get("odoo_config");
+check("odoo_config registered", cfg !== undefined);
+
+let rc = await cfg.execute({ mode: "read" });
+check("read returns default community repo", rc.ok === true && rc.config.communityRepoUrl === "https://github.com/odoo/odoo");
+check("read returns default enterprise repo", rc.config.enterpriseRepoUrl === "https://github.com/odoo/enterprise");
+check("read defaults specsDir", rc.config.specsDir === "specs");
+
+rc = await cfg.execute({ mode: "set" });
+check("set without fields is rejected", rc.ok === false);
+
+rc = await cfg.execute({ mode: "set", communityRepoUrl: "https://gitlab.com/mirror/odoo", communityRepoPath: "/srv/odoo" });
+check("set persists community repo", rc.ok === true && rc.config.communityRepoUrl === "https://gitlab.com/mirror/odoo" && rc.config.communityRepoPath === "/srv/odoo");
+check("config file written", existsSync(join(projE, ".sdd", "config.json")));
+
+rc = await cfg.execute({ mode: "read" });
+check("read reflects persisted values", rc.config.communityRepoPath === "/srv/odoo" && rc.config.enterpriseRepoUrl === "https://github.com/odoo/enterprise");
+
+rc = await cfg.execute({ mode: "set", executeAllowlist: ["sale.order", "stock.move"] });
+check("set persists allowlist", rc.ok === true && Array.isArray(rc.config.executeAllowlist) && rc.config.executeAllowlist.includes("sale.order"));
+
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

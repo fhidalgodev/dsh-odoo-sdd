@@ -17,3 +17,8 @@
         projectRoot: ''
         specsDir: 'specs'
         executeAllowlist: []
+        # Odoo source repositories: URL or local OS path (empty path = use URL).
+        communityRepoUrl: 'https://github.com/odoo/odoo'
+        communityRepoPath: ''
+        enterpriseRepoUrl: 'https://github.com/odoo/enterprise'
+        enterpriseRepoPath: ''

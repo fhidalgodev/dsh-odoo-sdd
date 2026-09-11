@@ -80,6 +80,10 @@ export const Config = z.object({
 	projectRoot: z.string(),
 	specsDir: z.string(),
 	executeAllowlist: z.array(z.string()),
+	communityRepoUrl: z.string(),
+	communityRepoPath: z.string(),
+	enterpriseRepoUrl: z.string(),
+	enterpriseRepoPath: z.string(),
 });
 
 /** Effective deployment configuration after validation. */
@@ -88,6 +92,12 @@ interface OdooSddConfig {
 	specsDir?: string;
 	/** Models permitted for MUTATING calls (create/write/unlink) on odoo_execute. Empty = denied. */
 	executeAllowlist?: string[];
+	/** Odoo Community source: git URL or local path (empty when not set). */
+	communityRepoUrl?: string;
+	communityRepoPath?: string;
+	/** Odoo Enterprise source: git URL or local path (empty when not set). */
+	enterpriseRepoUrl?: string;
+	enterpriseRepoPath?: string;
 }
 
 /** Minimal structural view of the host tool registry. */
@@ -239,6 +249,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		projectRoot: config.projectRoot ?? "",
 		specsDir: config.specsDir ?? "specs",
 		executeAllowlist: config.executeAllowlist ?? [],
+		communityRepoUrl: config.communityRepoUrl ?? "https://github.com/odoo/odoo",
+		communityRepoPath: config.communityRepoPath ?? "",
+		enterpriseRepoUrl: config.enterpriseRepoUrl ?? "https://github.com/odoo/enterprise",
+		enterpriseRepoPath: config.enterpriseRepoPath ?? "",
 	};
 	ctx.inject?.<SddsSettingsProvider>(["settings"], (settingsCtx) => {
 		settingsCtx.settings.installSection(

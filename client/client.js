@@ -47,7 +47,15 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"licEnterprise": "Enterprise",
 		"licOca": "OCA / Comunidad",
 		"licCommunity": "Solo comunidad",
-		"enterModels": "Modelos (separados por coma)"
+		"enterModels": "Modelos (separados por coma)",
+		"repoCommunity": "Repositorio Odoo Community",
+		"repoEnterprise": "Repositorio Odoo Enterprise",
+		"repoUse": "Ruta local",
+		"repoUrl": "URL del repositorio",
+		"repoPath": "Ruta del sistema operativo",
+		"repoUseUrl": "Usar URL",
+		"repoUsePath": "Usar ruta local",
+		"repoDefault": "(por defecto)"
 	};
 	var en = {
 		"nav": "Odoo SDD",
@@ -71,7 +79,15 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"licEnterprise": "Enterprise",
 		"licOca": "OCA / Community",
 		"licCommunity": "Community only",
-		"enterModels": "Models (comma separated)"
+		"enterModels": "Models (comma separated)",
+		"repoCommunity": "Odoo Community repository",
+		"repoEnterprise": "Odoo Enterprise repository",
+		"repoUse": "Local path",
+		"repoUrl": "Repository URL",
+		"repoPath": "OS path",
+		"repoUseUrl": "Use URL",
+		"repoUsePath": "Use local path",
+		"repoDefault": "(default)"
 	};
 
 	var pick = function (locales, key) {
@@ -133,7 +149,18 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		var connLabel = (snap.connectionState || "connUnknown");
 		var canWrite = Boolean(scope) && typeof scope === "object" && (typeof scope.set === "function" || typeof scope.replace === "function");
 
-		var state = react.useState({ mode: snap.mode || "supervised", licensed: snap.licensed || "community", allowlist: (Array.isArray(snap.executeAllowlist) ? snap.executeAllowlist : []).join(", "), saved: false });
+		var state = react.useState({
+			mode: snap.mode || "supervised",
+			licensed: snap.licensed || "community",
+			allowlist: (Array.isArray(snap.executeAllowlist) ? snap.executeAllowlist : []).join(", "),
+			communityUse: (snap.communityRepoPath || "") ? "path" : "url",
+			communityUrl: snap.communityRepoUrl || "",
+			communityPath: snap.communityRepoPath || "",
+			enterpriseUse: (snap.enterpriseRepoPath || "") ? "path" : "url",
+			enterpriseUrl: snap.enterpriseRepoUrl || "",
+			enterprisePath: snap.enterpriseRepoPath || "",
+			saved: false
+		});
 		var form = state[0]; var setForm = state[1];
 
 		if (react.useEffect && scope && typeof scope.subscribe === "function") {
@@ -141,7 +168,15 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 				return scope.subscribe(function () {
 					var next = {};
 					try { next = (scope.getSnapshot && scope.getSnapshot()) || {}; } catch (e) { next = {}; }
-					setForm({ mode: next.mode || "supervised", licensed: next.licensed || "community", allowlist: (Array.isArray(next.executeAllowlist) ? next.executeAllowlist : []).join(", "), saved: false });
+					setForm({
+						mode: next.mode || "supervised", licensed: next.licensed || "community",
+						allowlist: (Array.isArray(next.executeAllowlist) ? next.executeAllowlist : []).join(", "),
+						communityUse: (next.communityRepoPath || "") ? "path" : "url",
+						communityUrl: next.communityRepoUrl || "", communityPath: next.communityRepoPath || "",
+						enterpriseUse: (next.enterpriseRepoPath || "") ? "path" : "url",
+						enterpriseUrl: next.enterpriseRepoUrl || "", enterprisePath: next.enterpriseRepoPath || "",
+						saved: false
+					});
 				});
 			}, [scope]);
 		}
@@ -150,12 +185,25 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			if (!canWrite) return;
 			var allowVals = (form.allowlist || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
 			var done = false;
+			var payload = {
+				mode: form.mode,
+				licensed: form.licensed,
+				executeAllowlist: allowVals,
+				projectRoot: projectRoot,
+				specsDir: specsDir,
+				communityRepoUrl: form.communityUse === "url" ? form.communityUrl : "",
+				communityRepoPath: form.communityUse === "path" ? form.communityPath : "",
+				enterpriseRepoUrl: form.enterpriseUse === "url" ? form.enterpriseUrl : "",
+				enterpriseRepoPath: form.enterpriseUse === "path" ? form.enterprisePath : ""
+			};
 			try {
 				if (typeof scope.replace === "function") {
-					scope.replace({ mode: form.mode, licensed: form.licensed, executeAllowlist: allowVals, projectRoot: projectRoot, specsDir: specsDir });
+					scope.replace(payload);
 					done = true;
 				} else if (typeof scope.set === "function") {
 					scope.set("mode", form.mode); scope.set("licensed", form.licensed); scope.set("executeAllowlist", allowVals);
+					scope.set("communityRepoUrl", payload.communityRepoUrl); scope.set("communityRepoPath", payload.communityRepoPath);
+					scope.set("enterpriseRepoUrl", payload.enterpriseRepoUrl); scope.set("enterpriseRepoPath", payload.enterpriseRepoPath);
 					done = true;
 				}
 			} catch (e) { done = false; }
@@ -185,6 +233,33 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			allowCtl = react.createElement("input", { type: "text", value: form.allowlist, onChange: onChange("allowlist"), disabled: !canWrite, style: STYLE.input, placeholder: "sale.order, stock.move" });
 		}
 
+		// One repository configurator: toggle URL vs OS path, edit the active value.
+		var repoCtl = function (prefix) {
+			var use = form[prefix + "Use"] || "url";
+			var urlVal = form[prefix + "Url"] || "";
+			var pathVal = form[prefix + "Path"] || "";
+			var toggle = function (nextUse) { var n = {}; n[prefix + "Use"] = nextUse; n.saved = false; setForm(Object.assign({}, form, n)); };
+			var editVal = function (val) { var n = {}; n[prefix + (use === "url" ? "Url" : "Path")] = val; n.saved = false; setForm(Object.assign({}, form, n)); };
+
+			if (!canWrite) {
+				var shown = use === "url" ? urlVal : pathVal;
+				return react.createElement("div", { style: STYLE.label }, (use === "url" ? t("repoUseUrl") + ": " + shown : t("repoUsePath") + ": " + shown));
+			}
+
+			var rows = [];
+			rows.push(react.createElement("div", { style: { display: "flex", gap: 8 } },
+				react.createElement("button", { type: "button", onClick: function () { toggle("url"); }, style: use === "url" ? STYLE.btn : STYLE.btnDisabled, disabled: use === "url" }, t("repoUseUrl")),
+				react.createElement("button", { type: "button", onClick: function () { toggle("path"); }, style: use === "path" ? STYLE.btn : STYLE.btnDisabled, disabled: use === "path" }, t("repoUsePath"))
+			));
+			rows.push(react.createElement("input", {
+				type: "text", value: use === "url" ? urlVal : pathVal,
+				placeholder: use === "url" ? "https://github.com/odoo/odoo" : "/path/to/odoo",
+				onChange: function (e) { editVal(e.target.value); },
+				disabled: !canWrite, style: STYLE.input
+			}));
+			return react.createElement("div", { style: { flexDirection: "column", gap: 6, display: "flex" } }, rows);
+		};
+
 		var readonlyBanner = canWrite ? null : react.createElement("div", { style: STYLE.readonlyBanner },
 			react.createElement("div", { style: { fontWeight: 600 } }, t("readonly")),
 			react.createElement("div", { style: { fontSize: 12 } }, t("readonlyHint"))
@@ -211,6 +286,10 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 					? react.createElement("div", { style: STYLE.row },
 						react.createElement("button", { onClick: persist, style: form.saved ? STYLE.btnDisabled : STYLE.btn }, form.saved ? t("saved") : t("save")))
 					: null),
+			react.createElement(SectionCard, { t: t, title: t("repoCommunity") },
+				repoCtl("community")),
+			react.createElement(SectionCard, { t: t, title: t("repoEnterprise") },
+				repoCtl("enterprise")),
 			react.createElement(SectionCard, { t: t, title: t("pipeline") },
 				react.createElement("div", { style: STYLE.hint }, t("pipelineHint")))
 		);

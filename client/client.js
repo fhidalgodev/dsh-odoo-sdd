@@ -144,7 +144,12 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", name: "odoo-sdd", factory: (r
 		}
 		return missing;
 	};
+	// Services the host injects into the `ctx` passed to `apply()`. Without
+	// this list, `ctx.locale` / `ctx.slots` are unavailable — exactly why
+	// apply() failed with "cannot get property locale without inject".
+	var inject = ["slots", "locale", "theme"];
 	exports.apply = apply;
+	exports.inject = inject;
 	exports.name = "odoo-sdd";
 
 	return module.exports;

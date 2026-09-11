@@ -95,6 +95,12 @@ interface ToolRegistry {
 	register(tool: unknown): void;
 }
 
+/** Optional host services a plugin may opt into. */
+interface HostContextServices {
+	/** Cordis dependency injection of host services by name. */
+	inject?<T = void>(deps: string[], callback: (services: T) => void): unknown;
+}
+
 /** A visible plain-text content block (dsh-llm TextBlock). */
 function text(value: string): { type: "text"; text: string } {
 	return { type: "text", text: value };
@@ -196,7 +202,7 @@ function gitignoreCoverage(projectRoot: string): { covered: boolean; missing: st
  * @param ctx - registrant context carrying the tool registry.
  * @param config - deployment configuration from the patch layer.
  */
-export function apply(ctx: { tools: ToolRegistry }, config: OdooSddConfig): void {
+export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config: OdooSddConfig): void {
 	// Q3: fail-closed host guard — refuse to mount against a host that does
 	// not expose the tools registry (older/incompatible harness) with a
 	// clear message instead of a cryptic boot failure.
@@ -213,6 +219,44 @@ export function apply(ctx: { tools: ToolRegistry }, config: OdooSddConfig): void
 		const credentials: OdooCredentials | null = loaded.ok ? loaded.credentials : null;
 		return sanitizeForPersist(textValue, credentials);
 	};
+
+	// Fase 1: register the deployment configuration as an installable settings
+	// section (namespace "odoo-sdd"). This makes dsh-odoo-sdd appear as a
+	// configurable card in Settings → Plugins → Plugin configuration, exactly
+	// like dsh-agent-loop / dsh-bash-local / dsh-llm-* do via installSection —
+	// no browser half needed.
+	const ODOO_SDD_NAMESPACE = "odoo-sdd";
+	interface SddsSettingsHooks {
+		setSource(current: () => unknown): void;
+		onChange(): void;
+	}
+	type SddsSettingsProvider = {
+		settings: {
+			installSection(owner: unknown, ns: string, schema: unknown, entry: unknown, hooks: SddsSettingsHooks): void;
+		};
+	};
+	const sddsDefaultConfig = {
+		projectRoot: config.projectRoot ?? "",
+		specsDir: config.specsDir ?? "specs",
+		executeAllowlist: config.executeAllowlist ?? [],
+	};
+	ctx.inject?.<SddsSettingsProvider>(["settings"], (settingsCtx) => {
+		settingsCtx.settings.installSection(
+			ctx,
+			ODOO_SDD_NAMESPACE,
+			Config,
+			sddsDefaultConfig,
+			{
+				setSource: () => {
+					// The user may override deployment defaults from Settings;
+					// a later step can bind this to the live tools resolver.
+				},
+				onChange: () => {
+					// Bookmark for reacting to allowlist/delegation edits later.
+				},
+			},
+		);
+	});
 	// ---------------------------------------------------------------------
 	// odoo_connect — probe + authenticate (never echoes secrets)
 	// ---------------------------------------------------------------------

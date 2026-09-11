@@ -49,7 +49,21 @@ import {
 } from "./setup-state.js";
 import { withAudit } from "./audit.js";
 import { registerRuntimeTools } from "./tools-runtime.js";
-import { appendAuditLine } from "./audit.js";
+import { appendAuditLine, recordAudit } from "./audit.js";
+import {
+	readActiveState,
+	writeActiveState,
+	createCheckpoint,
+	listCheckpoints,
+	restoreCheckpointFiles,
+	dropCheckpoint,
+	purgeCheckpoints,
+	readJournal,
+	writeJournal,
+	appendDataOp,
+	type DataOp,
+} from "./checkpoints.js";
+import { scanModule } from "./security-scan.js";
 import { OdooClient } from "./odoo-client.js";
 import {
 	loadState,
@@ -62,6 +76,7 @@ import {
 	summarize,
 	kbRead,
 	kbAppend,
+	readVerdict,
 	type Phase,
 	PHASES,
 } from "./sdd-state.js";
@@ -86,6 +101,11 @@ export const Config = z.object({
 	enterpriseRepoPath: z.string(),
 	autonomy: z.string(),
 	licensed: z.string(),
+	requireCheckpointBeforeMutation: z.boolean(),
+	securityReviewRequired: z.boolean(),
+	securityInterviewRequired: z.boolean(),
+	auditAllTools: z.boolean(),
+	maxCheckpoints: z.number(),
 });
 
 /** Effective deployment configuration after validation. */
@@ -102,19 +122,33 @@ interface OdooSddConfig {
 	enterpriseRepoPath?: string;
 	/** Default delegation mode: supervised | autonomous. */
 	autonomy?: string;
-	/** Default licensing strategy: enterprise | oca | community. */
+	/** Default licensing strategy: community | enterprise. */
 	licensed?: string;
+	/** Refuse mutating calls until a checkpoint exists (fail-closed). */
+	requireCheckpointBeforeMutation?: boolean;
+	/** Require a clean security review before DONE. */
+	securityReviewRequired?: boolean;
+	/** Require the security interview (groups/ACL/rules) in CLARIFY. */
+	securityInterviewRequired?: boolean;
+	/** Record every tool call of the run in the audit log. */
+	auditAllTools?: boolean;
+	/** How many checkpoints to retain. */
+	maxCheckpoints?: number;
 }
 
 /** Minimal structural view of the host tool registry. */
 interface ToolRegistry {
 	register(tool: unknown): void;
+	/** Monotonic execution guard: a returned string denies the call. */
+	guard?(guard: (execution: unknown) => string | undefined): unknown;
 }
 
 /** Optional host services a plugin may opt into. */
 interface HostContextServices {
 	/** Cordis dependency injection of host services by name. */
 	inject?<T = void>(deps: string[], callback: (services: T) => void): unknown;
+	/** Cordis event subscription (e.g. `tools/result` for observation). */
+	on?(event: string, listener: (...args: unknown[]) => void): unknown;
 }
 
 /** A visible plain-text content block (dsh-llm TextBlock). */
@@ -261,6 +295,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		enterpriseRepoPath: config.enterpriseRepoPath ?? "",
 		autonomy: config.autonomy ?? "supervised",
 		licensed: config.licensed ?? "community",
+		requireCheckpointBeforeMutation: config.requireCheckpointBeforeMutation ?? true,
+		securityReviewRequired: config.securityReviewRequired ?? true,
+		securityInterviewRequired: config.securityInterviewRequired ?? true,
+		auditAllTools: config.auditAllTools ?? true,
+		maxCheckpoints: config.maxCheckpoints ?? 5,
 	};
 	ctx.inject?.<SddsSettingsProvider>(["settings"], (settingsCtx) => {
 		settingsCtx.settings.installSection(
@@ -746,7 +785,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			operation: {
 				type: "string",
 				required: true,
-				enum: ["init", "clarify", "status", "mark_spec_loaded", "advance", "fail", "succeed"],
+				enum: ["init", "clarify", "status", "mark_spec_loaded", "advance", "fail", "succeed", "rollback"],
 				description: "State-machine operation to perform.",
 			},
 			spec_id: {
@@ -772,6 +811,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			approval_marker: {
 				type: "string",
 				description: "Verbatim approval marker for gated transitions; only 'APPROVED' is accepted.",
+			},
+			checkpoint_id: {
+				type: "string",
+				description: "Checkpoint to restore for operation=rollback (defaults to the active one).",
 			},
 			approval_source: {
 				type: "string",
@@ -802,13 +845,14 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 		},
 		async execute(args: {
-			operation: "init" | "clarify" | "status" | "mark_spec_loaded" | "advance" | "fail" | "succeed";
+			operation: "init" | "clarify" | "status" | "mark_spec_loaded" | "advance" | "fail" | "succeed" | "rollback";
 			spec_id: string;
 			mode?: "create" | "bug";
 			licensed?: "community" | "enterprise";
 			next_phase?: Phase;
 			approval_marker?: string;
 			approval_source?: "human" | "human-proxy";
+			checkpoint_id?: string;
 			detail?: string;
 		}) {
 			const specDir = specDirOf(config, args.spec_id);
@@ -821,10 +865,41 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				initSpecDir(specDir);
 				const state = loadState(specDir);
 				saveState(state);
+				writeActiveState(root(config), { specId: args.spec_id, phase: state.phase });
 				return {
 					operation: "init" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
 					summary: summarize(state),
 					detail: `Spec directory initialized at ${displayPath(specDir)} (spec.md, architecture.md, test-plan.md, state.json). Fill spec.md, then mark_spec_loaded.`,
+				};
+			}
+			if (args.operation === "rollback") {
+				const projectRoot = root(config);
+				const active = readActiveState(projectRoot);
+				const checkpointId = args.checkpoint_id ?? active.checkpointId ?? null;
+				if (checkpointId === null) {
+					return {
+						operation: "rollback" as string, phase: loadState(specDir).phase as string, ok: false, requireDiagnosis: false,
+						summary: summarize(loadState(specDir)),
+						detail: "No checkpoint to roll back to. Create one with sdd_checkpoint operation=create.",
+					};
+				}
+				const restored = restoreCheckpointFiles(projectRoot, checkpointId);
+				const st = loadState(specDir);
+				st.phase = "WRITE_CODE";
+				kbAppend(st, "blocker", `Rollback to ${checkpointId}: restored ${restored.restored.length} file(s). ${note}`.trim());
+				saveState(st);
+				writeActiveState(projectRoot, { specId: args.spec_id, phase: st.phase });
+				appendAuditLine(projectRoot, "sdd_phase/rollback", { checkpoint: checkpointId, spec: args.spec_id }, clientFor(projectRoot).credentials, {
+					phase: st.phase, specId: args.spec_id, reason: note,
+				});
+				return {
+					operation: "rollback" as string, phase: st.phase as string, ok: true, requireDiagnosis: false,
+					summary: summarize(st),
+					detail:
+						`Rolled back to ${checkpointId}: ${restored.restored.length} file(s) restored` +
+						(restored.missing.length > 0 ? `, ${restored.missing.length} failed` : "") +
+						`. Phase is now WRITE_CODE — re-apply the change and verify again. ` +
+						"NOTE: a module install/upgrade is not reverted at the database level.",
 				};
 			}
 			if (args.operation === "clarify") {
@@ -851,10 +926,14 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const state = loadState(specDir);
 			if (args.operation === "status") {
 				const kb = kbRead(specDir);
+				const active = readActiveState(root(config));
+				writeActiveState(root(config), { specId: args.spec_id, phase: state.phase });
 				return {
 					operation: "status" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
 					summary: summarize(state),
-					detail: `KB nodes: ${kb.length}. Last: ${kb.length > 0 ? kb[kb.length - 1]!.summary : "none"}`,
+					detail:
+						`KB nodes: ${kb.length}. Last: ${kb.length > 0 ? kb[kb.length - 1]!.summary : "none"}` +
+						`\nCheckpoint: ${active.checkpointId ?? "none (mutations are blocked while the policy requires one)"}`,
 				};
 			}
 			if (args.operation === "mark_spec_loaded") {
@@ -881,6 +960,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					args.approval_source ?? "human",
 					readAutonomy(root(config)),
 				);
+				if (result.ok) {
+					writeActiveState(root(config), { specId: args.spec_id, phase: result.state.phase });
+				}
 				return {
 					operation: "advance" as string, phase: result.state.phase as string, ok: result.ok, requireDiagnosis: false,
 					summary: summarize(result.state),
@@ -959,6 +1041,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			executeAllowlist: { type: "array", items: { type: "string" }, description: "Models permitted for odoo_execute mutations." },
 			autonomy: { type: "string", enum: ["supervised", "autonomous"], description: "Default delegation mode." },
 			licensed: { type: "string", enum: ["community", "enterprise"], description: "Licensing strategy. OCA/community is always searched as well." },
+			requireCheckpointBeforeMutation: { type: "boolean", description: "Refuse mutations until a checkpoint exists (fail-closed)." },
+			securityReviewRequired: { type: "boolean", description: "Require a clean security review before DONE." },
+			securityInterviewRequired: { type: "boolean", description: "Require the security interview (groups/ACL/rules) before ARCHITECTURE." },
+			auditAllTools: { type: "boolean", description: "Record every tool call of the run in .sdd/audit.jsonl." },
+			maxCheckpoints: { type: "number", description: "How many checkpoints to retain." },
 		},
 		output: {
 			schema: {
@@ -981,6 +1068,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							executeAllowlist: { type: "array", required: true, items: { type: "string" } },
 							autonomy: { type: "string", required: true },
 							licensed: { type: "string", required: true },
+							requireCheckpointBeforeMutation: { type: "boolean", required: true },
+							securityReviewRequired: { type: "boolean", required: true },
+							securityInterviewRequired: { type: "boolean", required: true },
+							auditAllTools: { type: "boolean", required: true },
+							maxCheckpoints: { type: "number", required: true },
 						},
 					},
 					detail: { type: "string", required: true },
@@ -1002,6 +1094,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			executeAllowlist?: string[];
 			autonomy?: string;
 			licensed?: string;
+			requireCheckpointBeforeMutation?: boolean;
+			securityReviewRequired?: boolean;
+			securityInterviewRequired?: boolean;
+			auditAllTools?: boolean;
+			maxCheckpoints?: number;
 		}) {
 			/** Project the stored JSON onto the known, typed configuration shape. */
 			const normalize = (data: Record<string, unknown>) => {
@@ -1019,6 +1116,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					executeAllowlist: asList(data["executeAllowlist"]),
 					autonomy: asString(data["autonomy"], "supervised"),
 					licensed: asLicense(data["licensed"], "community"),
+					requireCheckpointBeforeMutation: typeof data["requireCheckpointBeforeMutation"] === "boolean" ? data["requireCheckpointBeforeMutation"] : true,
+					securityReviewRequired: typeof data["securityReviewRequired"] === "boolean" ? data["securityReviewRequired"] : true,
+					securityInterviewRequired: typeof data["securityInterviewRequired"] === "boolean" ? data["securityInterviewRequired"] : true,
+					auditAllTools: typeof data["auditAllTools"] === "boolean" ? data["auditAllTools"] : true,
+					maxCheckpoints: typeof data["maxCheckpoints"] === "number" ? data["maxCheckpoints"] : 5,
 				};
 			};
 
@@ -1042,6 +1144,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.executeAllowlist !== undefined) updates["executeAllowlist"] = args.executeAllowlist;
 			if (args.autonomy !== undefined) updates["autonomy"] = args.autonomy;
 			if (args.licensed !== undefined) updates["licensed"] = args.licensed;
+			if (args.requireCheckpointBeforeMutation !== undefined) updates["requireCheckpointBeforeMutation"] = args.requireCheckpointBeforeMutation;
+			if (args.securityReviewRequired !== undefined) updates["securityReviewRequired"] = args.securityReviewRequired;
+			if (args.securityInterviewRequired !== undefined) updates["securityInterviewRequired"] = args.securityInterviewRequired;
+			if (args.auditAllTools !== undefined) updates["auditAllTools"] = args.auditAllTools;
+			if (args.maxCheckpoints !== undefined) updates["maxCheckpoints"] = args.maxCheckpoints;
 			if (Object.keys(updates).length === 0) {
 				return {
 					mode: "set" as string,
@@ -1072,6 +1179,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		const data = loadConfigFile();
 		const asString = (v: unknown, fallback: string): string => (typeof v === "string" && v !== "" ? v : fallback);
 		const asList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+		const asBool = (v: unknown, fallback: boolean): boolean => (typeof v === "boolean" ? v : fallback);
+		const asNum = (v: unknown, fallback: number): number => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
 		return {
 			projectRoot: asString(data["projectRoot"], config.projectRoot ?? root(config)),
 			specsDir: asString(data["specsDir"], config.specsDir ?? "specs"),
@@ -1082,14 +1191,507 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			enterpriseRepoPath: asString(data["enterpriseRepoPath"], config.enterpriseRepoPath ?? ""),
 			autonomy: asString(data["autonomy"], config.autonomy ?? "supervised"),
 			licensed: ((v: unknown, fb: string): string => (asString(v, fb) === "enterprise" ? "enterprise" : "community"))(data["licensed"], config.licensed ?? "community"),
+			requireCheckpointBeforeMutation: asBool(data["requireCheckpointBeforeMutation"], config.requireCheckpointBeforeMutation ?? true),
+			securityReviewRequired: asBool(data["securityReviewRequired"], config.securityReviewRequired ?? true),
+			securityInterviewRequired: asBool(data["securityInterviewRequired"], config.securityInterviewRequired ?? true),
+			auditAllTools: asBool(data["auditAllTools"], config.auditAllTools ?? true),
+			maxCheckpoints: asNum(data["maxCheckpoints"], config.maxCheckpoints ?? 5),
 		};
 	};
+
+	// ---------------------------------------------------------------------
+	// sdd_checkpoint — snapshot / restore / journal (the rollback surface)
+	// ---------------------------------------------------------------------
+	/** Read one checkpoint's journal file directly (not the active one). */
+	const readCheckpointJournalFile = (projectRoot: string, id: string): DataOp[] => {
+		const file = join(projectRoot, ".sdd", "checkpoints", id, "journal.json");
+		if (!existsSync(file)) return [];
+		try {
+			return JSON.parse(readFileSync(file, "utf8")) as DataOp[];
+		} catch {
+			return [];
+		}
+	};
+
+	/**
+	 * Best-effort undo of the journaled data operations, newest first:
+	 *   create -> unlink the created ids;  write -> restore the pre-image;
+	 *   unlink -> re-create the pre-image rows.
+	 * What cannot be undone is reported, never silently swallowed.
+	 */
+	const undoJournal = async (projectRoot: string, checkpointId: string): Promise<{ undone: string[]; detail: string }> => {
+		const ops = readCheckpointJournalFile(projectRoot, checkpointId);
+		if (ops.length === 0) return { undone: [], detail: "nothing journaled" };
+		const { client } = clientFor(projectRoot);
+		if (client === null) return { undone: [], detail: "no instance configured — journal left intact" };
+		const undone: string[] = [];
+		const failed: string[] = [];
+		for (const op of [...ops].reverse()) {
+			try {
+				if (op.method === "create" && op.createdIds.length > 0) {
+					const r = await client.executeKw<unknown>(op.model, "unlink", [op.createdIds], {});
+					if (r.ok) undone.push(`unlink ${op.model} ${JSON.stringify(op.createdIds)}`);
+					else failed.push(`${op.model}.unlink: ${r.error.slice(0, 120)}`);
+				} else if (op.method === "write" && op.preImage.length > 0) {
+					for (const row of op.preImage) {
+						const id = Number(row["id"]);
+						if (!Number.isFinite(id)) continue;
+						const values: Record<string, unknown> = { ...row };
+						delete values["id"];
+						const r = await client.executeKw<unknown>(op.model, "write", [[id], values], {});
+						if (r.ok) undone.push(`restore ${op.model} ${id}`);
+						else failed.push(`${op.model}.write ${id}: ${r.error.slice(0, 120)}`);
+					}
+				} else if (op.method === "unlink" && op.preImage.length > 0) {
+					for (const row of op.preImage) {
+						const values: Record<string, unknown> = { ...row };
+						delete values["id"];
+						const r = await client.executeKw<unknown>(op.model, "create", [values], {});
+						if (r.ok) undone.push(`recreate ${op.model}`);
+						else failed.push(`${op.model}.create: ${r.error.slice(0, 120)}`);
+					}
+				}
+			} catch (err) {
+				failed.push(err instanceof Error ? err.message.slice(0, 120) : String(err));
+			}
+		}
+		if (failed.length === 0) {
+			writeJournalForCheckpoint(projectRoot, checkpointId, []);
+			return { undone, detail: `${undone.length} operation(s) undone` };
+		}
+		return {
+			undone,
+			detail: `${undone.length} undone, ${failed.length} FAILED (journal kept): ${failed.slice(0, 3).join("; ")}`,
+		};
+	};
+
+	/** Replace one checkpoint's journal (after a clean undo). */
+	const writeJournalForCheckpoint = (projectRoot: string, checkpointId: string, ops: DataOp[]): void => {
+		try {
+			writeFileSync(join(projectRoot, ".sdd", "checkpoints", checkpointId, "journal.json"), JSON.stringify(ops, null, 2), { mode: 0o600 });
+		} catch {
+			// best effort
+		}
+	};
+
+	ctx.tools.register(defineTool({
+		name: "sdd_checkpoint",
+		description:
+			"Snapshot and restore the work. operation=create copies the given directories into " +
+			".sdd/checkpoints/<id>/ and makes that checkpoint ACTIVE (mutations are refused until one " +
+			"exists when the policy requires it). operation=list shows the checkpoints. operation=restore " +
+			"puts the files back and, with restore_data=true AND confirm_destructive=true, undoes the " +
+			"journaled data mutations (best-effort). operation=drop removes one. operation=journal lists " +
+			"the data operations recorded since the active checkpoint. Limits: files are restored; a " +
+			"module install/upgrade is NOT reverted at the database level.",
+		parameters: {
+			operation: {
+				type: "string",
+				required: true,
+				enum: ["create", "list", "restore", "drop", "journal"],
+				description: "Checkpoint operation.",
+			},
+			label: { type: "string", description: "Human label for operation=create." },
+			dirs: { type: "array", items: { type: "string" }, description: "Directories (relative to the project root) to snapshot; default [\".\"]." },
+			spec_id: { type: "string", description: "Spec id recorded in the checkpoint metadata." },
+			checkpoint_id: { type: "string", description: "Target checkpoint for restore/drop/journal." },
+			restore_data: { type: "boolean", description: "Also undo journaled data mutations (restore only)." },
+			confirm_destructive: { type: "boolean", description: "REQUIRED true when restore_data=true." },
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean", required: true },
+					operation: { type: "string", required: true },
+					activeCheckpoint: { type: "string" },
+					restored: { type: "array", required: true, items: { type: "string" } },
+					detail: { type: "string", required: true },
+				},
+			},
+			render: (_args: unknown, value: unknown) => [text((value as { detail: string }).detail)],
+		},
+		async execute(args: {
+			operation: "create" | "list" | "restore" | "drop" | "journal";
+			label?: string;
+			dirs?: string[];
+			spec_id?: string;
+			checkpoint_id?: string;
+			restore_data?: boolean;
+			confirm_destructive?: boolean;
+		}) {
+			const cfg = effectiveConfig();
+			const projectRoot = cfg.projectRoot;
+			const active = readActiveState(projectRoot);
+
+			if (args.operation === "list") {
+				const all = listCheckpoints(projectRoot);
+				const lines = all.map((c) => `${c.id}  [${c.phase ?? "?"}] ${c.label} — ${c.files.length} file(s)`);
+				return {
+					ok: true, operation: "list" as string, activeCheckpoint: active.checkpointId ?? undefined,
+					restored: [] as string[],
+					detail: `Active: ${active.checkpointId ?? "none"}\nCheckpoints (${all.length}):\n${lines.join("\n") || "(none)"}`,
+				};
+			}
+
+			if (args.operation === "journal") {
+				const ops = args.checkpoint_id ? readCheckpointJournalFile(projectRoot, args.checkpoint_id) : readJournal(projectRoot);
+				const lines = ops.map((o) => `${o.ts} ${o.model}.${o.method} ids=${JSON.stringify(o.ids)} created=${JSON.stringify(o.createdIds)}`);
+				return {
+					ok: true, operation: "journal" as string, activeCheckpoint: active.checkpointId ?? undefined,
+					restored: [] as string[],
+					detail: `Journaled operations (${ops.length}):\n${lines.join("\n") || "(none)"}`,
+				};
+			}
+
+			if (args.operation === "drop") {
+				if (!args.checkpoint_id) {
+					return { ok: false, operation: "drop" as string, restored: [] as string[], detail: "operation=drop requires checkpoint_id." };
+				}
+				const dropped = dropCheckpoint(projectRoot, args.checkpoint_id);
+				return {
+					ok: dropped, operation: "drop" as string,
+					activeCheckpoint: readActiveState(projectRoot).checkpointId ?? undefined,
+					restored: [] as string[],
+					detail: dropped ? `Dropped ${args.checkpoint_id}.` : `Checkpoint ${args.checkpoint_id} not found.`,
+				};
+			}
+
+			if (args.operation === "create") {
+				const label = args.label ?? `before-change`;
+				const dirs = Array.isArray(args.dirs) && args.dirs.length > 0 ? args.dirs : ["."];
+				const specId = args.spec_id ?? active.specId ?? null;
+				const manifest = createCheckpoint(projectRoot, {
+					label,
+					dirs,
+					specId,
+					phase: active.phase,
+					maxBytes: 25 * 1024 * 1024,
+				});
+				if (manifest === null) {
+					return { ok: false, operation: "create" as string, restored: [] as string[], detail: "Could not create the checkpoint (filesystem error)." };
+				}
+				const purged = purgeCheckpoints(projectRoot, cfg.maxCheckpoints);
+				appendAuditLine(projectRoot, "sdd_checkpoint/create", { label, dirs }, clientFor(projectRoot).credentials, {
+					phase: active.phase ?? undefined, specId: specId ?? undefined,
+				});
+				return {
+					ok: true, operation: "create" as string, activeCheckpoint: manifest.id,
+					restored: [] as string[],
+					detail:
+						`Checkpoint ${manifest.id} created at ${displayPath(join(projectRoot, ".sdd", "checkpoints", manifest.id))} ` +
+						`(${manifest.files.length} file(s)${manifest.truncated ? ", TRUNCATED by size budget" : ""}).` +
+						(purged > 0 ? ` Purged ${purged} old checkpoint(s) (maxCheckpoints=${cfg.maxCheckpoints}).` : ""),
+				};
+			}
+
+			// restore
+			if (!args.checkpoint_id) {
+				return { ok: false, operation: "restore" as string, restored: [] as string[], detail: "operation=restore requires checkpoint_id." };
+			}
+			const files = restoreCheckpointFiles(projectRoot, args.checkpoint_id);
+			const restoredData: string[] = [];
+			let dataNote = "data restore not requested";
+			if (args.restore_data === true) {
+				if (args.confirm_destructive !== true) {
+					return {
+						ok: false, operation: "restore" as string, restored: files.restored,
+						detail: `Files restored (${files.restored.length}). Data restore refused: restore_data=true requires confirm_destructive=true.`,
+					};
+				}
+				const undo = await undoJournal(projectRoot, args.checkpoint_id);
+				restoredData.push(...undo.undone);
+				dataNote = undo.detail;
+			}
+			appendAuditLine(projectRoot, "sdd_checkpoint/restore", { checkpoint: args.checkpoint_id, restore_data: args.restore_data === true }, clientFor(projectRoot).credentials, {
+				phase: active.phase ?? undefined, specId: active.specId ?? undefined,
+			});
+			return {
+				ok: true, operation: "restore" as string, activeCheckpoint: readActiveState(projectRoot).checkpointId ?? undefined,
+				restored: files.restored,
+				detail:
+					`Restored ${files.restored.length} file(s) from ${args.checkpoint_id}` +
+					(files.missing.length > 0 ? `; ${files.missing.length} failed: ${files.missing.slice(0, 5).join(", ")}` : "") +
+					`. Data undo: ${dataNote}` +
+					(restoredData.length > 0 ? ` (${restoredData.length} record op(s))` : ""),
+			};
+		},
+	}));
+
+	// ---------------------------------------------------------------------
+	// odoo_security_scan — local static security review of a module tree
+	// ---------------------------------------------------------------------
+	ctx.tools.register(defineTool({
+		name: "odoo_security_scan",
+		description:
+			"Static security review of an Odoo module directory, WITHOUT an instance. Flags raw SQL built " +
+			"by concatenation, dynamic execution/deserialization, hardcoded secrets, unjustified sudo(), " +
+			"auth=\"none\" routes, disabled CSRF, QWeb t-raw (XSS) and leftover debug hooks. Returns " +
+			"file:line findings; any ERROR blocks DONE under the securityReviewRequired policy.",
+		parameters: {
+			module_dir: { type: "string", required: true, description: "Module directory to scan (absolute, or relative to the project root)." },
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					clean: { type: "boolean", required: true },
+					scannedFiles: { type: "number", required: true },
+					count: { type: "number", required: true },
+					findings: { type: "array", required: true, items: { type: "object", additionalProperties: true } },
+					detail: { type: "string", required: true },
+				},
+			},
+			render: (_args: unknown, value: unknown) => [text((value as { detail: string }).detail)],
+		},
+		async execute(args: { module_dir: string }) {
+			const cfg = effectiveConfig();
+			const moduleDir = args.module_dir.startsWith("/") ? args.module_dir : join(cfg.projectRoot, args.module_dir);
+			const result = scanModule(moduleDir);
+			const lines = result.findings.map((f) => `${f.severity} ${f.rule} ${f.file}:${f.line} — ${f.message}\n    hint: ${f.hint}`);
+			return {
+				clean: result.clean,
+				scannedFiles: result.scannedFiles,
+				count: result.findings.length,
+				findings: result.findings.map((f) => ({ ...f })),
+				detail:
+					`Scanned ${result.scannedFiles} file(s) under ${displayPath(moduleDir)}${result.truncated ? " (truncated)" : ""}. ` +
+					`${result.findings.length} finding(s); clean=${result.clean}.\n` +
+					(lines.join("\n") || "No findings."),
+			};
+		},
+	}));
+
+	// ---------------------------------------------------------------------
+	// sdd_handoff — clean closing report for the spec
+	// ---------------------------------------------------------------------
+	ctx.tools.register(defineTool({
+		name: "sdd_handoff",
+		description:
+			"Write the closing handoff for a spec: final phase, honest verdict, KB decisions/blockers, " +
+			"checkpoints, journaled data operations, effective configuration and next steps, into " +
+			"specs/<id>/handoff.md. Use it when the pipeline reaches DONE or BLOCKED so the next session " +
+			"(or a human) starts from a clean, readable state.",
+		parameters: {
+			spec_id: { type: "string", required: true, description: "Spec directory id." },
+			summary: { type: "string", description: "Optional summary line(s) to lead the document." },
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					ok: { type: "boolean", required: true },
+					file: { type: "string", required: true },
+					detail: { type: "string", required: true },
+				},
+			},
+			render: (_args: unknown, value: unknown) => [text((value as { detail: string }).detail)],
+		},
+		async execute(args: { spec_id: string; summary?: string }) {
+			const cfg = effectiveConfig();
+			const specDir = specDirOf(config, args.spec_id);
+			const state = loadState(specDir);
+			const verdict = readVerdict(specDir);
+			const kb = kbRead(specDir);
+			const checkpoints = listCheckpoints(cfg.projectRoot);
+			const journal = readJournal(cfg.projectRoot);
+			const blockers = kb.filter((n) => n.kind === "blocker");
+			const decisions = kb.filter((n) => n.kind === "decision");
+			const securityReport = join(specDir, "security-report.md");
+
+			const lines: string[] = [];
+			lines.push(`# Handoff — ${args.spec_id}`);
+			lines.push("");
+			if (args.summary) { lines.push(args.summary.trim()); lines.push(""); }
+			lines.push(`- Generated: ${new Date().toISOString()}`);
+			lines.push(`- Final phase: ${state.phase}`);
+			lines.push(`- Verdict: ${verdict === null ? "none" : verdict.passed ? "PASSED" : "FAILED"}`);
+			lines.push(`- Failures: ${state.failureCount}/${state.maxFailuresBeforeDiagnosis}; iterations: ${state.iterationsUsed}/${state.maxIterations}`);
+			lines.push(`- Security report: ${existsSync(securityReport) ? "present" : "MISSING"}`);
+			lines.push("");
+			lines.push("## Configuration in effect");
+			lines.push(`- autonomy=${cfg.autonomy} licensed=${cfg.licensed}`);
+			lines.push(`- allowlist=${JSON.stringify(cfg.executeAllowlist)}`);
+			lines.push(`- communityRepo=${cfg.communityRepoPath || cfg.communityRepoUrl}`);
+			lines.push(`- enterpriseRepo=${cfg.enterpriseRepoPath || cfg.enterpriseRepoUrl}`);
+			lines.push(`- requireCheckpointBeforeMutation=${cfg.requireCheckpointBeforeMutation} securityReviewRequired=${cfg.securityReviewRequired} auditAllTools=${cfg.auditAllTools}`);
+			lines.push("");
+			lines.push("## Checkpoints");
+			lines.push(checkpoints.length === 0 ? "- (none)" : checkpoints.map((c) => `- ${c.id} — ${c.label} (${c.files.length} file(s))`).join("\n"));
+			lines.push("");
+			lines.push("## Journaled data operations");
+			lines.push(journal.length === 0 ? "- (none)" : journal.slice(-20).map((o) => `- ${o.ts} ${o.model}.${o.method} ids=${JSON.stringify(o.ids)} created=${JSON.stringify(o.createdIds)}`).join("\n"));
+			lines.push("");
+			lines.push("## Decisions (logbook)");
+			lines.push(decisions.length === 0 ? "- (none)" : decisions.slice(-20).map((d) => `- ${d.summary}`).join("\n"));
+			lines.push("");
+			lines.push("## Open blockers");
+			lines.push(blockers.length === 0 ? "- (none)" : blockers.slice(-10).map((b) => `- ${b.summary}`).join("\n"));
+			lines.push("");
+			lines.push("## Next steps");
+			if (state.phase === "DONE") lines.push("- Delivered. Review the diff and commit with the project's conventions.");
+			else if (state.phase === "BLOCKED") lines.push("- Blocked: resolve the open blockers above (or remove stop.md) and resume the pipeline.");
+			else lines.push(`- Resume at ${state.phase}. Check .sdd/audit.jsonl for the recorded activity.`);
+
+			try {
+				mkdirSync(specDir, { recursive: true });
+				writeFileSync(join(specDir, "handoff.md"), lines.join("\n") + "\n", { mode: 0o600 });
+			} catch (err) {
+				return { ok: false, file: "", detail: `Could not write handoff.md: ${err instanceof Error ? err.message : String(err)}` };
+			}
+			appendAuditLine(cfg.projectRoot, "sdd_handoff", { spec: args.spec_id }, clientFor(cfg.projectRoot).credentials, {
+				phase: state.phase, specId: args.spec_id,
+			});
+			return {
+				ok: true,
+				file: displayPath(join(specDir, "handoff.md")),
+				detail: `Handoff written to ${displayPath(join(specDir, "handoff.md"))} (phase ${state.phase}, verdict ${verdict === null ? "none" : verdict.passed ? "PASSED" : "FAILED"}).`,
+			};
+		},
+	}));
+
+	// ---------------------------------------------------------------------
+	// Policy guard + run-wide audit ("model-visible means logged").
+	//
+	// The guard is a MONOTONIC host guard: returning a reason denies the call
+	// and no later listener can turn the denial back into a permission. It
+	// enforces, fail-closed:
+	//   - stop.md halts every tool;
+	//   - mutating calls need a checkpoint when the policy requires one;
+	//   - mutating calls are refused before WRITE_CODE.
+	// The `tools/result` listener records EVERY tool call of the run (ours and
+	// foreign), so the activity is reconstructable from .sdd/audit.jsonl.
+	// Both are best-effort: a policy bug must never brick the tool surface.
+	// ---------------------------------------------------------------------
+	const isMutatingCall = (name: string, args: Record<string, unknown>): boolean => {
+		if (name === "odoo_execute") {
+			const method = String(args["method"] ?? "");
+			return method === "create" || method === "write" || method === "unlink";
+		}
+		if (name === "odoo_module") {
+			const op = String(args["operation"] ?? "");
+			return op === "install" || op === "upgrade";
+		}
+		return false;
+	};
+
+	const denyWithAudit = (name: string, args: Record<string, unknown>, reason: string): string => {
+		try {
+			const cfg = effectiveConfig();
+			const active = readActiveState(cfg.projectRoot);
+			recordAudit(
+				cfg.projectRoot,
+				{
+					tool: name,
+					args,
+					outcome: "denied",
+					source: "policy",
+					reason,
+					phase: active.phase ?? undefined,
+					specId: active.specId ?? undefined,
+				},
+				clientFor(cfg.projectRoot).credentials,
+			);
+		} catch {
+			// auditing is best-effort
+		}
+		return reason;
+	};
+
+	try {
+		if (typeof ctx.tools.guard === "function") {
+			ctx.tools.guard((execution: unknown): string | undefined => {
+				try {
+					const call = (execution ?? {}) as { name?: unknown; args?: unknown };
+					const name = String(call.name ?? "");
+					const args = (call.args && typeof call.args === "object" ? call.args : {}) as Record<string, unknown>;
+					const cfg = effectiveConfig();
+					const active = readActiveState(cfg.projectRoot);
+
+					// 1) Emergency stop halts every tool.
+					const stopCandidates = [join(cfg.projectRoot, ".sdd", "stop.md")];
+					if (active.specId !== null) {
+						stopCandidates.push(join(cfg.projectRoot, cfg.specsDir, active.specId, "stop.md"));
+					}
+					for (const candidate of stopCandidates) {
+						if (existsSync(candidate)) {
+							return denyWithAudit(name, args, `stop.md present at ${displayPath(candidate)} — every tool is halted until it is removed.`);
+						}
+					}
+
+					// 2) Mutation policy (checkpoint + phase).
+					if (isMutatingCall(name, args)) {
+						if (cfg.requireCheckpointBeforeMutation && active.checkpointId === null) {
+							return denyWithAudit(
+								name,
+								args,
+								"Mutation blocked by policy: no checkpoint exists. Run `sdd_checkpoint` with operation=create first " +
+									"(requireCheckpointBeforeMutation=true), or disable that policy with odoo_config.",
+							);
+						}
+						const allowedPhases = ["WRITE_CODE", "VERIFY", "FIX_LOOP"];
+						if (active.phase !== null && !allowedPhases.includes(active.phase)) {
+							return denyWithAudit(
+								name,
+								args,
+								`Mutation blocked: the active spec is in phase ${active.phase}. Approve the spec/architecture first ` +
+									"so the pipeline reaches WRITE_CODE.",
+							);
+						}
+					}
+					return undefined;
+				} catch {
+					// A guard failure must never brick the surface: allow and move on.
+					return undefined;
+				}
+			});
+		}
+
+		if (typeof ctx.on === "function") {
+			ctx.on("tools/result", (...eventArgs: unknown[]) => {
+				try {
+					const cfg = effectiveConfig();
+					if (!cfg.auditAllTools) return;
+					const execution = (eventArgs[0] ?? {}) as { name?: unknown; args?: unknown };
+					const result = (eventArgs[1] ?? {}) as { isError?: unknown; error?: unknown };
+					const active = readActiveState(cfg.projectRoot);
+					const failed = Boolean(result.isError) || result.error !== undefined;
+					recordAudit(
+						cfg.projectRoot,
+						{
+							tool: String(execution.name ?? "unknown"),
+							args: execution.args,
+							outcome: failed ? "error" : "ok",
+							source: "tool",
+							phase: active.phase ?? undefined,
+							specId: active.specId ?? undefined,
+						},
+						clientFor(cfg.projectRoot).credentials,
+					);
+				} catch {
+					// auditing is best-effort
+				}
+			});
+		}
+	} catch {
+		// Hosts without guard/events keep working; the policy is simply inactive.
+	}
 
 	registerRuntimeTools(ctx, {
 		client: () => clientFor(effectiveConfig().projectRoot),
 		status: (pr) => setupStatusFor(pr),
 		projectRoot: effectiveConfig().projectRoot,
 		allowlist: () => effectiveConfig().executeAllowlist,
+		recordDataOp: (op) => {
+			try {
+				appendDataOp(effectiveConfig().projectRoot, { ts: new Date().toISOString(), ...op });
+			} catch {
+				// journaling is best-effort
+			}
+		},
 		display: (v) => displayPath(v),
 	});
 }

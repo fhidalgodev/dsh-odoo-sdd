@@ -60,6 +60,8 @@ Before phase 3, check the agent's skill catalog:
   - `agents/developer.md` — implements the approved design (no spec changes).
   - `agents/qa.md` — verifies per AC, honest verdicts, never repairs.
   - `agents/consultant.md` — deep root-cause analysis (failure ladder).
+  - `agents/security-reviewer.md` — permission model + code-security gate
+    (groups, ACL, record rules, risky patterns); produces `security-report.md`.
   - `agents/human-proxy.md` — answers gates in AUTONOMOUS mode (fail-closed).
   A missing persona file (broken package) → degrade to an inline role prompt;
   never silently run a role without its limits.
@@ -88,11 +90,28 @@ fail-closed — in SUPERVISED mode it never auto-advances).
    existing module to depend on or mirror before writing from scratch. OCA
    reuse is never skipped, so `licensed` only picks the *extra* source
    (Enterprise) — it never disables the OCA search.
+2b. **Security interview (mandatory when `securityInterviewRequired`)** — the
+   permission model must be a DECISION, never an invention. Ask the developer
+   with `ask_user_question` and record the answers as `decision` nodes in the KB:
+   - **Groups**: which existing groups apply (`base.group_user`,
+     `sales_team.group_sale_manager`, …) and which NEW groups to create? A new
+     group must be declared as a `res.groups` record with a real xmlid.
+   - **Access matrix**: for every new model, WHO may read / create / write /
+     unlink, per group. No model is delivered without its
+     `security/ir.model.access.csv` rows.
+   - **Record rules**: are they needed (multi-company, warehouse, owner-only)?
+     If not, say so EXPLICITLY — "no record rules needed" is a decision too.
+   - **Sensitive data**: does the module store personal, financial or secret
+     data? If yes, the visibility/group restriction must be stated.
+   - **Out of scope**: what must the module explicitly NOT do?
+   If an answer is missing: in SUPERVISED mode ask again (never assume); in
+   AUTONOMOUS mode advance to `BLOCKED` with reason "security undefined".
 3. **SUPERVISED mode**: you MUST interview the developer with
-   `ask_user_question` — (a) create or bug, (b) licensing strategy, and (c) an
-   explicit confirmation "proceed?" — and record the answer with
-   `sdd_phase clarify mode=... licensed=...`. Do NOT start any work before this
-   confirmation. If the developer is vague, restate the plan and ask again.
+   `ask_user_question` — (a) create or bug, (b) licensing strategy, (c) the
+   security questions above, and (d) an explicit confirmation "proceed?" — and
+   record the answers with `sdd_phase clarify mode=... licensed=...`. Do NOT
+   start any work before this confirmation. If the developer is vague, restate
+   the plan and ask again.
 4. **AUTONOMOUS mode**: detect `mode` and `licensed` from the request text; if
    they cannot be determined confidently, go `sdd_phase advance next_phase=BLOCKED`
    ("intent ambiguous") — never invent them.
@@ -199,7 +218,14 @@ Once clarified: `sdd_phase advance next_phase=READ_SPEC`.
    - XML syntax validation of every view file
 5. `odoo_module operation=info modules=['<module>']` — confirm the instance
    actually sees the code (correct addons path / deployment).
-6. `sdd_phase advance next_phase=VERIFY`.
+6. **Checkpoint before mutating**: create one BEFORE the first write to the
+   instance — `sdd_checkpoint operation=create label="before <change>"
+   dirs=["<module_dir>"]`. With `requireCheckpointBeforeMutation` (default
+   true) the policy guard REFUSES any `odoo_execute` mutation or
+   `odoo_module install|upgrade` until a checkpoint exists. Re-create it before
+   each new risky change; `sdd_checkpoint operation=journal` shows what has
+   been applied since.
+7. `sdd_phase advance next_phase=VERIFY`.
 
 ## Phase 4 — VERIFY (closed feedback loop)
 
@@ -224,11 +250,22 @@ Verification pyramid, ALWAYS in ascending order:
    (search_read/read/search_count) and, only for allowlisted models with
    `confirm_destructive=true`, the mutations the test-plan needs. Compare
    results against each AC.
-4. **Layer 4 (UI, critical flows only)**: `odoo_session` ⇒ load the cookie
+4. **Layer 4 (security review, MANDATORY when `securityReviewRequired`)**:
+   load `agents/security-reviewer.md` and produce
+   `specs/<id>/security-report.md` from evidence:
+   - `odoo_security_scan module_dir=<module>` — any ERROR is blocking;
+     every WARN needs an explicit written resolution.
+   - `odoo_validate module_dir=<module>` — every new model must have an ACL
+     row; every referenced group must resolve (in-module `res.groups` record
+     or a `base.*` group); record rules must carry `groups` or be waived.
+   - Cross-check the ACL against the DECIDED `## Security` matrix: the code may
+     never be more permissive than the approved design.
+   If the report is REJECTED ⇒ `sdd_phase fail` with the findings (→ phase 5).
+5. **Layer 5 (UI, critical flows only)**: `odoo_session` ⇒ load the cookie
    from `.sdd/session.json` into Playwright's browser context, navigate past
    `/web/login`, and execute the UI scenarios from test-plan.md. Capture:
    Odoo Server Error modals, console tracebacks, non-rendering elements.
-5. All green per AC by the QA persona ⇒ `sdd_phase succeed detail="<per-AC
+6. All green per AC by the QA persona ⇒ `sdd_phase succeed detail="<per-AC
    summary>"` ⇒ `sdd_phase advance next_phase=DONE`.
 6. Any failure ⇒ `sdd_phase fail detail="<concrete error>"` ⇒ phase 5.
    (Gated advances pass `approval_source` — `human` in supervised mode, the
@@ -247,17 +284,45 @@ Verification pyramid, ALWAYS in ascending order:
    approach as a `discarded` node. No blind retries after diagnosis.
 4. Regression: before accepting a fix, re-verify already-passed ACs — never
    build on a broken base.
-5. `BLOCKED` or ceiling reached ⇒ stop and hand to the developer: KB state,
+5. **Rollback instead of patching a broken state**: when a change made things
+   worse and the cause is not obvious, restore the last checkpoint rather than
+   layering another guess on top:
+   - `sdd_checkpoint operation=list` → pick the checkpoint from BEFORE the
+     change; `sdd_phase operation=rollback spec_id=<id> checkpoint_id=<cp>`
+     restores the files and returns the pipeline to `WRITE_CODE`.
+   - Journaled data mutations can be undone with
+     `sdd_checkpoint operation=restore checkpoint_id=<cp> restore_data=true
+     confirm_destructive=true`. LIMIT: a module install/upgrade is NOT reverted
+     at the database level — say so and let the developer decide (uninstall).
+6. `BLOCKED` or ceiling reached ⇒ stop and hand to the developer: KB state,
    last FAILED verdict and diagnosis.
+
+## Closing the run (DONE or BLOCKED)
+
+Before you stop, ALWAYS write the handoff:
+`sdd_handoff spec_id=<id> summary="<one line>"`. It records the final phase,
+the honest verdict, the KB decisions/blockers, the checkpoints, the journaled
+data operations, the configuration in effect and the next steps into
+`specs/<id>/handoff.md`, so the next session (or a human) starts from a clean,
+readable state. Then report to the developer: what was delivered, what is
+verified, what is NOT (and why), and which checkpoint to roll back to.
 
 ## Per-spec artifacts
 
 ```
 specs/<NNN>-<slug>/
 ├── spec.md             # immutable after APPROVED
-├── architecture.md     # approved design
+├── architecture.md     # approved design (incl. the DECIDED ## Security model)
 ├── test-plan.md        # scenarios per AC
+├── security-report.md  # security review verdict + findings (required for DONE)
 ├── verify-verdict.txt  # honest persisted verdict (PASSED/FAILED + date)
+├── handoff.md          # generated by sdd_handoff when the run closes
 ├── state.json          # phase, failures, iterations
 └── kb.json             # decisions, blockers, diagnoses, learnings
+
+Outside the spec directory (plugin-owned, shared by the run):
+.sdd/config.json        # persisted config (repos, allowlist, policy flags)
+.sdd/active.json        # active spec + phase + active checkpoint (policy input)
+.sdd/checkpoints/<id>/  # file snapshots + data journal (rollback surface)
+.sdd/audit.jsonl        # append-only record of EVERY tool call (append-only)
 ```

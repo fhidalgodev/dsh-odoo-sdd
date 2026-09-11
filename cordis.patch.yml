@@ -25,3 +25,9 @@
         # Defaults surfaced and edited in Settings → Odoo SDD.
         autonomy: 'supervised'
         licensed: 'community'
+        # Fail-closed policy guards (edited in Settings too).
+        requireCheckpointBeforeMutation: true
+        securityReviewRequired: true
+        securityInterviewRequired: true
+        auditAllTools: true
+        maxCheckpoints: 5

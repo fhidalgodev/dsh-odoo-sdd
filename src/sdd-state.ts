@@ -274,6 +274,23 @@ export function transition(
 				state,
 			};
 		}
+		// Security content gate: a `## Security` heading with no decisions is
+		// NOT a permission model — refuse to approve and say exactly what is
+		// missing, so the agent asks instead of inventing.
+		if (state.phase === "ARCHITECTURE") {
+			const gaps = securityGaps(state.specDir);
+			if (gaps.length > 0) {
+				return {
+					ok: false,
+					reason:
+						"ARCHITECTURE cannot advance: the security model is incomplete. Missing: " +
+						gaps.join("; ") +
+						". Ask the developer (groups, CRUD matrix per group, record rules) or record an explicit decision; " +
+						"never invent permissions.",
+					state,
+				};
+			}
+		}
 		if ((approvalMarker ?? "").trim() !== "APPROVED") {
 			return {
 				ok: false,
@@ -434,6 +451,44 @@ const HEADING_REQUIREMENTS: Array<{
 		required: ["| AC", "Scenario"],
 	},
 ];
+
+/**
+ * Content-level security gate for ARCHITECTURE: the `## Security` section must
+ * actually say WHO may do WHAT. A heading alone is not a decision, and an
+ * undefined permission model is exactly where an agent starts inventing one.
+ * Each gap is reported with the concrete fix.
+ */
+export function securityGaps(specDir: string): string[] {
+	const path = join(specDir, "architecture.md");
+	if (!existsSync(path)) return ["architecture.md is missing"];
+	const text = readFileSync(path, "utf8");
+	const security = (() => {
+		const idx = text.indexOf("## Security");
+		if (idx < 0) return "";
+		const rest = text.slice(idx + "## Security".length);
+		const next = rest.indexOf("\n## ");
+		return next < 0 ? rest : rest.slice(0, next);
+	})();
+	const gaps: string[] = [];
+	const lower = security.toLowerCase();
+	if (security.trim() === "") {
+		gaps.push("`## Security` is empty");
+		return gaps;
+	}
+	// Groups: a named group, an xmlid, or an explicit "no new groups" decision.
+	const hasGroups = /group_|groups?\b|res\.groups|privilegio|permiso/i.test(security);
+	// Access control: the ACL artifact must be named, with a CRUD matrix.
+	const hasAcl = /ir\.model\.access|access\.csv|model_access|acl\b/i.test(security);
+	const hasCrudMatrix = /\b(read|leer)\b/i.test(lower) && /\b(write|escribir)\b/i.test(lower) && /\b(create|crear)\b/i.test(lower);
+	// Record rules: either defined, or explicitly declared unnecessary.
+	const hasRules = /ir\.rule|record rule|regla(s)? de registro/i.test(security);
+	const rulesWaived = /(no|sin|not|ninguna|n\/a)\s+.{0,20}(record rule|ir\.rule|regla)/i.test(security);
+	if (!hasGroups) gaps.push("`## Security`: name the groups involved (existing xmlids or new groups to create)");
+	if (!hasAcl) gaps.push("`## Security`: state the access-control artifact (`security/ir.model.access.csv`)");
+	if (!hasCrudMatrix) gaps.push("`## Security`: give the per-group CRUD matrix (read/create/write/unlink)");
+	if (!hasRules && !rulesWaived) gaps.push("`## Security`: define the record rules OR explicitly state that none are needed");
+	return gaps;
+}
 
 /** Find which required headings are missing for advancing past `phase`. */
 function requiredHeadings(phase: Phase): { file: string; missing: (specDir: string) => string[] } {

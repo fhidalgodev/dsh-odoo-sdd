@@ -155,7 +155,14 @@ process.env["XDG_CONFIG_HOME"] = join(dir, "xdg");
 delete process.env["ODOO_SDD_ENV_FILE"];
 
 const registered = new Map();
-const fakeCtx = { tools: { register: (t) => registered.set(t.name, t) } };
+const capturedGuards = [];
+const fakeCtx = {
+	tools: {
+		register: (t) => registered.set(t.name, t),
+		guard: (g) => { capturedGuards.push(g); return () => {}; },
+	},
+	on: () => () => {},
+};
 
 // --- projA: full onboarding flow ---
 const projA = join(dir, "projA");
@@ -328,7 +335,7 @@ check("set persists allowlist", rc.ok === true && Array.isArray(rc.config.execut
 
 // The allowlist configured via odoo_config must actually gate odoo_execute (live config).
 const executeE = registered.get("odoo_execute");
-const exAllow = await executeE.execute({ model: "sale.order", method: "create", confirm_destructive: true });
+const exAllow = await executeE.execute({ model: "sale.order", method: "create", values: { name: "probe" }, confirm_destructive: true });
 check("allowlisted mutation passes the gate (then fails: no instance)", exAllow.denied === true && exAllow.reason.includes("NOT CONFIGURED"));
 const exDeny = await executeE.execute({ model: "account.move", method: "unlink", confirm_destructive: true });
 check("non-allowlisted model still denied", exDeny.denied === true && exDeny.reason.includes("not allowlisted"));
@@ -340,6 +347,141 @@ check("read defaults autonomy", rc.config.autonomy === "supervised");
 check("read defaults licensed", rc.config.licensed === "community");
 rc = await cfg.execute({ mode: "set", autonomy: "autonomous", licensed: "enterprise" });
 check("set persists autonomy/licensed", rc.ok === true && rc.config.autonomy === "autonomous" && rc.config.licensed === "enterprise");
+
+
+console.log("== checkpoints, security scan, ACL gate, policy guard, handoff ==");
+const cps = await import(new URL("checkpoints.js", libDir).href);
+const sec = await import(new URL("security-scan.js", libDir).href);
+
+// ---- checkpoints: create -> mutate -> restore -> journal -> drop --------
+const projCp = join(dir, "projCp");
+mkdirSync(join(projCp, "mod"), { recursive: true });
+writeFileSync(join(projCp, "mod", "a.py"), "V1\n", { mode: 0o600 });
+plugin.apply(fakeCtx, { projectRoot: projCp });
+const cpTool = registered.get("sdd_checkpoint");
+let cpR = await cpTool.execute({ operation: "create", label: "before change", dirs: ["mod"] });
+check("checkpoint created and active", cpR.ok === true && typeof cpR.activeCheckpoint === "string" && cpR.detail.includes("Checkpoint"));
+const cpId = cpR.activeCheckpoint;
+writeFileSync(join(projCp, "mod", "a.py"), "V2-BROKEN\n", { mode: 0o600 });
+cpR = await cpTool.execute({ operation: "restore", checkpoint_id: cpId });
+check("restore puts files back", cpR.ok === true && readFileSync(join(projCp, "mod", "a.py"), "utf8") === "V1\n");
+cps.appendDataOp(projCp, { ts: "t1", model: "sale.order", method: "write", ids: [7], preImage: [{ id: 7, name: "old" }], createdIds: [] });
+check("data op journaled", cps.readJournal(projCp).length === 1);
+cpR = await cpTool.execute({ operation: "journal" });
+check("journal readable", cpR.ok === true && cpR.detail.includes("Journaled operations"));
+cpR = await cpTool.execute({ operation: "list" });
+check("checkpoint list works", cpR.ok === true && cpR.detail.includes("Checkpoints"));
+cpR = await cpTool.execute({ operation: "drop", checkpoint_id: cpId });
+check("checkpoint dropped", cpR.ok === true);
+cpR = await cpTool.execute({ operation: "create", label: "needs dirs" });
+check("create without dirs defaults to whole project", cpR.ok === true);
+
+// ---- security scan ------------------------------------------------------
+const vuln = join(dir, "mod_vuln");
+mkdirSync(join(vuln, "models"), { recursive: true });
+writeFileSync(join(vuln, "__manifest__.py"), "{'name':'v','depends':['base']}", { mode: 0o600 });
+writeFileSync(join(vuln, "models", "m.py"), [
+	"from odoo import models",
+	"class M(models.Model):",
+	"    _name = 'x.v'",
+	"    def f(self):",
+	"        self.env.cr.execute('SELECT * FROM t WHERE id = %s' % self.id)",
+	"        eval('1+1')",
+	"        api_key = 'supersecreto123'",
+].join("\n"), { mode: 0o600 });
+const scan = sec.scanModule(vuln);
+check("scan flags sql injection as ERROR", scan.findings.some((f) => f.rule === "sql-injection" && f.severity === "ERROR"));
+check("scan flags dynamic exec", scan.findings.some((f) => f.rule === "dynamic-exec"));
+check("scan flags hardcoded secret", scan.findings.some((f) => f.rule === "hardcoded-secret"));
+check("scan result not clean", scan.clean === false);
+const cleanMod = join(dir, "mod_cleansec");
+mkdirSync(join(cleanMod, "models"), { recursive: true });
+writeFileSync(join(cleanMod, "__manifest__.py"), "{'name':'c','depends':['base']}", { mode: 0o600 });
+writeFileSync(join(cleanMod, "models", "m.py"), "from odoo import models\nclass C(models.Model):\n    _name = 'x.c'\n", { mode: 0o600 });
+check("clean fixture scans clean", sec.scanModule(cleanMod).clean === true);
+
+// ---- odoo_validate: ACL coherence --------------------------------------
+const aclMod = join(dir, "mod_acl");
+mkdirSync(join(aclMod, "models"), { recursive: true });
+mkdirSync(join(aclMod, "security"), { recursive: true });
+writeFileSync(join(aclMod, "__manifest__.py"), "{'name':'a','depends':['base'],'data':['security/ir.model.access.csv','views/v.xml']}", { mode: 0o600 });
+mkdirSync(join(aclMod, "views"), { recursive: true });
+writeFileSync(join(aclMod, "views", "v.xml"), "<odoo></odoo>", { mode: 0o600 });
+writeFileSync(join(aclMod, "models", "m.py"), "from odoo import models\nclass A(models.Model):\n    _name = 'x.acl'\n", { mode: 0o600 });
+plugin.apply(fakeCtx, { projectRoot: dir });
+const validate = registered.get("odoo_validate");
+let valR = await validate.execute({ module_dir: aclMod });
+check("validate ERRORs when a new model has no ACL file", valR.valid === false && valR.findings.some((f) => f.severity === "ERROR" && f.message.includes("no ACL file")));
+writeFileSync(join(aclMod, "security", "ir.model.access.csv"), "id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink\naccess_x,access.x,model_x_acl,base.group_user,1,1,1,1\n", { mode: 0o600 });
+valR = await validate.execute({ module_dir: aclMod });
+check("validate passes with a matching ACL row", valR.valid === true);
+writeFileSync(join(aclMod, "security", "ir.model.access.csv"), "id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink\naccess_x,access.x,model_x_acl,group_ghost,1,0,0,0\n", { mode: 0o600 });
+valR = await validate.execute({ module_dir: aclMod });
+check("validate WARNs on an unresolvable group", valR.findings.some((f) => f.severity === "WARN" && f.message.includes("group_ghost")));
+// A model without an ACL row is an ERROR even when the file exists.
+writeFileSync(join(aclMod, "models", "m2.py"), "from odoo import models\nclass B(models.Model):\n    _name = 'x.other'\n", { mode: 0o600 });
+valR = await validate.execute({ module_dir: aclMod });
+check("validate ERRORs on an unlisted model", valR.valid === false && valR.findings.some((f) => f.severity === "ERROR" && f.message.includes("x.other")));
+
+// ---- architecture security gate (groups + ACL + matrix + rules) --------
+const secDir = join(dir, "specs", "sec-gate");
+sdd.initSpecDir(secDir);
+let sSec = sdd.loadState(secDir);
+sSec.phase = "ARCHITECTURE";
+const gateR1 = sdd.transition(sSec, "WRITE_CODE", "APPROVED", "try incomplete security");
+check("security gate blocks an empty ## Security", gateR1.ok === false && gateR1.reason.includes("security model is incomplete"));
+writeFileSync(join(secDir, "architecture.md"), "# Architecture\n\n## Models\nx\n\n## Views\ny\n\n## Security\nGroups: base.group_user plus a new group_my_manager. Access via security/ir.model.access.csv with read/create/write/unlink per group. No record rules needed.\n\n## Manifest\nz\n", { mode: 0o600 });
+let sSec2 = sdd.loadState(secDir);
+sSec2.phase = "ARCHITECTURE";
+const gateR2 = sdd.transition(sSec2, "WRITE_CODE", "APPROVED", "complete security");
+check("security gate passes with groups+ACL+matrix+rules decision", gateR2.ok === true);
+
+// ---- policy guard -------------------------------------------------------
+const projGuard = join(dir, "projGuard");
+mkdirSync(projGuard, { recursive: true });
+plugin.apply(fakeCtx, { projectRoot: projGuard });
+const guard = capturedGuards[capturedGuards.length - 1];
+check("policy guard registered with the host", typeof guard === "function");
+let gR = guard({ name: "odoo_execute", args: { method: "create" } });
+check("guard denies a mutation with no checkpoint", typeof gR === "string" && gR.includes("no checkpoint"));
+check("guard allows read-only tools", guard({ name: "odoo_connect", args: {} }) === undefined);
+const guardCp = registered.get("sdd_checkpoint");
+const gcR = await guardCp.execute({ operation: "create", label: "guard", dirs: ["."] });
+check("checkpoint tool created one for the guard", gcR.ok === true);
+gR = guard({ name: "odoo_execute", args: { method: "create" } });
+check("guard allows the mutation after a checkpoint exists", gR === undefined);
+cps.writeActiveState(projGuard, { phase: "READ_SPEC" });
+gR = guard({ name: "odoo_module", args: { operation: "install" } });
+check("guard denies a mutation before WRITE_CODE", typeof gR === "string" && gR.includes("READ_SPEC"));
+cps.writeActiveState(projGuard, { phase: "WRITE_CODE" });
+mkdirSync(join(projGuard, ".sdd"), { recursive: true });
+writeFileSync(join(projGuard, ".sdd", "stop.md"), "operator halt\n", { mode: 0o600 });
+gR = guard({ name: "odoo_connect", args: {} });
+check("guard halts every tool on stop.md", typeof gR === "string" && gR.includes("stop.md"));
+rmSync(join(projGuard, ".sdd", "stop.md"));
+
+// ---- sdd_phase rollback + handoff --------------------------------------
+const projH = join(dir, "projH");
+mkdirSync(join(projH, "mod"), { recursive: true });
+plugin.apply(fakeCtx, { projectRoot: projH });
+const phaseH = registered.get("sdd_phase");
+const cpToolH = registered.get("sdd_checkpoint");
+const handoffH = registered.get("sdd_handoff");
+await phaseH.execute({ operation: "init", spec_id: "001-h" });
+const activeH = cps.readActiveState(projH);
+check("phase init records the active spec/phase", activeH.specId === "001-h" && activeH.phase === "CLARIFY");
+writeFileSync(join(projH, "mod", "b.py"), "BROKEN\n", { mode: 0o600 });
+const cpH = await cpToolH.execute({ operation: "create", label: "h", dirs: ["mod"] });
+check("checkpoint for rollback created", cpH.ok === true);
+writeFileSync(join(projH, "mod", "b.py"), "VERY-BROKEN\n", { mode: 0o600 });
+const rb = await phaseH.execute({ operation: "rollback", spec_id: "001-h" });
+check("sdd_phase rollback restores files", rb.ok === true && readFileSync(join(projH, "mod", "b.py"), "utf8") === "BROKEN\n");
+check("rollback returns the pipeline to WRITE_CODE", rb.phase === "WRITE_CODE");
+const hR = await handoffH.execute({ spec_id: "001-h", summary: "Prueba de handoff" });
+check("handoff written", hR.ok === true && existsSync(join(projH, "specs", "001-h", "handoff.md")));
+const hText = readFileSync(join(projH, "specs", "001-h", "handoff.md"), "utf8");
+check("handoff documents next steps", hText.includes("## Next steps"));
+check("handoff documents configuration", hText.includes("## Configuration in effect"));
 
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -175,9 +175,26 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 	}
 
 	/** Current, normalized snapshot of our namespace (defensive). */
+	/**
+	 * Read the settings scope snapshot. The snapshot is NOT the section itself:
+	 * it is { status, value, base, user, revision, writable, mode } — the
+	 * section lives under `value`. Reading the snapshot as if it were the
+	 * section yields undefined fields (and therefore composition defaults),
+	 * which is why writes appeared "not to persist".
+	 */
+	function scopeState(scope) {
+		var raw = {};
+		try { raw = (scope && typeof scope.getSnapshot === "function") ? (scope.getSnapshot() || {}) : {}; } catch (e) { raw = {}; }
+		var value = (raw && typeof raw === "object" && raw.value && typeof raw.value === "object") ? raw.value : {};
+		return {
+			value: value,
+			writable: !(raw && raw.writable === false),
+			status: (raw && raw.status) || "ready"
+		};
+	}
+
 	function readSnap(scope) {
-		var s = {};
-		try { s = (scope && typeof scope.getSnapshot === "function") ? (scope.getSnapshot() || {}) : {}; } catch (e) { s = {}; }
+		var s = scopeState(scope).value;
 		var asStr = function (v, fb) { return typeof v === "string" ? v : fb; };
 		var asList = function (v) { return Array.isArray(v) ? v.filter(function (x) { return typeof x === "string"; }) : []; };
 		var lic = asStr(s.licensed, "community");
@@ -296,7 +313,8 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		var prefix = props.idPrefix || "odoo-sdd";
 		var listDirectory = props.listDirectory;
 		var pickDirectory = props.pickDirectory;
-		var canWrite = Boolean(scope) && typeof scope === "object" && typeof scope.set === "function";
+		var ss = scopeState(scope);
+		var canWrite = Boolean(scope) && typeof scope === "object" && typeof scope.set === "function" && ss.writable && ss.status !== "unavailable";
 
 		var st = react.useState(function () { return { form: toForm(readSnap(scope)), dirty: false, status: "idle", picker: null }; });
 		var model = st[0];
@@ -338,9 +356,10 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			if (ops.length === 0) { setModel(function (m) { return Object.assign({}, m, { dirty: false, status: "saved" }); }); return; }
 			setModel(function (m) { return Object.assign({}, m, { status: "saving" }); });
 			Promise.all(ops.map(function (pair) { return scope.set(pair[0], pair[1]); })).then(function () {
-				setModel(function (m) { return Object.assign({}, m, { dirty: false, status: "saved" }); });
-			}).catch(function () {
-				setModel(function (m) { return Object.assign({}, m, { status: "error" }); });
+				setModel(function (m) { return Object.assign({}, m, { dirty: false, status: "saved", errorText: "" }); });
+			}).catch(function (err) {
+				var msg = (err && err.message) ? String(err.message) : "";
+				setModel(function (m) { return Object.assign({}, m, { status: "error", errorText: msg }); });
 			});
 		};
 
@@ -422,7 +441,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		var status = h("div", {
 			className: "odoo-sdd-status" + (model.status === "saved" ? " odoo-sdd-status--ok" : model.status === "error" ? " odoo-sdd-status--err" : ""),
 			role: "status", "aria-live": "polite"
-		}, model.status === "saved" ? t("saved") : model.status === "error" ? t("error") : model.status === "saving" ? t("saving") : "");
+		}, (model.status === "saved" ? t("saved") : model.status === "error" ? (t("error") + (model.errorText ? ": " + model.errorText : "")) : model.status === "saving" ? t("saving") : ""));
 
 		var pickerNode = null;
 		if (model.picker) {

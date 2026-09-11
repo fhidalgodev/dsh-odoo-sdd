@@ -539,14 +539,9 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 					}, function () { return h(SddSection, { t: t, scope: scope, listDirectory: listDirectory, pickDirectory: pickDirectory, idPrefix: "odoo-sdd-sec" }); });
 				});
 
-				scoped.slots.inject("settings.plugin.item", function () {
-					return scoped.slots.register({
-						name: "settings.plugin.item",
-						key: NS,
-						locale: NS,
-						inject: function () { return { t: t }; }
-					}, function () { return h(SddSection, { t: t, scope: scope, listDirectory: listDirectory, pickDirectory: pickDirectory, idPrefix: "odoo-sdd-card" }); });
-				});
+				// NOTE: deliberately NO `settings.plugin.item` registration — the
+				// configuration lives in its own standalone Settings section (the
+				// sidebar entry above), not as a card inside Settings → Plugins.
 			});
 		} catch (e) {
 			if (typeof console !== "undefined") console.error("[dsh-odoo-sdd] client apply failed:", e);

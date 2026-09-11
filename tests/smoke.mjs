@@ -33,7 +33,7 @@ check("CLARIFY gate blocks before intent is clear", r.ok === false && (r.reason 
 
 // Resolve intent, then it can leave CLARIFY (not gated) toward READ_SPEC.
 st.mode = "create";
-st.licensed = "oca";
+st.licensed = "community";
 r = sdd.transition(st, "READ_SPEC", null, "intent clarified");
 check("CLARIFY -> READ_SPEC allowed once intent set", r.ok === true && st.phase === "READ_SPEC");
 
@@ -246,7 +246,7 @@ const executeD = registered.get("odoo_execute");
 // --- headings gate: a bare spec cannot leave READ_SPEC ---
 sddD.execute({ operation: "init", spec_id: "001-bare" });
 // Clarify intent so it can leave CLARIFY, then advance to READ_SPEC.
-await sddD.execute({ operation: "clarify", spec_id: "001-bare", mode: "create", licensed: "oca" });
+await sddD.execute({ operation: "clarify", spec_id: "001-bare", mode: "create", licensed: "community" });
 await sddD.execute({ operation: "advance", spec_id: "001-bare", next_phase: "READ_SPEC" });
 await sddD.execute({ operation: "mark_spec_loaded", spec_id: "001-bare" });
 // Overwrite the spec with content lacking the required Acceptance Criteria section.
@@ -257,7 +257,7 @@ check("headings gate blocks advance with missing spec sections", gate.ok === fal
 // --- autonomy: proxy approval forbidden in supervised ---
 await setupD.execute({ mode: "skip" }); // avoid instance requirement
 sddD.execute({ operation: "init", spec_id: "002-proxy" });
-await sddD.execute({ operation: "clarify", spec_id: "002-proxy", mode: "create", licensed: "oca" });
+await sddD.execute({ operation: "clarify", spec_id: "002-proxy", mode: "create", licensed: "community" });
 await sddD.execute({ operation: "advance", spec_id: "002-proxy", next_phase: "READ_SPEC" });
 await sddD.execute({ operation: "mark_spec_loaded", spec_id: "002-proxy" });
 gate = await sddD.execute({ operation: "advance", spec_id: "002-proxy", next_phase: "ARCHITECTURE", approval_marker: "APPROVED", approval_source: "human-proxy" });

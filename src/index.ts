@@ -761,8 +761,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 			licensed: {
 				type: "string",
-				enum: ["enterprise", "oca", "community"],
-				description: "Licensing/search strategy (for operation=clarify): enterprise available, or reuse from OCA/community.",
+				enum: ["community", "enterprise"],
+				description: "Licensing strategy (for operation=clarify): community or enterprise. OCA/community reuse is ALWAYS searched in addition.",
 			},
 			next_phase: {
 				type: "string",
@@ -805,7 +805,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			operation: "init" | "clarify" | "status" | "mark_spec_loaded" | "advance" | "fail" | "succeed";
 			spec_id: string;
 			mode?: "create" | "bug";
-			licensed?: "enterprise" | "oca" | "community";
+			licensed?: "community" | "enterprise";
 			next_phase?: Phase;
 			approval_marker?: string;
 			approval_source?: "human" | "human-proxy";
@@ -958,7 +958,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			specsDir: { type: "string", description: "Specs folder (default 'specs')." },
 			executeAllowlist: { type: "array", items: { type: "string" }, description: "Models permitted for odoo_execute mutations." },
 			autonomy: { type: "string", enum: ["supervised", "autonomous"], description: "Default delegation mode." },
-			licensed: { type: "string", enum: ["enterprise", "oca", "community"], description: "Default licensing strategy." },
+			licensed: { type: "string", enum: ["community", "enterprise"], description: "Licensing strategy. OCA/community is always searched as well." },
 		},
 		output: {
 			schema: {
@@ -1007,6 +1007,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const normalize = (data: Record<string, unknown>) => {
 				const asString = (v: unknown, fallback: string): string => (typeof v === "string" ? v : fallback);
 				const asList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+				// Two-value strategy only; legacy "oca" migrates to "community".
+				const asLicense = (v: unknown, fallback: string): string => (asString(v, fallback) === "enterprise" ? "enterprise" : "community");
 				return {
 					communityRepoUrl: asString(data["communityRepoUrl"], "https://github.com/odoo/odoo"),
 					communityRepoPath: asString(data["communityRepoPath"], ""),
@@ -1016,7 +1018,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					specsDir: asString(data["specsDir"], "specs"),
 					executeAllowlist: asList(data["executeAllowlist"]),
 					autonomy: asString(data["autonomy"], "supervised"),
-					licensed: asString(data["licensed"], "community"),
+					licensed: asLicense(data["licensed"], "community"),
 				};
 			};
 
@@ -1079,7 +1081,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			enterpriseRepoUrl: asString(data["enterpriseRepoUrl"], config.enterpriseRepoUrl ?? "https://github.com/odoo/enterprise"),
 			enterpriseRepoPath: asString(data["enterpriseRepoPath"], config.enterpriseRepoPath ?? ""),
 			autonomy: asString(data["autonomy"], config.autonomy ?? "supervised"),
-			licensed: asString(data["licensed"], config.licensed ?? "community"),
+			licensed: ((v: unknown, fb: string): string => (asString(v, fb) === "enterprise" ? "enterprise" : "community"))(data["licensed"], config.licensed ?? "community"),
 		};
 	};
 

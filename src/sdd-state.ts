@@ -46,8 +46,8 @@ export const PHASES = [
 export type Phase = (typeof PHASES)[number];
 /** Pipeline modality: create a new module, or resolve a bug on an existing one. */
 export type PipelineMode = "create" | "bug";
-/** Licensing / search strategy for reused functionality. */
-export type LicenseStrategy = "enterprise" | "oca" | "community";
+/** Licensing strategy for reused functionality. OCA is ALWAYS searched too. */
+export type LicenseStrategy = "community" | "enterprise";
 
 /** Non-terminal phases that require an explicit human/agent approval gate. */
 export const GATED_PHASES: readonly Phase[] = ["READ_SPEC", "ARCHITECTURE"];
@@ -294,7 +294,7 @@ export function transition(
 	if (state.phase === "CLARIFY" && next !== "BLOCKED") {
 		const unresolved: string[] = [];
 		if (state.mode !== "create" && state.mode !== "bug") unresolved.push("mode");
-		if (state.licensed !== "enterprise" && state.licensed !== "oca" && state.licensed !== "community") unresolved.push("licensed");
+		if (state.licensed !== "community" && state.licensed !== "enterprise") unresolved.push("licensed");
 		if (unresolved.length > 0) {
 			return {
 				ok: false,

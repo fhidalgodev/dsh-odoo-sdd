@@ -79,13 +79,15 @@ fail-closed — in SUPERVISED mode it never auto-advances).
    - `bug` — resolve a defect on an existing module. Record the bug, locate the
      affected module/files, reproduce if possible, then the failure ladder +
      consultant root-cause (phase 5) drive to a fix.
-2. **Licensing / search strategy** — ASK the developer which source to honor
-   when reusing functionality (do not decide for them):
+2. **Licensing strategy** — ASK the developer which source to honor when
+   reusing functionality (do not decide for them). Exactly two options:
    - `enterprise` — Odoo Enterprise is available: search the Enterprise
-     addons path and GitHub first, then favor its modules.
-   - `oca` — no Enterprise; search OCA/community first and reuse a community
-     module (depend on it or mirror its pattern) before writing from scratch.
-   - `community` — strict Odoo community only; never assume Enterprise.
+     addons/repository in addition to the sources below.
+   - `community` — no Enterprise; Odoo community core only.
+   **In BOTH cases, ALWAYS also search OCA/community repositories** for an
+   existing module to depend on or mirror before writing from scratch. OCA
+   reuse is never skipped, so `licensed` only picks the *extra* source
+   (Enterprise) — it never disables the OCA search.
 3. **SUPERVISED mode**: you MUST interview the developer with
    `ask_user_question` — (a) create or bug, (b) licensing strategy, and (c) an
    explicit confirmation "proceed?" — and record the answer with

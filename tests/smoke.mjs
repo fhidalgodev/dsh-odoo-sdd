@@ -326,5 +326,14 @@ check("read reflects persisted values", rc.config.communityRepoPath === "/srv/od
 rc = await cfg.execute({ mode: "set", executeAllowlist: ["sale.order", "stock.move"] });
 check("set persists allowlist", rc.ok === true && Array.isArray(rc.config.executeAllowlist) && rc.config.executeAllowlist.includes("sale.order"));
 
+// The allowlist configured via odoo_config must actually gate odoo_execute (live config).
+const executeE = registered.get("odoo_execute");
+const exAllow = await executeE.execute({ model: "sale.order", method: "create", confirm_destructive: true });
+check("allowlisted mutation passes the gate (then fails: no instance)", exAllow.denied === true && exAllow.reason.includes("NOT CONFIGURED"));
+const exDeny = await executeE.execute({ model: "account.move", method: "unlink", confirm_destructive: true });
+check("non-allowlisted model still denied", exDeny.denied === true && exDeny.reason.includes("not allowlisted"));
+const exConfirm = await executeE.execute({ model: "sale.order", method: "create" });
+check("mutating call still requires confirm_destructive", exConfirm.denied === true && exConfirm.reason.includes("confirm_destructive"));
+
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -22,8 +22,8 @@ export interface RuntimeDeps {
 	status(projectRoot: string): { detail: string };
 	/** Deployment config resolution. */
 	projectRoot: string;
-	/** Deployment allowlist for MUTATING models. */
-	executeAllowlist: string[];
+	/** Models allowed for MUTATING calls, resolved AT CALL TIME (live config). */
+	allowlist(): string[];
 	/** Path/display masking helper. */
 	display(pathValue: string): string;
 }
@@ -40,11 +40,11 @@ export function registerRuntimeTools(
 		name: "odoo_execute",
 		description:
 			"Execute a JSON-RPC call against the connected instance with a fail-closed " +
-			"allowlist. Reads (search_read/read/search_count) are allowed for allowlisted " +
-			"models; MUTATING calls (create/write/unlink) additionally require " +
-			"confirm_destructive=true AND the model in the deployment allowlist. Unlisted " +
-			"models/methods are denied by default. Output is redacted. Target must be a " +
-			"disposable dev/staging DB.",
+			"allowlist. READ calls (search_read/read/search_count) are allowed; MUTATING " +
+			"calls (create/write/unlink) are denied unless BOTH confirm_destructive=true AND " +
+			"the model is in the mutation allowlist. The allowlist is read live from the " +
+			"plugin config (.sdd/config.json), so odoo_config changes apply immediately. " +
+			"Output is redacted. Target must be a disposable dev/staging DB.",
 		parameters: {
 			model: { type: "string", required: true, description: "Odoo model name." },
 			method: {
@@ -86,10 +86,10 @@ export function registerRuntimeTools(
 				if (a.confirm_destructive !== true) {
 					return { denied: true, reason: "Mutating call requires confirm_destructive=true.", result: "" };
 				}
-				if (!deps.executeAllowlist.includes(model)) {
+				if (!deps.allowlist().includes(model)) {
 					return {
 						denied: true,
-						reason: `Model "${model}" is not allowlisted for mutations — add it to executeAllowlist or run read-only.`,
+						reason: `Model "${model}" is not allowlisted for mutations — add it via odoo_config mode=set executeAllowlist=[...] or run read-only.`,
 						result: "",
 					};
 				}

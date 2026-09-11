@@ -1044,11 +1044,30 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// ---------------------------------------------------------------------
 	// Runtime tools: odoo_execute (CRUD/RPC allowlist) + odoo_validate (local)
 	// ---------------------------------------------------------------------
+	// Effective configuration: the persisted <projectRoot>/.sdd/config.json
+	// (written by odoo_config) takes precedence over the deployment config
+	// (cordis.patch.yml), which takes precedence over built-in defaults. It is
+	// resolved on every call so live edits apply without a restart.
+	const effectiveConfig = () => {
+		const data = loadConfigFile();
+		const asString = (v: unknown, fallback: string): string => (typeof v === "string" && v !== "" ? v : fallback);
+		const asList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+		return {
+			projectRoot: asString(data["projectRoot"], config.projectRoot ?? root(config)),
+			specsDir: asString(data["specsDir"], config.specsDir ?? "specs"),
+			executeAllowlist: Array.isArray(data["executeAllowlist"]) ? asList(data["executeAllowlist"]) : (config.executeAllowlist ?? []),
+			communityRepoUrl: asString(data["communityRepoUrl"], config.communityRepoUrl ?? "https://github.com/odoo/odoo"),
+			communityRepoPath: asString(data["communityRepoPath"], config.communityRepoPath ?? ""),
+			enterpriseRepoUrl: asString(data["enterpriseRepoUrl"], config.enterpriseRepoUrl ?? "https://github.com/odoo/enterprise"),
+			enterpriseRepoPath: asString(data["enterpriseRepoPath"], config.enterpriseRepoPath ?? ""),
+		};
+	};
+
 	registerRuntimeTools(ctx, {
-		client: () => clientFor(root(config)),
+		client: () => clientFor(effectiveConfig().projectRoot),
 		status: (pr) => setupStatusFor(pr),
-		projectRoot: root(config),
-		executeAllowlist: config.executeAllowlist ?? [],
+		projectRoot: effectiveConfig().projectRoot,
+		allowlist: () => effectiveConfig().executeAllowlist,
 		display: (v) => displayPath(v),
 	});
 }

@@ -295,6 +295,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		var scope = props.scope;
 		var prefix = props.idPrefix || "odoo-sdd";
 		var listDirectory = props.listDirectory;
+		var pickDirectory = props.pickDirectory;
 		var canWrite = Boolean(scope) && typeof scope === "object" && typeof scope.set === "function";
 
 		var st = react.useState(function () { return { form: toForm(readSnap(scope)), dirty: false, status: "idle", picker: null }; });
@@ -362,7 +363,34 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			var id = prefix + "-" + which;
 			var onToggle = function (next) { var p = {}; p[which + "Use"] = next; edit(p); };
 			var onVal = function (e) { var p = {}; p[which + (use === "url" ? "Url" : "Path")] = e.target.value; edit(p); };
-			var canBrowse = use === "path" && canWrite && typeof listDirectory === "function";
+			// Prefer the host-native chooser (works when the composed picker
+			// serves "native"); fall back to the in-app listing dialog when the
+			// composition serves "browse" instead.
+			var canNative = typeof pickDirectory === "function";
+			var canBrowseInApp = typeof listDirectory === "function";
+			var canBrowse = use === "path" && canWrite && (canNative || canBrowseInApp);
+			var doBrowse = function () {
+				var setPath = function (chosen) {
+					if (!chosen) return;
+					var p = {};
+					p[which + "Use"] = "path";
+					p[which + "Path"] = chosen;
+					edit(p);
+				};
+				if (canNative) {
+					Promise.resolve().then(function () { return pickDirectory(); }).then(function (chosen) {
+						if (chosen) setPath(chosen);
+						// null = the operator cancelled the OS dialog: do nothing.
+					}).catch(function () {
+						// Native unavailable (remote browser, no OS chooser): try
+						// the in-app listing dialog, else surface the failure.
+						if (canBrowseInApp) setModel(function (m) { return Object.assign({}, m, { picker: { which: which } }); });
+						else setModel(function (m) { return Object.assign({}, m, { status: "error" }); });
+					});
+					return;
+				}
+				setModel(function (m) { return Object.assign({}, m, { picker: { which: which } }); });
+			};
 			return h("div", null,
 				h("div", { className: "odoo-sdd-field" },
 					h("label", { className: "odoo-sdd-label", htmlFor: id }, use === "url" ? t("useUrl") : t("usePath")),
@@ -386,7 +414,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 						canBrowse ? h("button", {
 							type: "button", className: "odoo-sdd-btn odoo-sdd-btn--ghost odoo-sdd-btn--small",
 							"aria-label": t("browse"),
-							onClick: function () { setModel(function (m) { return Object.assign({}, m, { picker: { which: which } }); }); }
+							onClick: doBrowse
 						}, t("browse")) : null)));
 		};
 
@@ -468,13 +496,18 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 					scope = null;
 				}
 
-				// Host folder browser (optional): wires the "Browse…" affordance.
+				// Host folder picking (optional): native OS chooser first, then
+				// the in-app listing dialog — depending on the composed picker.
 				var listDirectory = null;
+				var pickDirectory = null;
 				try {
 					if (ctx.uiWorkspace && typeof ctx.uiWorkspace.listDirectory === "function") {
 						listDirectory = function (path) { return ctx.uiWorkspace.listDirectory(path); };
 					}
-				} catch (e) { listDirectory = null; }
+					if (ctx.uiWorkspace && typeof ctx.uiWorkspace.pickDirectory === "function") {
+						pickDirectory = function () { return ctx.uiWorkspace.pickDirectory(); };
+					}
+				} catch (e) { listDirectory = null; pickDirectory = null; }
 
 				ctx.slots.inject("settings.section", function () {
 					return ctx.slots.register({
@@ -484,7 +517,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 						label: function () { return t("nav"); },
 						locale: NS,
 						inject: function () { return { t: t }; }
-					}, function () { return h(SddSection, { t: t, scope: scope, listDirectory: listDirectory, idPrefix: "odoo-sdd-sec" }); });
+					}, function () { return h(SddSection, { t: t, scope: scope, listDirectory: listDirectory, pickDirectory: pickDirectory, idPrefix: "odoo-sdd-sec" }); });
 				});
 
 				scoped.slots.inject("settings.plugin.item", function () {
@@ -493,7 +526,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 						key: NS,
 						locale: NS,
 						inject: function () { return { t: t }; }
-					}, function () { return h(SddSection, { t: t, scope: scope, listDirectory: listDirectory, idPrefix: "odoo-sdd-card" }); });
+					}, function () { return h(SddSection, { t: t, scope: scope, listDirectory: listDirectory, pickDirectory: pickDirectory, idPrefix: "odoo-sdd-card" }); });
 				});
 			});
 		} catch (e) {

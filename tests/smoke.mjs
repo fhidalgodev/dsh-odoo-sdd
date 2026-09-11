@@ -171,6 +171,21 @@ const setup = registered.get("odoo_setup");
 const connect = registered.get("odoo_connect");
 check("odoo_setup registered", setup !== undefined);
 
+const expectedTools = [
+	"odoo_connect", "odoo_setup", "odoo_module", "odoo_execute", "odoo_validate",
+	"odoo_errors", "odoo_session", "odoo_config", "sdd_phase", "sdd_checkpoint",
+	"odoo_security_scan", "sdd_handoff",
+];
+check("registers exactly the 12 documented tools", registered.size === expectedTools.length);
+check(
+	"registered tool names match the documented set",
+	expectedTools.every((n) => registered.has(n)),
+);
+check(
+	"every registered tool has a description",
+	[...registered.values()].every((t) => typeof t.description === "string" && t.description.length > 20),
+);
+
 let rs = await setup.execute({ mode: "check" });
 check("empty project reports needs-setup", rs.status === "needs-setup");
 check("check reports missing gitignore entries", rs.gitignoreCovered === false && rs.detail.includes(".sdd/"));

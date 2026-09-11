@@ -84,6 +84,8 @@ export const Config = z.object({
 	communityRepoPath: z.string(),
 	enterpriseRepoUrl: z.string(),
 	enterpriseRepoPath: z.string(),
+	autonomy: z.string(),
+	licensed: z.string(),
 });
 
 /** Effective deployment configuration after validation. */
@@ -98,6 +100,10 @@ interface OdooSddConfig {
 	/** Odoo Enterprise source: git URL or local path (empty when not set). */
 	enterpriseRepoUrl?: string;
 	enterpriseRepoPath?: string;
+	/** Default delegation mode: supervised | autonomous. */
+	autonomy?: string;
+	/** Default licensing strategy: enterprise | oca | community. */
+	licensed?: string;
 }
 
 /** Minimal structural view of the host tool registry. */
@@ -253,6 +259,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		communityRepoPath: config.communityRepoPath ?? "",
 		enterpriseRepoUrl: config.enterpriseRepoUrl ?? "https://github.com/odoo/enterprise",
 		enterpriseRepoPath: config.enterpriseRepoPath ?? "",
+		autonomy: config.autonomy ?? "supervised",
+		licensed: config.licensed ?? "community",
 	};
 	ctx.inject?.<SddsSettingsProvider>(["settings"], (settingsCtx) => {
 		settingsCtx.settings.installSection(
@@ -949,6 +957,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			projectRoot: { type: "string", description: "Workspace root used by the tools." },
 			specsDir: { type: "string", description: "Specs folder (default 'specs')." },
 			executeAllowlist: { type: "array", items: { type: "string" }, description: "Models permitted for odoo_execute mutations." },
+			autonomy: { type: "string", enum: ["supervised", "autonomous"], description: "Default delegation mode." },
+			licensed: { type: "string", enum: ["enterprise", "oca", "community"], description: "Default licensing strategy." },
 		},
 		output: {
 			schema: {
@@ -969,6 +979,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							projectRoot: { type: "string", required: true },
 							specsDir: { type: "string", required: true },
 							executeAllowlist: { type: "array", required: true, items: { type: "string" } },
+							autonomy: { type: "string", required: true },
+							licensed: { type: "string", required: true },
 						},
 					},
 					detail: { type: "string", required: true },
@@ -988,6 +1000,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			projectRoot?: string;
 			specsDir?: string;
 			executeAllowlist?: string[];
+			autonomy?: string;
+			licensed?: string;
 		}) {
 			/** Project the stored JSON onto the known, typed configuration shape. */
 			const normalize = (data: Record<string, unknown>) => {
@@ -1001,6 +1015,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					projectRoot: asString(data["projectRoot"], ""),
 					specsDir: asString(data["specsDir"], "specs"),
 					executeAllowlist: asList(data["executeAllowlist"]),
+					autonomy: asString(data["autonomy"], "supervised"),
+					licensed: asString(data["licensed"], "community"),
 				};
 			};
 
@@ -1022,6 +1038,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.projectRoot !== undefined) updates["projectRoot"] = args.projectRoot;
 			if (args.specsDir !== undefined) updates["specsDir"] = args.specsDir;
 			if (args.executeAllowlist !== undefined) updates["executeAllowlist"] = args.executeAllowlist;
+			if (args.autonomy !== undefined) updates["autonomy"] = args.autonomy;
+			if (args.licensed !== undefined) updates["licensed"] = args.licensed;
 			if (Object.keys(updates).length === 0) {
 				return {
 					mode: "set" as string,
@@ -1060,6 +1078,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			communityRepoPath: asString(data["communityRepoPath"], config.communityRepoPath ?? ""),
 			enterpriseRepoUrl: asString(data["enterpriseRepoUrl"], config.enterpriseRepoUrl ?? "https://github.com/odoo/enterprise"),
 			enterpriseRepoPath: asString(data["enterpriseRepoPath"], config.enterpriseRepoPath ?? ""),
+			autonomy: asString(data["autonomy"], config.autonomy ?? "supervised"),
+			licensed: asString(data["licensed"], config.licensed ?? "community"),
 		};
 	};
 

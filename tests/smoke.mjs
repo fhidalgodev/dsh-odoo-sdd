@@ -335,5 +335,11 @@ check("non-allowlisted model still denied", exDeny.denied === true && exDeny.rea
 const exConfirm = await executeE.execute({ model: "sale.order", method: "create" });
 check("mutating call still requires confirm_destructive", exConfirm.denied === true && exConfirm.reason.includes("confirm_destructive"));
 
+rc = await cfg.execute({ mode: "read" });
+check("read defaults autonomy", rc.config.autonomy === "supervised");
+check("read defaults licensed", rc.config.licensed === "community");
+rc = await cfg.execute({ mode: "set", autonomy: "autonomous", licensed: "enterprise" });
+check("set persists autonomy/licensed", rc.ok === true && rc.config.autonomy === "autonomous" && rc.config.licensed === "enterprise");
+
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

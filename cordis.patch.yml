@@ -22,3 +22,6 @@
         communityRepoPath: ''
         enterpriseRepoUrl: 'https://github.com/odoo/enterprise'
         enterpriseRepoPath: ''
+        # Defaults surfaced and edited in Settings → Odoo SDD.
+        autonomy: 'supervised'
+        licensed: 'community'

@@ -47,6 +47,15 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"browse": "Examinar…",
 		"pipeline": "Pipeline",
 		"pipelineHint": "Estado en vivo del SDD: usa la tool sdd_phase status en la sesión.",
+		"policy": "Política",
+		"policyHint": "Guardas fail-closed del plugin. El guard bloquea mutaciones hasta que se cumplan.",
+		"yes": "Sí",
+		"no": "No",
+		"checkpointRequired": "Exigir checkpoint antes de mutar",
+		"securityReview": "Exigir revisión de seguridad para DONE",
+		"securityInterview": "Exigir entrevista de seguridad (grupos/ACL)",
+		"auditAll": "Auditar todas las tool calls",
+		"maxCheckpoints": "Checkpoints a conservar",
 		"save": "Guardar",
 		"saving": "Guardando…",
 		"saved": "Cambios guardados",
@@ -88,6 +97,15 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"browse": "Browse…",
 		"pipeline": "Pipeline",
 		"pipelineHint": "Live SDD state: use the sdd_phase status tool in the session.",
+		"policy": "Policy",
+		"policyHint": "Fail-closed plugin guards. The guard blocks mutations until they are satisfied.",
+		"yes": "Yes",
+		"no": "No",
+		"checkpointRequired": "Require a checkpoint before mutating",
+		"securityReview": "Require the security review before DONE",
+		"securityInterview": "Require the security interview (groups/ACL)",
+		"auditAll": "Audit every tool call",
+		"maxCheckpoints": "Checkpoints to retain",
 		"save": "Save",
 		"saving": "Saving…",
 		"saved": "Changes saved",
@@ -197,6 +215,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		var s = scopeState(scope).value;
 		var asStr = function (v, fb) { return typeof v === "string" ? v : fb; };
 		var asList = function (v) { return Array.isArray(v) ? v.filter(function (x) { return typeof x === "string"; }) : []; };
+		var asBool = function (v, fb) { return typeof v === "boolean" ? v : fb; };
 		var lic = asStr(s.licensed, "community");
 		if (lic !== "enterprise") lic = "community";
 		return {
@@ -206,7 +225,12 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			communityRepoUrl: asStr(s.communityRepoUrl, "https://github.com/odoo/odoo"),
 			communityRepoPath: asStr(s.communityRepoPath, ""),
 			enterpriseRepoUrl: asStr(s.enterpriseRepoUrl, "https://github.com/odoo/enterprise"),
-			enterpriseRepoPath: asStr(s.enterpriseRepoPath, "")
+			enterpriseRepoPath: asStr(s.enterpriseRepoPath, ""),
+			requireCheckpointBeforeMutation: asBool(s.requireCheckpointBeforeMutation, true),
+			securityReviewRequired: asBool(s.securityReviewRequired, true),
+			securityInterviewRequired: asBool(s.securityInterviewRequired, true),
+			auditAllTools: asBool(s.auditAllTools, true),
+			maxCheckpoints: typeof s.maxCheckpoints === "number" ? s.maxCheckpoints : 5
 		};
 	}
 
@@ -220,7 +244,12 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			communityPath: snap.communityRepoPath,
 			enterpriseUse: snap.enterpriseRepoPath ? "path" : "url",
 			enterpriseUrl: snap.enterpriseRepoUrl,
-			enterprisePath: snap.enterpriseRepoPath
+			enterprisePath: snap.enterpriseRepoPath,
+			requireCheckpointBeforeMutation: snap.requireCheckpointBeforeMutation,
+			securityReviewRequired: snap.securityReviewRequired,
+			securityInterviewRequired: snap.securityInterviewRequired,
+			auditAllTools: snap.auditAllTools,
+			maxCheckpoints: String(snap.maxCheckpoints)
 		};
 	}
 
@@ -345,7 +374,12 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 				communityRepoUrl: form.communityUse === "url" ? form.communityUrl : "",
 				communityRepoPath: form.communityUse === "path" ? form.communityPath : "",
 				enterpriseRepoUrl: form.enterpriseUse === "url" ? form.enterpriseUrl : "",
-				enterpriseRepoPath: form.enterpriseUse === "path" ? form.enterprisePath : ""
+				enterpriseRepoPath: form.enterpriseUse === "path" ? form.enterprisePath : "",
+				requireCheckpointBeforeMutation: form.requireCheckpointBeforeMutation === true,
+				securityReviewRequired: form.securityReviewRequired === true,
+				securityInterviewRequired: form.securityInterviewRequired === true,
+				auditAllTools: form.auditAllTools === true,
+				maxCheckpoints: Number(form.maxCheckpoints) > 0 ? Number(form.maxCheckpoints) : 5
 			};
 			var ops = [];
 			Object.keys(target).forEach(function (k) {
@@ -373,6 +407,26 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 						onClick: function () { var p = {}; p[name] = o.value; edit(p); }
 					}, o.label);
 				}));
+		};
+
+		/** Boolean toggle rendered as a Yes/No segmented control. */
+		var boolSeg = function (name, value) {
+			return h("div", { className: "odoo-sdd-seg", role: "group" },
+				[{ v: true, l: t("yes") }, { v: false, l: t("no") }].map(function (o) {
+					return h("button", {
+						key: String(o.v), type: "button", disabled: !canWrite,
+						className: "odoo-sdd-seg-btn" + (value === o.v ? " is-on" : ""),
+						"aria-pressed": value === o.v,
+						onClick: function () { var p = {}; p[name] = o.v; edit(p); }
+					}, o.l);
+				}));
+		};
+
+		/** One labelled policy row. */
+		var policyRow = function (label, ctl) {
+			return h("div", { className: "odoo-sdd-field" },
+				h("span", { className: "odoo-sdd-label" }, label),
+				ctl);
 		};
 
 		var repo = function (which) {
@@ -487,6 +541,15 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 
 			h(SectionCard, { title: t("repoCommunity"), hint: t("repoHint") }, repo("community")),
 			h(SectionCard, { title: t("repoEnterprise"), hint: t("repoHint") }, repo("enterprise")),
+
+			h(SectionCard, { title: t("policy"), hint: t("policyHint") },
+				policyRow(t("checkpointRequired"), boolSeg("requireCheckpointBeforeMutation", form.requireCheckpointBeforeMutation)),
+				policyRow(t("securityReview"), boolSeg("securityReviewRequired", form.securityReviewRequired)),
+				policyRow(t("securityInterview"), boolSeg("securityInterviewRequired", form.securityInterviewRequired)),
+				policyRow(t("auditAll"), boolSeg("auditAllTools", form.auditAllTools)),
+				h("div", { className: "odoo-sdd-field" },
+					h("label", { className: "odoo-sdd-label", htmlFor: prefix + "-maxcp" }, t("maxCheckpoints")),
+					h("input", { id: prefix + "-maxcp", type: "number", min: "1", className: "odoo-sdd-input", value: form.maxCheckpoints, disabled: !canWrite, onChange: onField("maxCheckpoints") }))),
 
 			h(SectionCard, { title: t("pipeline"), hint: t("pipelineHint") }, null),
 

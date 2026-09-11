@@ -6,22 +6,22 @@
  *   ctx.inject(["settingsScope"]) .
  * It contributes:
  *   1. a **section** in Settings (slot `settings.section`) — "Odoo SDD",
- *      showing pipeline config and letting the user edit delegation, license
- *      and the mutation allowlist (persisted via the settings namespace);
  *   2. a **card** in Settings → Plugins → Plugin configuration
  *      (slot `settings.plugin.item`), keyed on the `odoo-sdd` namespace.
  *
- * `require("react")` and injected modules are supplied by the host at
- * runtime, so only `dsh plugin add` + a web restart are needed — no webapp
- * rebuild (the dshmarket precedent runs exactly like this).
+ * The section shows connection / delegation / licensing / allowlist state. It
+ * becomes EDITABLE when the host exposes a settings scope for our namespace
+ * (set()/replace()); otherwise it renders a polished read-only view with a
+ * hint that editing happens in the session (odoo_setup / sdd_phase).
+ *
+ * `require("react")` and injected modules are supplied by the host at runtime.
  */
-window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", name: "odoo-sdd", factory: (require) => {
+window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 
 	var module = { exports: {} };
 	var exports = module.exports;
 
 	var react = require("react");
-	require("@deepseek-ai/dsh-client-ui-primitives");
 
 	var NS = "odoo-sdd";
 
@@ -32,7 +32,22 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", name: "odoo-sdd", factory: (r
 		"license": "Licencia",
 		"allowlist": "Allowlist de mutaciones",
 		"save": "Guardar",
-		"pipelineHint": "Estado en vivo: usa la tool `sdd_phase status` en la sesión."
+		"saved": "Guardado",
+		"readonly": "Solo lectura",
+		"readonlyHint": "Edita delegación, licencia y allowlist desde la conversación con odoo_setup / sdd_phase.",
+		"pipeline": "Pipeline",
+		"pipelineHint": "Estado en vivo: usa la tool `sdd_phase status` en la sesión.",
+		"connConfigured": "Configurada",
+		"connNeedsSetup": "Falta configurar",
+		"connNeedsSecret": "Falta credencial",
+		"connSkipped": "Sin instancia",
+		"connUnknown": "Desconocida",
+		"modeSupervised": "Supervisado",
+		"modeAutonomous": "Autónomo",
+		"licEnterprise": "Enterprise",
+		"licOca": "OCA / Comunidad",
+		"licCommunity": "Solo comunidad",
+		"enterModels": "Modelos (separados por coma)"
 	};
 	var en = {
 		"nav": "Odoo SDD",
@@ -41,67 +56,180 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", name: "odoo-sdd", factory: (r
 		"license": "Licensing",
 		"allowlist": "Mutation allowlist",
 		"save": "Save",
-		"pipelineHint": "Live state: use the `sdd_phase status` tool in the session."
+		"saved": "Saved",
+		"readonly": "Read only",
+		"readonlyHint": "Edit delegation, licensing and allowlist from the conversation with odoo_setup / sdd_phase.",
+		"pipeline": "Pipeline",
+		"pipelineHint": "Live state: use the `sdd_phase status` tool in the session.",
+		"connConfigured": "Configured",
+		"connNeedsSetup": "Needs setup",
+		"connNeedsSecret": "Needs secret",
+		"connSkipped": "No instance",
+		"connUnknown": "Unknown",
+		"modeSupervised": "Supervised",
+		"modeAutonomous": "Autonomous",
+		"licEnterprise": "Enterprise",
+		"licOca": "OCA / Community",
+		"licCommunity": "Community only",
+		"enterModels": "Models (comma separated)"
 	};
 
 	var pick = function (locales, key) {
 		var d = (locales && locales.en) || en;
-		return d[key] || en[key] || key;
+		return d[key] || key;
 	};
 
-	/** The settings section body: state + editable delegation/license/allowlist. */
+	var STYLE = {
+		row: { marginBottom: 4 },
+		cardHeader: { fontWeight: 600, fontSize: 13, color: "#1f2328", margin: "0 0 2px" },
+		label: { fontSize: 12, color: "#6b7280" },
+		hint: { fontSize: 12, color: "#9ca3af" },
+		select: { boxSizing: "border-box", width: "100%", padding: "6px 8px", borderRadius: 7, border: "1px solid #d1d5db", background: "#fff", color: "#1f2328", fontSize: 13 },
+		input: { boxSizing: "border-box", width: "100%", padding: "6px 8px", borderRadius: 7, border: "1px solid #d1d5db", background: "#fff", color: "#1f2328", fontSize: 13 },
+		btn: { background: "#4f6ef7", color: "#fff", border: "none", borderRadius: 7, padding: "6px 14px", fontSize: 13, cursor: "pointer" },
+		btnDisabled: { background: "#e5e7eb", color: "#9ca3af", border: "none", borderRadius: 7, padding: "6px 14px", fontSize: 13, cursor: "default" },
+		card: { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "12px 14px", margin: "0 0 10px" },
+		readonlyBanner: { background: "#fdf3e3", border: "1px solid #f3e3c3", borderRadius: 8, padding: "8px 12px", fontSize: 12, color: "#b45309", display: "flex", flexDirection: "column", gap: 4 }
+	};
+
+	var statusColor = function (label) {
+		// green / amber / red / gray for the connection badge.
+		if (label === "connConfigured") return "#16a34a";
+		if (label === "connNeedsSecret") return "#b45309";
+		if (label === "connNeedsSetup" || label === "connUnknown") return "#dc2626";
+		return "#6b7280"; // skipped
+	};
+
+	var Badge = function (props) {
+		var color = props.color;
+		var text = props.text;
+		return react.createElement("span", {
+			style: {
+				display: "inline-flex", alignItems: "center", gap: 6, padding: "1px 8px",
+				fontSize: 11, fontWeight: 600, borderRadius: 5, color: "#fff", background: color
+			}
+		}, text);
+	};
+
+	var SectionCard = function (props) {
+		var t = props.t; var title = props.title; var children = props.children; var badge = props.badge;
+		return react.createElement("div", { style: STYLE.card },
+			react.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+				react.createElement("span", { style: STYLE.cardHeader }, title),
+				badge ? badge : null
+			),
+			children
+		);
+	};
+
+	/** The settings section: state + editable-iff-scope delegation/license/allowlist. */
 	var SddSection = function (props) {
 		var t = props.t;
 		var scope = props.scope;
-		var snap = (scope && typeof scope.getSnapshot === "function") ? (scope.getSnapshot() || {}) : {};
+		var snap = {};
+		try { snap = (scope && typeof scope.getSnapshot === "function") ? (scope.getSnapshot() || {}) : {}; } catch (e) { snap = {}; }
 		var projectRoot = snap.projectRoot || "";
 		var specsDir = snap.specsDir || "specs";
+		var connLabel = (snap.connectionState || "connUnknown");
+		var canWrite = Boolean(scope) && typeof scope === "object" && (typeof scope.set === "function" || typeof scope.replace === "function");
 
-		var state = react.useState({ mode: snap.mode || "supervised", licensed: snap.licensed || "community", allowlist: (Array.isArray(snap.executeAllowlist) ? snap.executeAllowlist : []).join(", ") });
-		var form = state[0];
-		var setForm = state[1];
+		var state = react.useState({ mode: snap.mode || "supervised", licensed: snap.licensed || "community", allowlist: (Array.isArray(snap.executeAllowlist) ? snap.executeAllowlist : []).join(", "), saved: false });
+		var form = state[0]; var setForm = state[1];
 
 		if (react.useEffect && scope && typeof scope.subscribe === "function") {
 			react.useEffect(function () {
 				return scope.subscribe(function () {
-					var next = (scope.getSnapshot && scope.getSnapshot()) || {};
-					setForm({ mode: next.mode || "supervised", licensed: next.licensed || "community", allowlist: (Array.isArray(next.executeAllowlist) ? next.executeAllowlist : []).join(", ") });
+					var next = {};
+					try { next = (scope.getSnapshot && scope.getSnapshot()) || {}; } catch (e) { next = {}; }
+					setForm({ mode: next.mode || "supervised", licensed: next.licensed || "community", allowlist: (Array.isArray(next.executeAllowlist) ? next.executeAllowlist : []).join(", "), saved: false });
 				});
 			}, [scope]);
 		}
 
-		var canWrite = scope && typeof scope.replace === "function";
-		var save = function () {
+		var persist = function () {
 			if (!canWrite) return;
 			var allowVals = (form.allowlist || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
-			scope.replace({ mode: form.mode, licensed: form.licensed, executeAllowlist: allowVals, projectRoot: projectRoot, specsDir: specsDir });
+			var done = false;
+			try {
+				if (typeof scope.replace === "function") {
+					scope.replace({ mode: form.mode, licensed: form.licensed, executeAllowlist: allowVals, projectRoot: projectRoot, specsDir: specsDir });
+					done = true;
+				} else if (typeof scope.set === "function") {
+					scope.set("mode", form.mode); scope.set("licensed", form.licensed); scope.set("executeAllowlist", allowVals);
+					done = true;
+				}
+			} catch (e) { done = false; }
+			if (done) setForm(Object.assign({}, form, { saved: true }));
 		};
-		var onChange = function (field) { return function (e) { var n = {}; n[field] = e.target.value; setForm(Object.assign({}, form, n)); }; };
 
-		return react.createElement("div", { style: { flexDirection: "column", gap: 14, padding: "12px 4px 24px", display: "flex" } },
-			react.createElement("h3", { style: { margin: 0 } }, t("connection")),
-			react.createElement("div", { style: { fontSize: 13, color: "#6b7280" } }, "projectRoot=" + projectRoot + " · specsDir=" + specsDir),
-			react.createElement("h3", { style: { margin: 0 } }, t("delegation")),
-			react.createElement("select", { value: form.mode, onChange: onChange("mode"), disabled: !canWrite },
-				react.createElement("option", { value: "supervised" }, "supervised"),
-				react.createElement("option", { value: "autonomous" }, "autonomous")),
-			react.createElement("h3", { style: { margin: 0 } }, t("license")),
-			react.createElement("select", { value: form.licensed, onChange: onChange("licensed"), disabled: !canWrite },
-				react.createElement("option", { value: "enterprise" }, "enterprise"),
-				react.createElement("option", { value: "oca" }, "oca"),
-				react.createElement("option", { value: "community" }, "community")),
-			react.createElement("h3", { style: { margin: 0 } }, t("allowlist")),
-			react.createElement("input", { type: "text", value: form.allowlist, onChange: onChange("allowlist"), disabled: !canWrite, placeholder: "sale.order, stock.move", style: { boxSizing: "border-box", width: "100%", padding: "6px 8px" } }),
-			react.createElement("button", { onClick: save, disabled: !canWrite, style: { alignSelf: "flex-start" } }, t("save")),
-			react.createElement("div", { style: { fontSize: 12, color: "#9ca3af" } }, t("pipelineHint"))
+		var onChange = function (field) { return function (e) { var n = {}; n[field] = e.target.value; n.saved = false; setForm(Object.assign({}, form, n)); }; };
+
+		var selectCtl = function (field, value, options, labels) {
+			if (!canWrite) {
+				var label = labels[value] || value;
+				return react.createElement("div", { style: STYLE.label }, label);
+			}
+			return react.createElement("select", { value: value, onChange: onChange(field), disabled: !canWrite, style: STYLE.select },
+				options.map(function (o) { return react.createElement("option", { value: o }, labels[o] || o); }));
+		};
+
+		var allowCtl;
+		if (!canWrite) {
+			var chips = (Array.isArray(snap.executeAllowlist) ? snap.executeAllowlist : []);
+			allowCtl = react.createElement("div", {},
+				chips.length === 0
+					? react.createElement("span", { style: STYLE.hint }, "—")
+					: chips.map(function (c) { return react.createElement("code", { style: { background: "#eef0f4", borderRadius: 5, padding: "0 5px", fontSize: 11 } }, c); } )
+			);
+		} else {
+			allowCtl = react.createElement("input", { type: "text", value: form.allowlist, onChange: onChange("allowlist"), disabled: !canWrite, style: STYLE.input, placeholder: "sale.order, stock.move" });
+		}
+
+		var readonlyBanner = canWrite ? null : react.createElement("div", { style: STYLE.readonlyBanner },
+			react.createElement("div", { style: { fontWeight: 600 } }, t("readonly")),
+			react.createElement("div", { style: { fontSize: 12 } }, t("readonlyHint"))
+		);
+
+		var delta = {
+			connConfigured: t("connConfigured"), connNeedsSetup: t("connNeedsSetup"),
+			connNeedsSecret: t("connNeedsSecret"), connSkipped: t("connSkipped"), connUnknown: t("connUnknown")
+		};
+		var connText = delta[connLabel] || t("connUnknown");
+
+		return react.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10, padding: "4px 4px 20px" } },
+			readonlyBanner,
+			react.createElement(SectionCard, { t: t, title: t("connection"), badge: react.createElement(Badge, { color: statusColor(connLabel), text: connText }) },
+				react.createElement("div", { style: STYLE.label }, "projectRoot=" + (projectRoot || "—") + " · specsDir=" + specsDir)),
+			react.createElement(SectionCard, { t: t, title: t("delegation") },
+				selectCtl("mode", form.mode, ["supervised", "autonomous"], { supervised: t("modeSupervised"), autonomous: t("modeAutonomous") })),
+			react.createElement(SectionCard, { t: t, title: t("license") },
+				selectCtl("licensed", form.licensed, ["enterprise", "oca", "community"], { enterprise: t("licEnterprise"), oca: t("licOca"), community: t("licCommunity") })),
+			react.createElement(SectionCard, { t: t, title: t("allowlist") },
+				react.createElement("div", { style: STYLE.label }, t("enterModels")),
+				allowCtl,
+				canWrite
+					? react.createElement("div", { style: STYLE.row },
+						react.createElement("button", { onClick: persist, style: form.saved ? STYLE.btnDisabled : STYLE.btn }, form.saved ? t("saved") : t("save")))
+					: null),
+			react.createElement(SectionCard, { t: t, title: t("pipeline") },
+				react.createElement("div", { style: STYLE.hint }, t("pipelineHint")))
 		);
 	};
 
-	/** apply(): contribute the section + the config card, market-style. */
+	/** Resolve the settings scope for NS when the host exposes it. */
+	function resolveScope(ctx) {
+		try {
+			if (ctx && ctx.scopes && typeof ctx.scopes.get === "function") return ctx.scopes.get(NS);
+			if (ctx && ctx.settingsScope && typeof ctx.settingsScope.get === "function") return ctx.settingsScope.get(NS);
+		} catch (e) { /* no scope exposed -> read-only */ }
+		return null;
+	}
+
 	function apply(ctx) {
 		try {
 			ctx.effect(function () { ctx.locale.register(NS, { zh: zh, en: en }); }, "odoo-sdd: dictionaries");
 			var t = ctx.locale.bind(NS);
+			var scope = resolveScope(ctx);
 
 			// 1) Settings section (sidebar entry under Settings).
 			ctx.slots.inject("settings.section", function () {
@@ -113,7 +241,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", name: "odoo-sdd", factory: (r
 					locale: NS,
 					inject: function () { return { t: t }; }
 				}, function (ownerProps) {
-					return react.createElement(SddSection, { t: t });
+					return react.createElement(SddSection, { t: t, scope: scope });
 				});
 			});
 
@@ -126,7 +254,10 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", name: "odoo-sdd", factory: (r
 						locale: NS,
 						inject: function () { return { t: t }; }
 					}, function () {
-						return react.createElement(SddSection, { t: t });
+						// Inside the settingsScope callback the scope for NS is
+						// resolvable — use the resolver plus the injected scoped.
+						var sc = scoped.get && typeof scoped.get === "function" ? (scoped.get(NS) || scope) : scope;
+						return react.createElement(SddSection, { t: t, scope: sc });
 					});
 				});
 			});
@@ -144,9 +275,6 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", name: "odoo-sdd", factory: (r
 		}
 		return missing;
 	};
-	// Services the host injects into the `ctx` passed to `apply()`. Without
-	// this list, `ctx.locale` / `ctx.slots` are unavailable — exactly why
-	// apply() failed with "cannot get property locale without inject".
 	var inject = ["slots", "locale", "theme"];
 	exports.apply = apply;
 	exports.inject = inject;

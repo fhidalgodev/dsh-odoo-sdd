@@ -491,7 +491,7 @@ export function securityGaps(specDir: string): string[] {
 }
 
 const EXTRA_VIEW_TYPES =
-	/\b(kanban|pivot|graph|calendar|dashboard|gantt|activity|map|cohort|funnel)\b/i;
+	/\b(search|kanban|pivot|graph|calendar|dashboard|gantt|activity|map|cohort|funnel)\b/i;
 const NO_EXTRA_VIEWS = /(form\s*\+\s*tree|no extra view|solo\s+form|only form)/i;
 const REPORT_KEYWORDS =
 	/\b(report|pdf|sql|csv|xlsx|export|qweb|ir\.actions\.report|\breport\b)\b/i;
@@ -519,8 +519,9 @@ export function designWarnings(specDir: string): string[] {
 	const views = section("Views");
 	if (views.trim() !== "" && !EXTRA_VIEW_TYPES.test(views) && !NO_EXTRA_VIEWS.test(views)) {
 		warnings.push(
-			"`## Views`: no extra view type declared — confirm whether any model needs kanban/pivot/graph/" +
-			"calendar/dashboard/… beyond form/tree, or write \"form + tree only (no extra view types)\".",
+			"`## Views`: no extra view type declared — confirm whether any model needs a search view " +
+			"(custom filters/favorites), kanban/pivot/graph/calendar/dashboard/… beyond form/tree, or " +
+			"write \"form + tree only (no extra view types)\".",
 		);
 	}
 	const reports = section("Reports");

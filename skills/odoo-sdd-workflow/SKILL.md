@@ -181,10 +181,10 @@ Once clarified: `sdd_phase advance next_phase=READ_SPEC`.
    - New/inherited models, fields, relations (Many2one/One2many), constraints,
      computed + depends.
    - Views (XML IDs to inherit — never replace) **with an explicit view-type
-     decision per model**: which types beyond form/tree/list are needed (kanban,
-     pivot, graph, calendar, dashboard, gantt, activity, map, cohort, funnel),
-     each justified. If a model is form+tree only, say so: "form + tree only
-     (no extra view types)".
+     decision per model**: which types beyond form/tree/list are needed (`search`
+     for a custom filter/favorites bar, kanban, pivot, graph, calendar,
+     dashboard, gantt, activity, map, cohort, funnel), each justified. If a
+     model is form+tree only, say so: "form + tree only (no extra view types)".
    - `## Reports`: every report the module delivers (PDF via
      `ir.actions.report`/QWeb, SQL/raw query, CSV/XLSX export, web page,
      external tool), its source model/fields, and its trigger (menu/button/action
@@ -197,8 +197,10 @@ Once clarified: `sdd_phase advance next_phase=READ_SPEC`.
 2b. **Design interview (guide, does NOT block)**: before finalizing, ask the
    developer with `ask_user_question` about anything the spec left open — do not
    assume. Ask specifically (a) which **extra view types** any model needs
-   beyond form/tree, and (b) which **reports** (PDF/SQL/CSV/XLSX/dashboard) are
-   needed and in which medium (Odoo `ir.actions.report` vs external). Record the
+   beyond form/tree — including whether a **`search` view** is needed for custom
+   filters/favorites on how the model is searched — and (b) which **reports**
+   (PDF/SQL/CSV/XLSX/dashboard) are needed and in which medium (Odoo
+   `ir.actions.report` vs external). Record the
    answer verbatim as `decision` nodes in the KB and mirror it in
    `architecture.md`. If the developer answers "no"/"form+tree only"/"no
    reports", record that as an explicit decision; if they do not answer, record

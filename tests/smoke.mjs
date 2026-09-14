@@ -61,6 +61,17 @@ console.log("== design inventory (guide, non-blocking) ==");
 	);
 	warns = sdd.designWarnings(designDir);
 	check("kanban declaration clears the extra-view-type warning", warns.length === 0);
+	// A declared search view also counts as an extra view type (no view warning).
+	writeFileSync(
+		join(designDir, "architecture.md"),
+		"# Architecture\n\n## Models\n\nA model.\n\n" +
+			"## Views\n\nsearch view with a name filter and group-by on stage.\n\n" +
+			"## Security\n\nbase.group_user; ir.model.access.csv read/write/create/unlink; no record rules needed.\n\n" +
+			"## Manifest\n\nmodule_a\n\n" +
+			"## Reports\n\nNo reports needed.\n",
+	);
+	warns = sdd.designWarnings(designDir);
+	check("search-view declaration clears the extra-view-type warning", warns.length === 0);
 }
 
 let st = sdd.loadState(specDir);

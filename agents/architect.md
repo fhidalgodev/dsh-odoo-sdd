@@ -35,9 +35,12 @@ acceptance criterion.
   constraints, computed + depends, indexes, translations.
 - `## Views` — every view the module ships or inherits. For EACH model involved,
   state which view **types** are needed **besides** the classic form/tree/list
-  (e.g. `kanban`, `pivot`, `graph`, `calendar`, `dashboard`, `gantt`, `activity`,
-  `map`, `cohort`, `funnel`), each with its XML id (inherit, never replace) and a
-  one-line justification. If a model needs only form/tree, say so explicitly:
+  (e.g. `search`, `kanban`, `pivot`, `graph`, `calendar`, `dashboard`, `gantt`,
+  `activity`, `map`, `cohort`, `funnel`), each with its XML id (inherit, never
+  replace) and a one-line justification. **Include the `search` view** when the
+  model needs a custom search/filter bar (named filters, group-by, default
+  filter) — it is the view that drives how users search the model. If a model
+  needs only form/tree, say so explicitly:
   "form + tree only (no extra view types)". Menus and actions belong here too.
 - `## Security` — groups, `ir.model.access.csv`, record rules.
 - `## Manifest` — directory layout and exact `__manifest__.py` depends + data.
@@ -54,9 +57,11 @@ acceptance criterion.
 ## Design interview (guide, does NOT block)
 Before finalizing `architecture.md`, ask the developer with `ask_user_question`
 about anything ambiguous the spec left open — **do not assume**:
-- **Extra view types**: does any model need a `kanban`, `pivot`, `graph`,
-  `calendar`, `dashboard`, `gantt`, `activity`, `map`, `cohort` or `funnel` view
-  beyond the default form/tree? Which ones, and why?
+- **Extra view types**: does any model need a `search` (custom filter bar,
+  group-by), `kanban`, `pivot`, `graph`, `calendar`, `dashboard`, `gantt`,
+  `activity`, `map`, `cohort` or `funnel` view beyond the default form/tree?
+  Which ones, and why? In particular, does the model need a custom **search
+  view** to define filters/favorites for how it is searched?
 - **Reports**: does the business need any report (PDF, SQL/raw query, CSV/XLSX
   export, dashboard)? What data, what output, and is it delivered in Odoo
   (`ir.actions.report`, QWeb template) or by an external tool/process?

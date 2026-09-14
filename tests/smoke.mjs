@@ -148,6 +148,42 @@ try {
 }
 check("apply() refuses host without tools (fail-closed)", threw);
 
+// --- skill registration: an installed plugin advertises the workflow skill ---
+const skillRegistrations = [];
+const skillHostCtx = {
+	tools: { register: () => {}, guard: () => () => {} },
+	skills: { register: (skill) => skillRegistrations.push(skill) },
+};
+plugin.apply(skillHostCtx, {});
+check("registers the odoo-sdd-workflow skill", skillRegistrations.some((s) => s.name === "odoo-sdd-workflow"));
+const sddSkill = skillRegistrations.find((s) => s.name === "odoo-sdd-workflow");
+check(
+	"workflow skill is model- and user-invocable",
+	sddSkill?.invocation?.modelInvocable === true && sddSkill?.invocation?.userInvocable === true,
+);
+check(
+	"workflow skill carries a description and instruction body",
+	typeof sddSkill?.description === "string" && sddSkill.description.length > 20 &&
+		typeof sddSkill?.content === "string" && sddSkill.content.length > 100,
+);
+check(
+	"workflow skill body has no raw frontmatter leak",
+	typeof sddSkill?.content === "string" && !/^---\r?\n/.test(sddSkill.content),
+);
+check(
+	"workflow skill carries a whenToUse routing guard",
+	typeof sddSkill?.whenToUse === "string" && /Odoo/i.test(sddSkill.whenToUse),
+);
+
+// A host WITH tools but WITHOUT a skills registry must still mount (fail-open).
+threw = false;
+try {
+	plugin.apply({ tools: { register: () => {}, guard: () => () => {} } }, {});
+} catch {
+	threw = true;
+}
+check("apply() keeps working on a host without a skills registry (fail-open)", !threw);
+
 
 console.log("== onboarding & cascade (odoo_setup) ==");
 // Isolate user-scope config inside the tmp dir and clear overrides.

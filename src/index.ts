@@ -81,13 +81,14 @@ import {
 	PHASES,
 } from "./sdd-state.js";
 import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 
 /** Cordis plugin name. */
 export const name = "odoo-sdd";
 
 /** Services this plugin injects from the host. */
-export const inject = ["tools"];
+export const inject = ["tools", "skills"];
 
 /** Deployment configuration schema (settable from cordis.patch.yml).
  * Schemastery convention: a property WITHOUT `.required()` is optional. */
@@ -247,6 +248,72 @@ function gitignoreCoverage(projectRoot: string): { covered: boolean; missing: st
 	return { covered: missing.length === 0, missing };
 }
 
+interface SkillApi {
+	register(skill: {
+		name: string;
+		description: string;
+		content: string;
+		whenToUse?: string;
+		invocation?: { modelInvocable: boolean; userInvocable: boolean };
+	}): () => void;
+}
+
+const ODOO_SDD_SKILL_NAME = "odoo-sdd-workflow";
+
+/**
+ * Register the bundled workflow as a runtime skill so DSH advertises it in the
+ * model-facing catalog (modelInvocable) and the user-facing catalog
+ * (userInvocable) on every new session. This is what makes the protocol
+ * discoverable automatically after a user installs the plugin, instead of
+ * requiring them to reach into `skills/odoo-sdd-workflow/SKILL.md` by hand.
+ */
+function registerOdooSddSkill(ctx: unknown): void {
+	try {
+		const c = ctx as { skills?: SkillApi };
+		const skillPath = join(
+			dirname(fileURLToPath(import.meta.url)),
+			"..",
+			"skills",
+			"odoo-sdd-workflow",
+			"SKILL.md",
+		);
+		const raw = readFileSync(skillPath, "utf8");
+		// Strip the `---` frontmatter from the body and lift its single-line
+		// keys into the registry summary, so the model sees a clean description
+		// and the body is pure instructions.
+		const front = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
+		let name = ODOO_SDD_SKILL_NAME;
+		let description = "";
+		let whenToUse: string | undefined;
+		let content = raw;
+		if (front) {
+			content = raw.slice(front[0].length);
+			for (const line of front[1].split(/\r?\n/)) {
+				const m = /^(\w[\w-]*)\s*:\s*(.*)$/.exec(line);
+				if (!m) continue;
+				const value = m[2].trim().replace(/^["']|["']$/g, "");
+				if (m[1] === "name") name = value;
+				else if (m[1] === "description") description += (description ? " " : "") + value;
+				else if (m[1] === "whenToUse" || m[1] === "when-to-use") whenToUse = value;
+			}
+		}
+		const api = c.skills;
+		if (!api || typeof api.register !== "function") return; // fail-open: no skills host
+		api.register({
+			name,
+			description:
+				description ||
+				"Spec-Driven Development pipeline for Odoo modules on top of the dsh-odoo-sdd plugin.",
+			...(whenToUse ? { whenToUse } : {}),
+			content,
+			invocation: { modelInvocable: true, userInvocable: true },
+		});
+	} catch {
+		// A missing/unreadable skill must never break the plugin mount; the
+		// workflow stays available in the repository as a file.
+	}
+}
+
 /**
  * Register every SDD tool on the host tool registry.
  * @param ctx - registrant context carrying the tool registry.
@@ -263,6 +330,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			"upgrade the harness or check the profile composition.",
 		);
 	}
+	// A skill registry is optional on some hosts; register the bundled workflow
+	// when present so it is advertised to the model on every new session.
+	registerOdooSddSkill(ctx);
 	// S2: sanitizer for any agent-supplied text the pipeline persists.
 	const sanitize = (textValue: string): string => {
 		const loaded = loadCredentials(root(config));

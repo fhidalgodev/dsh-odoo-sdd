@@ -192,7 +192,7 @@ por proyecto con `odoo_setup mode=autonomy decision=...`:
 | **executors** | `odoo_module`, `odoo_execute`, `odoo_validate`, `odoo_errors` |
 | **schemas** | plantillas con secciones obligatorias; `transition()` rechaza una fase cuyo entregable carezca de ellas |
 | **knowledge** | skills de patrones Odoo pinneados por versión (delegados, verificados por el skill) |
-| **skills** | `SKILL.md` — el flujo de orquestación en 5 fases |
+| **skills** | `SKILL.md` — el flujo de orquestación en 5 fases, auto-registrado con el host en `apply()` para que se anuncie al modelo en cada sesión nueva |
 | **logbook** | `kb.json` — decisiones, descartadas, blockers; se lee antes de proponer |
 | **audit** | `.sdd/audit.jsonl` — log de actividad append-only sanitizado, escrito por un listener global `tools/result` (no solo por las tools de Odoo) |
 | **rollback** | `.sdd/checkpoints/<id>/` — manifest + snapshot de archivos + journal de datos, restaurable por spec |
@@ -231,7 +231,11 @@ camino de mutación tiene vuelta atrás y forma de probar qué pasó.
 ### 4. Protocolo de trabajo
 
 El skill [`skills/odoo-sdd-workflow/SKILL.md`](skills/odoo-sdd-workflow/SKILL.md)
-define el protocolo de 5 fases que el agente debe seguir:
+define el protocolo de 5 fases que el agente debe seguir. Se **auto-registra**
+cuando el plugin aplica: `apply()` llama a `ctx.skills.register(...)` con
+`modelInvocable` + `userInvocable` y un guard `whenToUse` acotado al trabajo
+Odoo, así DSH lo anuncia en sesiones nuevas y lo selecciona solo cuando la tarea
+es un módulo Odoo — sin invocación manual.
 
 1. **READ_SPEC** — asimila `spec.md` (inmutable); prohibido escribir código; gate `APPROVED`.
 2. **ARCHITECTURE** — diseña modelos/vistas/seguridad en `architecture.md` + `test-plan.md`; busca primero funcionalidad existente; gate `APPROVED`.

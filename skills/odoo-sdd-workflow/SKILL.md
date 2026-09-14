@@ -1,6 +1,7 @@
 ---
 name: odoo-sdd-workflow
-description: Spec-Driven Development pipeline for Odoo modules on top of the dsh-odoo-sdd plugin. Use when developing, verifying, or fixing an Odoo module against a live instance with formal acceptance criteria. Enforces the 5-phase protocol with fail-closed gates, honest verdicts, and bounded fix loops.
+description: Spec-Driven Development pipeline for Odoo modules on top of the dsh-odoo-sdd plugin. Enforces the 5-phase protocol with fail-closed gates, honest verdicts, and bounded fix loops.
+whenToUse: Select this skill when the request is about developing, verifying, fixing, or auditing an Odoo module or an Odoo data model/security concern against a live instance, including the Odoo SDD workflow (spec, architecture, code, verification). Do not select it for tasks unrelated to Odoo — use it only when the deliverable is an Odoo module.
 ---
 
 # Odoo SDD Workflow (CLARIFY + 5 phases)

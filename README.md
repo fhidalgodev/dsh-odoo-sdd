@@ -179,7 +179,7 @@ once per project via `odoo_setup mode=autonomy decision=...`:
 | **executors** | `odoo_module`, `odoo_execute`, `odoo_validate`, `odoo_errors` |
 | **schemas** | staged templates with required sections; `transition()` rejects a phase whose deliverable lacks them |
 | **knowledge** | version-pinned Odoo pattern skills (delegated, verified by the skill) |
-| **skills** | `SKILL.md` — the 5-phase orchestration flow |
+| **skills** | `SKILL.md` — the 5-phase orchestration flow, auto-registered with the host on `apply()` so it is advertised to the model on every new session |
 | **logbook** | `kb.json` — decisions, discarded options, blockers; read before proposing |
 | **audit** | `.sdd/audit.jsonl` — sanitized append-only tool-activity log, written by a global `tools/result` listener (not just the Odoo tools) |
 | **rollback** | `.sdd/checkpoints/<id>/` — manifest + file snapshot + data journal, restorable per spec |
@@ -217,7 +217,11 @@ has a way back and a way to prove what happened.
 ### 4. Working protocol
 
 The skill [`skills/odoo-sdd-workflow/SKILL.md`](skills/odoo-sdd-workflow/SKILL.md)
-defines the 5-phase protocol the agent must follow:
+defines the 5-phase protocol the agent must follow. It is **auto-registered**
+when the plugin applies: `apply()` calls `ctx.skills.register(...)` with
+`modelInvocable` + `userInvocable` and a `whenToUse` guard scoped to Odoo work,
+so DSH announces it in new sessions and selects it only when the task is an
+Odoo module — no manual invocation required.
 
 1. **READ_SPEC** — assimilate `spec.md` (immutable); writing code is forbidden; `APPROVED` gate.
 2. **ARCHITECTURE** — design models/views/security in `architecture.md` + `test-plan.md`; search existing functionality first; `APPROVED` gate.

@@ -224,7 +224,7 @@ so DSH announces it in new sessions and selects it only when the task is an
 Odoo module — no manual invocation required.
 
 1. **READ_SPEC** — assimilate `spec.md` (immutable); writing code is forbidden; `APPROVED` gate.
-2. **ARCHITECTURE** — design models/views/security in `architecture.md` + `test-plan.md`; search existing functionality first; `APPROVED` gate.
+2. **ARCHITECTURE** — design models/views/security in `architecture.md` + `test-plan.md`; search existing functionality first; `APPROVED` gate. The architect **asks** about **extra view types** beyond form/tree (kanban, pivot, graph, calendar, dashboard, …) and about **reports** (PDF via `ir.actions.report`/QWeb, SQL, CSV/XLSX, external tool), declaring "form + tree only" / "no reports needed" when applicable. `## Views` and a `## Reports` section carry these decisions; they are **guide** decisions (non-blocking, surfaced as warnings in `sdd_phase status`) — the security model remains the only fail-closed blocker.
 3. **WRITE_CODE** — implement with version-pinned Odoo patterns; static gates first (pre-commit, pylint, ruff).
 4. **VERIFY** — ascending pyramid: static → install/upgrade via `odoo_module` → RPC/data → UI (Playwright + `odoo_session`) only for critical flows.
 5. **FIX_LOOP** — fix root causes; 3 failures ⇒ mandatory consultant diagnosis; 5 iterations ⇒ `BLOCKED`, escalate to the human.

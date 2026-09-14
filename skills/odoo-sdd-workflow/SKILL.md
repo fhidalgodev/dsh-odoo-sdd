@@ -180,11 +180,31 @@ Once clarified: `sdd_phase advance next_phase=READ_SPEC`.
 2. Write `specs/<id>/architecture.md`:
    - New/inherited models, fields, relations (Many2one/One2many), constraints,
      computed + depends.
-   - Views (XML IDs to inherit — never replace), menus, actions.
+   - Views (XML IDs to inherit — never replace) **with an explicit view-type
+     decision per model**: which types beyond form/tree/list are needed (kanban,
+     pivot, graph, calendar, dashboard, gantt, activity, map, cohort, funnel),
+     each justified. If a model is form+tree only, say so: "form + tree only
+     (no extra view types)".
+   - `## Reports`: every report the module delivers (PDF via
+     `ir.actions.report`/QWeb, SQL/raw query, CSV/XLSX export, web page,
+     external tool), its source model/fields, and its trigger (menu/button/action
+     or scheduled). If none, write exactly "no reports needed". **Never leave
+     this section implied missing — always ask or state "no reports".**
    - Security: groups, `ir.model.access.csv`, record rules.
    - Directory layout and exact `__manifest__.py` depends.
    - Localization: if extending a country localization, use the
      `l10n_<country>_` prefix convention on models/fields/methods.
+2b. **Design interview (guide, does NOT block)**: before finalizing, ask the
+   developer with `ask_user_question` about anything the spec left open — do not
+   assume. Ask specifically (a) which **extra view types** any model needs
+   beyond form/tree, and (b) which **reports** (PDF/SQL/CSV/XLSX/dashboard) are
+   needed and in which medium (Odoo `ir.actions.report` vs external). Record the
+   answer verbatim as `decision` nodes in the KB and mirror it in
+   `architecture.md`. If the developer answers "no"/"form+tree only"/"no
+   reports", record that as an explicit decision; if they do not answer, record
+   the assumed default and note it. Answers here are guidance, NOT a gate — the
+   only fail-closed blocker for advancing ARCHITECTURE is the security model
+   (see the `## Security` content gate).
 3. Derive `specs/<id>/test-plan.md`: one scenario per acceptance criterion,
    marking which are verifiable via RPC/data and which need UI (Playwright).
 4. **Scaffolding**: if the module is brand new, prefer the OCA repository

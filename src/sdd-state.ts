@@ -490,6 +490,53 @@ export function securityGaps(specDir: string): string[] {
 	return gaps;
 }
 
+const EXTRA_VIEW_TYPES =
+	/\b(kanban|pivot|graph|calendar|dashboard|gantt|activity|map|cohort|funnel)\b/i;
+const NO_EXTRA_VIEWS = /(form\s*\+\s*tree|no extra view|solo\s+form|only form)/i;
+const REPORT_KEYWORDS =
+	/\b(report|pdf|sql|csv|xlsx|export|qweb|ir\.actions\.report|\breport\b)\b/i;
+const NO_REPORTS = /no reports needed|no report (is )?needed|sin reportes|no requiere reportes/i;
+
+/**
+ * Informational, NON-blocking design inventory for ARCHITECTURE. Unlike the
+ * security model (which IS a fail-closed gate), extra view types and reports
+ * are guide decisions the developer should answer, not hard gates: if the
+ * architect did not ask/decide them, we surface a warning so the agent asks
+ * instead of leaving an implicit assumption — but we never refuse to advance.
+ */
+export function designWarnings(specDir: string): string[] {
+	const path = join(specDir, "architecture.md");
+	if (!existsSync(path)) return [];
+	const text = readFileSync(path, "utf8");
+	const section = (heading: string): string => {
+		const idx = text.indexOf(`## ${heading}`);
+		if (idx < 0) return "";
+		const rest = text.slice(idx + `## ${heading}`.length);
+		const next = rest.indexOf("\n## ");
+		return next < 0 ? rest : rest.slice(0, next);
+	};
+	const warnings: string[] = [];
+	const views = section("Views");
+	if (views.trim() !== "" && !EXTRA_VIEW_TYPES.test(views) && !NO_EXTRA_VIEWS.test(views)) {
+		warnings.push(
+			"`## Views`: no extra view type declared — confirm whether any model needs kanban/pivot/graph/" +
+			"calendar/dashboard/… beyond form/tree, or write \"form + tree only (no extra view types)\".",
+		);
+	}
+	const reports = section("Reports");
+	if (reports.trim() === "") {
+		warnings.push(
+			"`## Reports` is missing — state which reports (PDF/SQL/CSV/XLSX/dashboard) are needed and in " +
+			"which medium, or write \"no reports needed\".",
+		);
+	} else if (!NO_REPORTS.test(reports) && !REPORT_KEYWORDS.test(reports)) {
+		warnings.push(
+			"`## Reports` looks empty — name the report(s) and their medium, or write \"no reports needed\".",
+		);
+	}
+	return warnings;
+}
+
 /** Find which required headings are missing for advancing past `phase`. */
 function requiredHeadings(phase: Phase): { file: string; missing: (specDir: string) => string[] } {
 	const rules = HEADING_REQUIREMENTS.filter((r) => r.phase === phase);
@@ -535,6 +582,11 @@ export function summarize(state: SddState): string {
 		`stop.md: ${stopRequested(state.specDir) === null ? "absent" : "PRESENT — pipeline halted"}`,
 		logbook,
 	];
+	const designWarn = state.phase === "ARCHITECTURE" ? designWarnings(state.specDir) : [];
+	if (designWarn.length > 0) {
+		lines.push("design (guide, non-blocking):");
+		for (const w of designWarn) lines.push(`  - ${w}`);
+	}
 	return lines.join("\n");
 }
 

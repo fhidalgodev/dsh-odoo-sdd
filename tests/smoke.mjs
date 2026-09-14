@@ -19,11 +19,49 @@ function check(label, cond) {
 }
 
 const dir = mkdtempSync(join(tmpdir(), "sdd-smoke-"));
+// Isolate EVERY test from the developer's real user-scope credentials from the
+// start (the previous placement inside the onboarding section leaked the real
+// `~/.config/dsh-odoo-sdd/.env` into the credentials tests, which then saw a
+// non-empty cascade). Clear overrides too.
+process.env["XDG_CONFIG_HOME"] = join(dir, "xdg");
+delete process.env["ODOO_SDD_ENV_FILE"];
 const specDir = join(dir, "specs", "001-demo");
 
 console.log("== state machine ==");
 sdd.initSpecDir(specDir);
 check("skeleton files created", ["spec.md", "architecture.md", "test-plan.md"].every((f) => existsSync(join(specDir, f))));
+
+console.log("== design inventory (guide, non-blocking) ==");
+{
+	const designDir = join(dir, "specs", "002-design");
+	sdd.initSpecDir(designDir);
+	// Skeleton architecture.md declares view types/reports with neither coverage.
+	let warns = sdd.designWarnings(designDir);
+	check("skeleton architecture.md warns about extra view types", warns.some((w) => /View Type|kanban/i.test(w)));
+	check("skeleton architecture.md warns about missing Reports", warns.some((w) => /Reports/i.test(w)));
+	// A complete declaration silences the warnings.
+	writeFileSync(
+		join(designDir, "architecture.md"),
+		"# Architecture\n\n## Models\n\nA model.\n\n" +
+			"## Views\n\nForm + tree only (no extra view types).\n\n" +
+			"## Security\n\nbase.group_user; ir.model.access.csv read/write/create/unlink; no record rules needed.\n\n" +
+			"## Manifest\n\nmodule_a\n\n" +
+			"## Reports\n\nNo reports needed.\n",
+	);
+	warns = sdd.designWarnings(designDir);
+	check("complete architecture.md produces no design warnings", warns.length === 0);
+	// A model declaring an extra view type (e.g. kanban) needs no Views warning.
+	writeFileSync(
+		join(designDir, "architecture.md"),
+		"# Architecture\n\n## Models\n\nA model.\n\n" +
+			"## Views\n\nkanban for the kanban board with grouping by stage.\n\n" +
+			"## Security\n\nbase.group_user; ir.model.access.csv read/write/create/unlink; no record rules needed.\n\n" +
+			"## Manifest\n\nmodule_a\n\n" +
+			"## Reports\n\nNo reports needed.\n",
+	);
+	warns = sdd.designWarnings(designDir);
+	check("kanban declaration clears the extra-view-type warning", warns.length === 0);
+}
 
 let st = sdd.loadState(specDir);
 check("initial phase CLARIFY (intent unresolved)", st.phase === "CLARIFY" && st.mode === null && st.licensed === null);
@@ -186,9 +224,8 @@ check("apply() keeps working on a host without a skills registry (fail-open)", !
 
 
 console.log("== onboarding & cascade (odoo_setup) ==");
-// Isolate user-scope config inside the tmp dir and clear overrides.
-process.env["XDG_CONFIG_HOME"] = join(dir, "xdg");
-delete process.env["ODOO_SDD_ENV_FILE"];
+// (Environment isolation for user-scope credentials happens at the top of the
+// script, before ANY test that touches the cascade.)
 
 const registered = new Map();
 const capturedGuards = [];

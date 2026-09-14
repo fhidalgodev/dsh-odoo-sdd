@@ -118,14 +118,22 @@ dsh --profile odoo --dump-config   # inspect composition without booting
 Bundles whose `dsh.bundle.patch` points at `cordis.patch.yml` insert their own
 row, so no manual entry is needed once the package is installed.
 
-Installing from a git clone? `lib/` is build output and is **not** committed, and
-pnpm skips dependency build scripts by default — compile once before adding:
+Installing from a git clone? `lib/` is build output and is **not** committed,
+so compile it once before adding. The `@deepseek-ai/*` host packages are
+declared as *optional* peers (the host provides them at runtime), so they are
+not installed by a plain `npm install`; pull them in for the typecheck/build
+only:
 
 ```bash
 git clone https://github.com/fhidalgodev/dsh-odoo-sdd && cd dsh-odoo-sdd
-npm install && npm run build     # emits lib/ (required: package main is lib/index.js)
+npm install          # devDependencies: typescript
+npm run host:deps    # optional peers, needed to compile (no-save)
+npm run build        # emits lib/ — required, package main is lib/index.js
 dsh plugin --profile odoo add .
 ```
+
+These are exactly the steps [CI](.github/workflows/ci.yml) runs, so a local
+`npm run typecheck && npm test` reproduces the pipeline.
 
 Optional configuration via the patch layer (`cordis.patch.yml`): `projectRoot`
 (workspace root) and `specsDir` (specs folder, default `specs/`). The remaining

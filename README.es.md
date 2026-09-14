@@ -132,14 +132,22 @@ Los bundles cuyo `dsh.bundle.patch` apunta a `cordis.patch.yml` insertan su
 propia fila, así que no hace falta agregarla a mano una vez instalado el paquete.
 
 ¿Instalando desde un clon de git? `lib/` es salida de build y **no** se
-versiona, y pnpm omite los scripts de build de dependencias por defecto —
-compila una vez antes de agregar:
+versiona, así que compílalo una vez antes de agregar. Los paquetes host
+`@deepseek-ai/*` están declarados como peers *opcionales* (los provee el host en
+runtime), por lo que un `npm install` normal no los trae; instálalos solo para
+el typecheck/build:
 
 ```bash
 git clone https://github.com/fhidalgodev/dsh-odoo-sdd && cd dsh-odoo-sdd
-npm install && npm run build     # genera lib/ (obligatorio: el main es lib/index.js)
+npm install          # devDependencies: typescript
+npm run host:deps    # peers opcionales, necesarios para compilar (no-save)
+npm run build        # genera lib/ — obligatorio, el main es lib/index.js
 dsh plugin --profile odoo add .
 ```
+
+Son exactamente los pasos que corre el
+[CI](.github/workflows/ci.yml), así que `npm run typecheck && npm test` en local
+reproduce el pipeline.
 
 El resto de campos (allowlist de ejecución, repositorios, autonomía,
 licenciamiento, guards de política) se ajustan con la tool `odoo_config` o en

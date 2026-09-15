@@ -48,6 +48,10 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"pipeline": "Pipeline",
 		"pipelineHint": "Estado en vivo del SDD: usa la tool sdd_phase status en la sesión.",
 		"policy": "Política",
+		"workspace": "Workspace",
+		"workspaceHint": "Dónde vive tu proyecto Odoo. El plugin resuelve specs, .env y estado desde acá; vacío = directorio de trabajo del proceso (frágil).",
+		"projectRoot": "Raíz del proyecto",
+		"specsDir": "Carpeta de specs",
 		"policyHint": "Guardas fail-closed del plugin. El guard bloquea mutaciones hasta que se cumplan.",
 		"docPolicy": "Documentación del módulo",
 		"docRequired": "Obligatoria",
@@ -104,6 +108,10 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"pipeline": "Pipeline",
 		"pipelineHint": "Live SDD state: use the sdd_phase status tool in the session.",
 		"policy": "Policy",
+		"workspace": "Workspace",
+		"workspaceHint": "Where your Odoo project lives. The plugin resolves specs, .env and state from here; empty = the process working directory (fragile).",
+		"projectRoot": "Project root",
+		"specsDir": "Specs folder",
 		"policyHint": "Fail-closed plugin guards. The guard blocks mutations until they are satisfied.",
 		"docPolicy": "Module documentation",
 		"docRequired": "Required",
@@ -244,6 +252,8 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			autonomy: asStr(s.autonomy, "supervised"),
 			licensed: lic,
 			executeAllowlist: asList(s.executeAllowlist),
+			projectRoot: asStr(s.projectRoot, ""),
+			specsDir: asStr(s.specsDir, "specs"),
 			communityRepoUrl: asStr(s.communityRepoUrl, "https://github.com/odoo/odoo"),
 			communityRepoPath: asStr(s.communityRepoPath, ""),
 			enterpriseRepoUrl: asStr(s.enterpriseRepoUrl, "https://github.com/odoo/enterprise"),
@@ -265,6 +275,8 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			allowlist: snap.executeAllowlist.join(", "),
 			communityUse: snap.communityRepoPath ? "path" : "url",
 			communityUrl: snap.communityRepoUrl,
+			projectRoot: snap.projectRoot,
+			specsDir: snap.specsDir,
 			communityPath: snap.communityRepoPath,
 			enterpriseUse: snap.enterpriseRepoPath ? "path" : "url",
 			enterpriseUrl: snap.enterpriseRepoUrl,
@@ -398,6 +410,8 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 				licensed: form.licensed,
 				executeAllowlist: parseList(form.allowlist),
 				communityRepoUrl: form.communityUse === "url" ? form.communityUrl : "",
+				projectRoot: form.projectRoot || "",
+				specsDir: form.specsDir || "",
 				communityRepoPath: form.communityUse === "path" ? form.communityPath : "",
 				enterpriseRepoUrl: form.enterpriseUse === "url" ? form.enterpriseUrl : "",
 				enterpriseRepoPath: form.enterpriseUse === "path" ? form.enterprisePath : "",
@@ -532,6 +546,33 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 						}, t("browse")) : null)));
 		};
 
+		/** A directory field: type it, or pick it with the host's OS chooser. */
+		var dirField = function (name, label, placeholder) {
+			var id = prefix + "-" + name;
+			var canPick = typeof pickDirectory === "function" && canWrite;
+			var doPick = function () {
+				Promise.resolve().then(function () { return pickDirectory(); }).then(function (chosen) {
+					// null = the operator cancelled the OS dialog: do nothing.
+					if (!chosen) return;
+					var patch = {}; patch[name] = chosen; edit(patch);
+				}).catch(function () {
+					// Native chooser unavailable: the field stays typable.
+				});
+			};
+			return h("div", { className: "odoo-sdd-field" },
+				h("label", { className: "odoo-sdd-label", htmlFor: id }, label),
+				h("div", { className: "odoo-sdd-row" },
+					h("input", {
+						id: id, type: "text", disabled: !canWrite, className: "odoo-sdd-input odoo-sdd-input--mono",
+						style: { flex: "1 1 240px" }, value: form[name] || "", placeholder: placeholder,
+						spellCheck: false, autoComplete: "off", onChange: onField(name)
+					}),
+					canPick ? h("button", {
+						type: "button", className: "odoo-sdd-btn odoo-sdd-btn--ghost odoo-sdd-btn--small",
+						"aria-label": t("browse"), onClick: doPick
+					}, t("browse")) : null));
+		};
+
 		var chips = String(form.allowlist || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean);
 		var status = h("div", {
 			className: "odoo-sdd-status" + (model.status === "saved" ? " odoo-sdd-status--ok" : model.status === "error" ? " odoo-sdd-status--err" : ""),
@@ -560,6 +601,9 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 					canWrite ? t("editable") : t("readonly"))),
 			!canWrite ? h("div", { className: "odoo-sdd-banner" }, h("span", null, t("readonlyHint"))) : null,
 
+			h(SectionCard, { title: t("workspace"), hint: t("workspaceHint") },
+				dirField("projectRoot", t("projectRoot"), "/home/you/my-odoo-project"),
+				dirField("specsDir", t("specsDir"), "specs")),
 			h(SectionCard, { title: t("delegation"), hint: t("delegationHint") },
 				seg("autonomy", form.autonomy, [
 					{ value: "supervised", label: t("supervised") },

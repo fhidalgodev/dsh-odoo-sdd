@@ -49,6 +49,12 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"pipelineHint": "Estado en vivo del SDD: usa la tool sdd_phase status en la sesión.",
 		"policy": "Política",
 		"policyHint": "Guardas fail-closed del plugin. El guard bloquea mutaciones hasta que se cumplan.",
+		"docPolicy": "Documentación del módulo",
+		"docRequired": "Obligatoria",
+		"docOptional": "Opcional",
+		"docOff": "Desactivada",
+		"docLanguage": "Idioma de la documentación",
+		"docLanguageHint": "Vacío = inglés por defecto, salvo que el AGENTS.md u otro archivo del proyecto diga otra cosa.",
 		"yes": "Sí",
 		"no": "No",
 		"checkpointRequired": "Exigir checkpoint antes de mutar",
@@ -99,6 +105,12 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"pipelineHint": "Live SDD state: use the sdd_phase status tool in the session.",
 		"policy": "Policy",
 		"policyHint": "Fail-closed plugin guards. The guard blocks mutations until they are satisfied.",
+		"docPolicy": "Module documentation",
+		"docRequired": "Required",
+		"docOptional": "Optional",
+		"docOff": "Off",
+		"docLanguage": "Documentation language",
+		"docLanguageHint": "Empty = English by default, unless AGENTS.md or another project file says otherwise.",
 		"yes": "Yes",
 		"no": "No",
 		"checkpointRequired": "Require a checkpoint before mutating",
@@ -179,6 +191,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		".odoo-sdd-item:hover{background:var(--dsw-alias-bg-layer-2,#f7f8fa)}",
 		".odoo-sdd-item:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4f6ef7);outline-offset:-2px}",
 		".odoo-sdd-empty{padding:14px;color:var(--dsw-alias-label-tertiary,#8b93a1);font-size:12px}",
+		".odoo-sdd-hint{margin-top:6px;color:var(--dsw-alias-label-tertiary,#8b93a1);font-size:12px;line-height:1.45}",
 		"@media (prefers-reduced-motion:reduce){.odoo-sdd-card,.odoo-sdd-input,.odoo-sdd-btn,.odoo-sdd-seg-btn,.odoo-sdd-item{transition:none}}"
 	].join("");
 
@@ -239,7 +252,9 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			securityReviewRequired: asBool(s.securityReviewRequired, true),
 			securityInterviewRequired: asBool(s.securityInterviewRequired, true),
 			auditAllTools: asBool(s.auditAllTools, true),
-			maxCheckpoints: typeof s.maxCheckpoints === "number" ? s.maxCheckpoints : 5
+			maxCheckpoints: typeof s.maxCheckpoints === "number" ? s.maxCheckpoints : 5,
+			documentationPolicy: (s.documentationPolicy === "optional" || s.documentationPolicy === "off") ? s.documentationPolicy : "required",
+			documentationLanguage: asStr(s.documentationLanguage, "")
 		};
 	}
 
@@ -258,7 +273,9 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			securityReviewRequired: snap.securityReviewRequired,
 			securityInterviewRequired: snap.securityInterviewRequired,
 			auditAllTools: snap.auditAllTools,
-			maxCheckpoints: String(snap.maxCheckpoints)
+			maxCheckpoints: String(snap.maxCheckpoints),
+			documentationPolicy: snap.documentationPolicy,
+			documentationLanguage: snap.documentationLanguage
 		};
 	}
 
@@ -388,7 +405,9 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 				securityReviewRequired: form.securityReviewRequired === true,
 				securityInterviewRequired: form.securityInterviewRequired === true,
 				auditAllTools: form.auditAllTools === true,
-				maxCheckpoints: Number(form.maxCheckpoints) > 0 ? Number(form.maxCheckpoints) : 5
+				maxCheckpoints: Number(form.maxCheckpoints) > 0 ? Number(form.maxCheckpoints) : 5,
+				documentationPolicy: form.documentationPolicy === "optional" || form.documentationPolicy === "off" ? form.documentationPolicy : "required",
+				documentationLanguage: form.documentationLanguage || ""
 			};
 			var ops = [];
 			Object.keys(target).forEach(function (k) {
@@ -424,6 +443,19 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 				[{ v: true, l: t("yes") }, { v: false, l: t("no") }].map(function (o) {
 					return h("button", {
 						key: String(o.v), type: "button", disabled: !canWrite,
+						className: "odoo-sdd-seg-btn" + (value === o.v ? " is-on" : ""),
+						"aria-pressed": value === o.v,
+						onClick: function () { var p = {}; p[name] = o.v; edit(p); }
+					}, o.l);
+				}));
+		};
+
+		/** A segmented control over an arbitrary set of string values. */
+		var enumSeg = function (name, value, options) {
+			return h("div", { className: "odoo-sdd-seg", role: "group" },
+				options.map(function (o) {
+					return h("button", {
+						key: o.v, type: "button", disabled: !canWrite,
 						className: "odoo-sdd-seg-btn" + (value === o.v ? " is-on" : ""),
 						"aria-pressed": value === o.v,
 						onClick: function () { var p = {}; p[name] = o.v; edit(p); }
@@ -556,6 +588,15 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 				policyRow(t("securityReview"), boolSeg("securityReviewRequired", form.securityReviewRequired)),
 				policyRow(t("securityInterview"), boolSeg("securityInterviewRequired", form.securityInterviewRequired)),
 				policyRow(t("auditAll"), boolSeg("auditAllTools", form.auditAllTools)),
+				policyRow(t("docPolicy"), enumSeg("documentationPolicy", form.documentationPolicy, [
+					{ v: "required", l: t("docRequired") },
+					{ v: "optional", l: t("docOptional") },
+					{ v: "off", l: t("docOff") }
+				])),
+				h("div", { className: "odoo-sdd-field" },
+					h("label", { className: "odoo-sdd-label", htmlFor: prefix + "-doclang" }, t("docLanguage")),
+					h("input", { id: prefix + "-doclang", type: "text", className: "odoo-sdd-input", value: form.documentationLanguage, placeholder: "en", disabled: !canWrite, spellCheck: false, onChange: onField("documentationLanguage") }),
+					h("div", { className: "odoo-sdd-hint" }, t("docLanguageHint"))),
 				h("div", { className: "odoo-sdd-field" },
 					h("label", { className: "odoo-sdd-label", htmlFor: prefix + "-maxcp" }, t("maxCheckpoints")),
 					h("input", { id: prefix + "-maxcp", type: "number", min: "1", className: "odoo-sdd-input", value: form.maxCheckpoints, disabled: !canWrite, onChange: onField("maxCheckpoints") }))),

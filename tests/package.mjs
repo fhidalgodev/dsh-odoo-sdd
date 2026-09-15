@@ -15,7 +15,7 @@
  * @module dsh-odoo-sdd/tests/package
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -49,6 +49,11 @@ if (!existsSync(join(root, "lib", "index.js"))) {
 
 // `--dry-run` keeps the working tree clean (verified: no .tgz is created).
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+// Keep npm's cache INSIDE the project: `npm pack` otherwise writes to ~/.npm,
+// which fails on a read-only $HOME sandbox (EROFS) and makes this check depend
+// on the machine's global state instead of the package itself.
+const cacheDir = join(root, "node_modules", ".cache", "npm-pack");
+mkdirSync(cacheDir, { recursive: true });
 let packed;
 try {
 	const out = execFileSync(npm, ["pack", "--dry-run", "--json"], {
@@ -56,6 +61,7 @@ try {
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "ignore"],
 		maxBuffer: 32 * 1024 * 1024,
+		env: { ...process.env, npm_config_cache: cacheDir },
 	});
 	packed = JSON.parse(out);
 } catch (err) {

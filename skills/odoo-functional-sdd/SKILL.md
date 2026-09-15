@@ -48,6 +48,18 @@ layout). Never reconstruct the path by hand. `.sdd/functional/<spec-id>/` holds
 the plan, the run state and the mapping of an import; `.sdd/checkpoints/<id>/`
 keeps the data journal used for compensation.
 
+## Tools of this run
+
+| Tool | Use it for |
+| --- | --- |
+| `odoo_config mode=read/set` | project root, specs layout, licensing, autonomy. |
+| `sdd_phase` (+ `sdd_checkpoint`) | the phase machine and the data journal. |
+| `odoo_connect`, `odoo_execute` | version/edition, and every read or declared mutation over JSON-RPC (the allowlist decides what may be written). |
+| `odoo_session` | mint the web session cookie that the importer route needs; it is stored in `.sdd/session.json`, never printed. |
+| `odoo_import use=prepare\|preview\|map\|plan\|status` | the native importer: upload the authorised file, read back what Odoo parsed, record a decision per column, and turn it into an `apply` batch. It never applies anything by itself. |
+| `odoo_functional operations=plan\|approve\|apply\|inspect\|status\|reconcile\|verify\|compensate` | the batches: where they are declared, approved, executed operation by operation, reconciled when an outcome is unknown, and compensated. |
+| `odoo_errors`, `odoo_docs`, `odoo_validate`, `odoo_security_scan` | server logs after a failure, and the module-level checks when the run also touches code. |
+
 ## Phase 1 — CLARIFY
 
 1. `sdd_phase init spec_id=<NNN>-<slug> mode=functional` (the mode decides the
@@ -110,8 +122,13 @@ decisions are missing.
    them invalidates it.
 4. **Apply.** Execute in order, checking the hashes again before every operation.
    Persist each operation's state before and after the call. Imports go through
-   the native Odoo importer (file, preview, **approved mapping**, test, apply),
-   never through a hand-written parser.
+   the native Odoo importer (`odoo_import use=prepare` with its own approval,
+   then `preview` to read the headers, sheets and importable fields, `map` for a
+   decision per column and `plan` to obtain the batch; `odoo_functional` then
+   approves and applies it), never through a hand-written parser. A file that
+   changed after the upload invalidates the mapping, a `nextrow` in the answer
+   means the importer stopped mid-file, and neither case is a licence to re-send
+   the rows that already landed.
 5. **Checkpoint first.** The policy guard blocks mutations until a checkpoint
    exists; a checkpoint is also what makes the data undo possible.
 6. **Compensate** with an approved compensation batch built from the journal, and

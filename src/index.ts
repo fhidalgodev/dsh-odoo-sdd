@@ -66,6 +66,8 @@ import { withAudit } from "./audit.js";
 import { registerRuntimeTools } from "./tools-runtime.js";
 import { registerDocsTool } from "./docs-tool.js";
 import { registerFunctionalTool, activeFunctionalRun, functionalDir, readPlan, readRun, countOps } from "./functional.js";
+import { registerImportTool, readWebSession, capabilitiesFor, readImportOutcome, reportAppliedImport } from "./odoo-import.js";
+import { applyArguments } from "./import-capabilities.js";
 import { sha256 } from "./functional.js";
 import { RUNBOOK_FILE, runbookGaps } from "./sdd-state.js";
 import { appendAuditLine, recordAudit } from "./audit.js";
@@ -81,6 +83,7 @@ import {
 	writeJournal,
 	appendDataOp,
 	isSafeSegment,
+	isWithinRoot,
 	toWriteValues,
 	fieldMetaFor,
 	writeCheckpointJournal,
@@ -117,6 +120,7 @@ import {
 	PIPELINE_MODES,
 } from "./sdd-state.js";
 import { join, resolve, dirname, isAbsolute, sep } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 
@@ -2947,6 +2951,23 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		display: (v) => displayPath(v),
 	});
 
+	/**
+	 * Detected server version per project, probed on demand and cached for the
+	 * activation: the import contract is version-specific, and `common.version`
+	 * needs no authentication.
+	 */
+	const versionCache = new Map<string, string>();
+	const versionFor = async (projectRoot: string): Promise<string | undefined> => {
+		const cached = versionCache.get(projectRoot);
+		if (cached !== undefined) return cached;
+		const { client } = clientFor(projectRoot);
+		if (client === null) return undefined;
+		const probed = await client.version();
+		if (!probed.ok) return undefined;
+		versionCache.set(projectRoot, probed.value.server_version);
+		return probed.value.server_version;
+	};
+
 	// ---------------------------------------------------------------------
 	// odoo_functional — the batch executor of the functional path
 	// ---------------------------------------------------------------------
@@ -3032,6 +3053,97 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						}),
 				...op,
 			});
+		},
+		/**
+		 * Run one declared import through Odoo's importer.
+		 *
+		 * The session, the CSRF token and the version contract live here (not in the
+		 * executor), and the classification is the same contract as any other
+		 * operation: a transport failure after the apply call is INDETERMINATE.
+		 */
+		runImport: async (op, exec) => {
+			const cfg = effectiveConfig(exec);
+			const { client } = clientFor(cfg.projectRoot);
+			if (client === null) return { ok: false, error: "no instance configured" };
+			const version = (await versionFor(cfg.projectRoot)) ?? "";
+			const caps = capabilitiesFor(version);
+			if (!caps.ok) return { ok: false, error: caps.message };
+			const spec = op.import;
+			if (spec === undefined) return { ok: false, error: "the import operation has no import block" };
+			// The file is NOT re-uploaded here: the batch carries the id of the record
+			// prepared and approved during the import-prep phase, so what the human
+			// approved (file hash + mapping) is what runs. A re-upload at this point
+			// would swap the content after the approval.
+			const session = readWebSession(cfg.projectRoot);
+			if (session === null) {
+				return {
+					ok: false,
+					error:
+						"NEEDS_WEB_SESSION: applying an import needs the web session cookie (the file route is a web " +
+						"route). Run odoo_session and retry.",
+				};
+			}
+			const signal = exec !== null && typeof exec === "object" && "signal" in exec ? (exec as { signal?: AbortSignal }).signal : undefined;
+			const args = applyArguments(caps.capabilities, {
+				importId: spec.importId,
+				fields: [],
+				columns: spec.columns,
+				options: { ...spec.options, ...(spec.dryRun ? { dryrun: true } : {}) },
+				dryRun: spec.dryRun,
+			});
+			const applied = await client.executeKw<unknown>(
+				"base_import.import",
+				caps.capabilities.apply.method,
+				args,
+				{},
+				undefined,
+				signal,
+			);
+			if (!applied.ok) {
+				const kind = (applied as { errorKind?: string }).errorKind;
+				return {
+					ok: false,
+					indeterminate: kind === "transport" || kind === "protocol",
+					error: applied.error,
+				};
+			}
+			const outcome = readImportOutcome(applied.value);
+			// Odoo answered, so nothing is indeterminate: the rows it reports DID land and
+			// must never be re-sent. The classification (clean vs partial) lives in
+			// `reportAppliedImport`, which is unit-tested on its own.
+			return { ok: true, value: reportAppliedImport(outcome) };
+		},
+		display: (v) => displayPath(v),
+	});
+
+	registerImportTool(ctx, {
+		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
+		specDir: (specId, exec) => {
+			const cfg = effectiveConfig(exec);
+			return specDirOf(cfg.projectRoot, cfg.specsDir, specId, {
+				specsMode: cfg.specsMode,
+				specsRoot: cfg.specsRoot,
+			});
+		},
+		client: async (exec) => {
+			const cfg = effectiveConfig(exec);
+			const { client, report } = clientFor(cfg.projectRoot);
+			const version = await versionFor(cfg.projectRoot);
+			return { client, report, ...(version === undefined ? {} : { serverVersion: version }) };
+		},
+		approve: (exec, reason) => requestNativeApproval(ctx, exec, "odoo_import", reason),
+		authorisedFile: (filePath) => {
+			// Where the plugin is willing to READ from: the session's project or the OS
+			// temp area (where attachments land). This is a guardrail against pointing an
+			// import at an unrelated file on disk, not a sandbox — the operator's own
+			// approval is what authorises the import itself.
+			const cfg = effectiveConfig();
+			try {
+				const resolved = resolve(filePath);
+				return isWithinRoot(cfg.projectRoot, resolved) || isWithinRoot(resolve(tmpdir()), resolved);
+			} catch {
+				return false;
+			}
 		},
 		display: (v) => displayPath(v),
 	});

@@ -36,8 +36,34 @@ export type BatchScope = "discovery" | "import-prep" | "apply" | "compensate";
 const READ_METHODS = new Set(["search_read", "read", "search_count", "read_group", "fields_get"]);
 const MUTATING_METHODS = new Set(["create", "write", "unlink"]);
 
+/** How an operation is carried out. */
+export type OperationKind = "execute" | "import";
+
+/** The declaration of an `import` operation (Odoo's own importer). */
+export interface ImportOperationSpec {
+	/** Database id of the temporary `base_import.import` record holding the file. */
+	importId: number;
+	/** Original file name, for the report and the runbook. */
+	fileName: string;
+	/** Column mapping: one decision per column of the file. */
+	columns: unknown[];
+	/** Importer options (headers, separator, encoding…). */
+	options: Record<string, unknown>;
+	/** True for a test run: Odoo executes the ORM logic but does not commit the rows. */
+	dryRun: boolean;
+}
+
 /** One declared operation inside a batch. */
 export interface BatchOperation {
+	/**
+	 * How the operation runs. `execute` (default) is a plain `execute_kw`;
+	 * `import` drives Odoo's native importer through the web route, which needs a
+	 * session and a version contract — the executor delegates it to the runner the
+	 * registrant supplies, so the batch, the approval and the journal stay the same.
+	 */
+	kind?: OperationKind;
+	/** Present when `kind === "import"`. */
+	import?: ImportOperationSpec;
 	/** What this operation is for, in business terms (it ends up in the runbook). */
 	intent: string;
 	model: string;
@@ -305,6 +331,53 @@ export function validateBatch(batch: Batch, environment: TargetEnvironment): Pla
 	}
 	batch.operations.forEach((op, index) => {
 		const at = `${where} op ${index + 1} (${op.model}.${op.method})`;
+		if (op.kind === "import") {
+			// An import is a mutation by definition, and it must carry what the
+			// importer needs: a prepared file, a target model and a mapping where
+			// every column has a decision.
+			const spec = op.import;
+			if (spec === undefined) {
+				findings.push({ severity: "ERROR", where: at, message: "an import operation needs its `import` block (importId, fileName, columns, options)" });
+			} else {
+				if (!Number.isInteger(spec.importId) || spec.importId <= 0) {
+					findings.push({ severity: "ERROR", where: at, message: "importId must be the id of a prepared base_import.import record" });
+				}
+				if ((spec.fileName ?? "").trim() === "") {
+					findings.push({ severity: "ERROR", where: at, message: "fileName is required: the runbook has to name the file that was imported" });
+				}
+				if (!Array.isArray(spec.columns) || spec.columns.length === 0) {
+					findings.push({ severity: "ERROR", where: at, message: "an import needs a column mapping; a mapping with no columns imports nothing" });
+				}
+				if (spec.dryRun !== true) {
+					findings.push({
+						severity: "WARN",
+						where: at,
+						message: "this batch APPLIES the import; run a dry run (dryRun: true) first when the file or the mapping is new",
+					});
+				}
+				const undecided = spec.columns.filter((c) => {
+					const column = c as { field?: unknown; decision?: unknown };
+					return String(column.field ?? "").trim() === "" && String(column.decision ?? "").trim() !== "skip";
+				});
+				if (undecided.length > 0) {
+					findings.push({
+						severity: "ERROR",
+						where: at,
+						message: `${undecided.length} column(s) have no decision (a target field or an explicit decision: skip)`,
+					});
+				}
+			}
+			if (op.recovery === undefined) {
+				findings.push({ severity: "ERROR", where: at, message: "an import must declare how it is recovered (delete the created ids, or the declared backup)" });
+			}
+			if (batch.scope === "discovery") {
+				findings.push({ severity: "ERROR", where: at, message: "a discovery batch may only read: an import cannot live there" });
+			}
+			if (batch.scope !== "apply") {
+				findings.push({ severity: "ERROR", where: at, message: `an import runs in an "apply" batch, not in a "${batch.scope}" one` });
+			}
+			return;
+		}
 		if (!READ_METHODS.has(op.method) && !MUTATING_METHODS.has(op.method)) {
 			findings.push({
 				severity: "ERROR",
@@ -482,6 +555,13 @@ export interface FunctionalDeps {
 		write(input: { kind: "batch"; fingerprint: string; ttlMinutes?: number; reason?: string; details?: Record<string, unknown> }): void;
 		valid(fingerprint: string): boolean;
 	};
+	/**
+	 * Run an `import` operation: the registrant owns the web session, the CSRF
+	 * token and the version contract, and returns the classified outcome. Supplying
+	 * it is what keeps a batch able to declare an import at all; without it an
+	 * import operation is refused rather than silently skipped.
+	 */
+	runImport?(op: BatchOperation, exec?: unknown): Promise<OpOutcome>;
 	/** Record one executed operation in the append-only audit log. */
 	audit?(entry: {
 		batchId: string;
@@ -854,6 +934,47 @@ export function registerFunctionalTool(
 						// not send anything.
 						writeRun(projectRoot, run);
 
+						// An import is not an execute_kw call: it goes through the web route
+						// and the version's contract, so it is delegated — but it is still
+						// one operation of THIS batch, with the same state and journal.
+						if (op.kind === "import") {
+							if (deps.runImport === undefined) {
+								record.state = "failed";
+								record.resultAt = new Date().toISOString();
+								record.error = "this host has no import runner wired";
+								writeRun(projectRoot, run);
+								results.push({ index, state: record.state, detail: record.error, value: null });
+								stopped = `operation ${index + 1} is an import and no importer is available on this host.`;
+								break;
+							}
+							const imported = await deps.runImport(op, exec);
+							record.resultAt = new Date().toISOString();
+							if (imported.ok) {
+								record.state = "applied";
+								deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "applied", index });
+								results.push({ index, state: "applied", value: jsonScalar(imported.value) });
+							} else if (imported.indeterminate === true) {
+								record.state = "indeterminate";
+								record.error = imported.error ?? "unknown";
+								deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "indeterminate", index, reason: record.error });
+								writeRun(projectRoot, run);
+								results.push({ index, state: "indeterminate", detail: record.error, value: null });
+								stopped =
+									`operation ${index + 1} (import) was sent and its outcome is UNKNOWN. It was NOT retried: ` +
+									"re-read the target model to see whether the rows landed, then reconcile.";
+								break;
+							} else {
+								record.state = "failed";
+								record.error = imported.error ?? "unknown";
+								deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "failed", index, reason: record.error });
+								writeRun(projectRoot, run);
+								results.push({ index, state: "failed", detail: record.error, value: null });
+								stopped = `operation ${index + 1} (import) failed: ${record.error}`;
+								break;
+							}
+							writeRun(projectRoot, run);
+							continue;
+						}
 						const pre = await checkPrecondition(client, op, batch.context);
 						if (!pre.ok) {
 							record.state = "failed";

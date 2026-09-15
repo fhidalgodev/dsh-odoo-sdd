@@ -71,7 +71,16 @@ export interface CredentialsProblem {
 }
 
 export type CredentialsResult =
-	| { ok: true; credentials: OdooCredentials }
+	| {
+			ok: true;
+			credentials: OdooCredentials;
+			/**
+			 * Present when the filesystem cannot express owner-only modes, so
+			 * the .env could not be verified as private. Non-blocking: callers
+			 * MUST surface it to the developer instead of silently ignoring it.
+			 */
+			permissionNote?: string;
+	  }
 	| CredentialsProblem;
 
 const REQUIRED_VARS = ["ODOO_URL", "ODOO_DB", "ODOO_USERNAME", "ODOO_PASSWORD"] as const;
@@ -215,25 +224,72 @@ export function parseInstanceUrl(
 	return { ok: true, url: url.origin + url.pathname.replace(/\/+$/, "") };
 }
 
+/** Outcome of the .env permission check. */
+export interface PermissionCheck {
+	/**
+	 * True when the file is verifiably owner-only, or when the filesystem
+	 * does not implement POSIX permission bits at all (Windows, FAT/exFAT,
+	 * some network mounts) — in that case there is nothing to enforce and
+	 * refusing to work would be dishonest, not safe.
+	 */
+	enforced: boolean;
+	/** Offending mode (octal string) when the bits are loose AND adjustable. */
+	problem: string | null;
+	/** Non-blocking explanation when the bits cannot be enforced here. */
+	note?: string;
+}
+
+/** Note surfaced when the host filesystem cannot express owner-only modes. */
+export const POSIX_MODE_NOTE =
+	"POSIX file permissions are not enforceable on this filesystem, so the " +
+	".env could not be verified as owner-only. Keep it inside a user profile " +
+	"directory and out of any synchronized or shared folder.";
+
 /**
  * Verify the .env file is only readable by its owner (mode <= 0600).
- * When the mode is looser, tighten it automatically and report the fix.
- * @returns null when secure (or fixed), otherwise the offending mode string.
+ * When the mode is looser, tighten it automatically and re-verify: a chmod
+ * that "succeeds" but leaves the bits open (Windows, FAT/exFAT, some network
+ * or container mounts) must be reported as NOT enforced rather than assumed
+ * fixed. Fail-closed is kept exactly where it is real — a genuine POSIX
+ * filesystem where the mode stays loose and cannot be tightened.
+ * @param envFile - absolute path of the credential file.
+ * @returns the verified permission outcome.
  */
-function ensureSecurePermissions(envFile: string): string | null {
+export function ensureSecurePermissions(envFile: string): PermissionCheck {
 	let mode: number;
 	try {
 		mode = statSync(envFile).mode & 0o777;
 	} catch {
-		return null; // missing file is handled elsewhere
+		return { enforced: true, problem: null }; // missing file is handled elsewhere
 	}
-	if ((mode & 0o077) === 0) return null;
+	if ((mode & 0o077) === 0) return { enforced: true, problem: null };
+	const octal = `0${mode.toString(8)}`;
+	let chmodError = false;
 	try {
 		chmodSync(envFile, 0o600);
-		return null;
 	} catch {
-		return `0${mode.toString(8)}`;
+		chmodError = true;
 	}
+	if (!chmodError) {
+		// Re-stat: the call returning without throwing is not proof of effect.
+		let after: number;
+		try {
+			after = statSync(envFile).mode & 0o777;
+		} catch {
+			return { enforced: false, problem: null, note: POSIX_MODE_NOTE };
+		}
+		if ((after & 0o077) === 0) return { enforced: true, problem: null };
+		// chmod reported success yet the bits are still open: the filesystem
+		// does not implement them (Windows, FAT/exFAT, some bind mounts).
+		return { enforced: false, problem: null, note: POSIX_MODE_NOTE };
+	}
+	if (process.platform === "win32") {
+		// chmod threw on Windows: Node only emulates a read-only flag there,
+		// so a throw means "this volume has no mode support", not a leak we
+		// could have fixed.
+		return { enforced: false, problem: null, note: POSIX_MODE_NOTE };
+	}
+	return { enforced: false, problem: octal };
 }
 
 /** Minimal KEY=VALUE .env parser (no interpolation, no multiline, strips quotes). */
@@ -282,14 +338,14 @@ export function loadCredentials(projectRoot: string): CredentialsResult {
 		};
 	}
 	const envFile = location.path;
-	const insecureMode = ensureSecurePermissions(envFile);
-	if (insecureMode !== null) {
+	const permission = ensureSecurePermissions(envFile);
+	if (permission.problem !== null) {
 		return {
 			ok: false,
 			reason: "env_file_insecure",
 			envFile,
 			message:
-				`Refusing to load ${displayPath(envFile)}: file mode ${insecureMode} is readable ` +
+				`Refusing to load ${displayPath(envFile)}: file mode ${permission.problem} is readable ` +
 				"by group/others and could not be tightened. Ask the developer to " +
 				"run: chmod 600 " + displayPath(envFile),
 		};
@@ -326,6 +382,7 @@ export function loadCredentials(projectRoot: string): CredentialsResult {
 			envFile,
 			source: location.source,
 		},
+		...(permission.enforced ? {} : { permissionNote: permission.note ?? POSIX_MODE_NOTE }),
 	};
 }
 

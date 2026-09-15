@@ -32,6 +32,52 @@ import { dirname, join } from "node:path";
 const QUARANTINE_SUFFIX = ".corrupt-";
 
 /**
+ * Error codes a rename can raise for a transient reason rather than a real
+ * failure. On Windows an open handle (editor, antivirus, indexer, file
+ * watcher) makes `MoveFileEx` fail with EPERM/EACCES/EBUSY even though the
+ * operation would succeed a moment later; on POSIX a network mount can do the
+ * same for EBUSY.
+ */
+const RETRYABLE_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+/** Backoff between rename attempts, in milliseconds (linear, bounded). */
+const RETRY_DELAYS_MS = [10, 25, 50, 100, 250] as const;
+
+/** Extract the `code` property of a thrown fs error, or "". */
+function errorCode(err: unknown): string {
+	if (typeof err === "object" && err !== null && "code" in err) {
+		return String((err as { code: unknown }).code);
+	}
+	return "";
+}
+
+/** Block the current thread for a few milliseconds (no dependency). */
+function sleepSync(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Rename, retrying the transient failures above with a bounded backoff.
+ * @param from - source (temp) path.
+ * @param to - destination path.
+ */
+function renameWithRetry(from: string, to: string): void {
+	let lastError: unknown = null;
+	for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+		try {
+			renameSync(from, to);
+			return;
+		} catch (err) {
+			lastError = err;
+			const delay = RETRY_DELAYS_MS[attempt];
+			if (delay === undefined || !RETRYABLE_CODES.has(errorCode(err))) break;
+			sleepSync(delay);
+		}
+	}
+	throw lastError;
+}
+
+/**
  * Write a file so that no reader can observe a partially written document:
  * write a sibling temp file, fsync-free but atomic `rename` into place.
  * @param file - destination path.
@@ -43,7 +89,7 @@ export function writeFileAtomic(file: string, data: string, mode = 0o600): void 
 	const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
 	try {
 		writeFileSync(tmp, data, { mode });
-		renameSync(tmp, file);
+		renameWithRetry(tmp, file);
 	} catch (err) {
 		try {
 			rmSync(tmp, { force: true });

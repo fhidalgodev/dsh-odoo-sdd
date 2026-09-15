@@ -375,9 +375,12 @@ Verification pyramid, ALWAYS in ascending order:
    `/web/login`, and execute the UI scenarios from test-plan.md. Capture:
    Odoo Server Error modals, console tracebacks, non-rendering elements.
 6. All green per AC by the QA persona ⇒ `sdd_phase succeed detail="<per-AC
-   summary>"` ⇒ `sdd_phase advance next_phase=DONE`. `succeed` is REFUSED while
-   any AC row in `test-plan.md` still reads `pending`: record each criterion's
-   real result first, because a green verdict must map to a tested criterion.
+   summary>"` ⇒ `sdd_phase advance next_phase=DONE`. `succeed` is REFUSED unless
+   every AC row in `test-plan.md` reads an explicit `pass` (optionally
+   `pass (evidence: …)`): `pending`, `failed`, `unknown`, `manual` and any
+   unrecognized token leave the criterion open, because a green verdict must map
+   to a tested criterion and the gate is an allowlist. A manual-layer row stays
+   `pending` until a human confirms it, and only then is it written as `pass`.
    With `securityReviewRequired` armed, DONE additionally requires a
    `security-report.md` whose verdict is not REJECTED.
 6. Any failure ⇒ `sdd_phase fail detail="<concrete error>"` ⇒ phase 5.

@@ -249,15 +249,15 @@ specs/<NNN>-<slug>/
 | `odoo_connect` | Probe the instance: server version + authentication. Masked report; distinguishes `NEEDS_SETUP` / `NEEDS_SECRET` / `DEFERRED` / `SKIPPED` states (never asks for secrets in chat). |
 | `odoo_setup` | Onboarding: `check` (cascade + gitignore + delegation mode), `interactive` (secret-free chmod-600 scaffold), **`authorize`** (ask the DEVELOPER, through native approval, for a connection grant bound to the current url/db/user), **`revoke`** (drop the grants), **`purge`** (plan first, then — with `confirm_destructive=true` plus human approval — remove only the plugin's own state under `.sdd/`), `later`, `skip`, `reset`, `autonomy` (supervised \| autonomous, human-approved). Secrets are never accepted as parameters. |
 | `odoo_module` | `info` / `install` / `upgrade` on `ir.module.module` (`button_immediate_*`). Returns the server's own output or traceback, redacted — the closed feedback loop. |
-| `odoo_execute` | Generic CRUD/RPC (`execute_kw`) with a fail-closed allowlist. Methods are classified explicitly and an unclassified one is refused: reads (`search_read`, `read`, `search_count`, `read_group`, `fields_get`) are allowed; mutations (`create`/`write`/`unlink`) require `confirm_destructive=true` AND the model in `executeAllowlist`, and are journaled so the data undo can replay them. `context` is forwarded verbatim — use `allowed_company_ids`/`company_id` on multi-company instances — and the server still applies its own ACL. No instance needed to evaluate denials. |
+| `odoo_execute` | Generic CRUD/RPC (`execute_kw`) with a fail-closed allowlist. Methods are classified explicitly and an unclassified one is refused: reads (`search_read`, `read`, `search_count`, `read_group`, `fields_get`) are allowed, with `fields`/`limit`/`order`/`offset` for projection and paging (a fractional or negative `offset` is refused, never clamped); mutations (`create`/`write`/`unlink`) require `confirm_destructive=true` AND the model in `executeAllowlist`, and are journaled so the data undo can replay them. `context` is forwarded verbatim — use `allowed_company_ids`/`company_id` on multi-company instances — and the server still applies its own ACL. No instance needed to evaluate denials. |
 | `odoo_validate` | LOCAL, instance-free module structure check: `__manifest__.py` present + depends, declared data XML files exist, `security/ir.model.access.csv` when models are declared. Returns file:line findings plus the `module_dir` and project root it resolved (a relative path resolves against the session's folder, never the process cwd). |
 | `odoo_errors` | Reads recent `ir.logging` server errors — the remote equivalent of fetching environment logs. |
 | `odoo_session` | Mints a passwordless web session (the `connect_as_user` pattern) stored in `.sdd/session.json` (chmod 600) for Playwright UI tests. The cookie itself is never returned. |
-| `sdd_phase` | The phase state machine: `init`, `status` (logbook summary, spec directory and specs location), `mark_spec_loaded`, `advance` (fail-closed gates + `approval_source` provenance), `fail` (failure ladder + FAILED verdict), `succeed` (PASSED verdict), `rollback` (restore a checkpoint and return to WRITE_CODE), `diagnose`. |
-| `sdd_checkpoint` | The rollback surface: `create` (snapshots the workspace, becomes the active checkpoint), `list`, `restore` (files, plus — with `restore_data=true` and `confirm_destructive=true` — the journaled data mutations; it always REPORTS files created after the checkpoint and deletes them only with `remove_created=true`), `drop`, `journal`. |
+| `sdd_phase` | The phase state machine: `init`, `status` (logbook summary, spec directory and specs location), `mark_spec_loaded`, `advance` (fail-closed gates + `approval_source` provenance), `fail` (failure ladder + FAILED verdict), `succeed` (PASSED verdict; refused unless every AC row in `test-plan.md` reads an explicit `pass`), `rollback` (restore a checkpoint and return to WRITE_CODE), `diagnose`. |
+| `sdd_checkpoint` | The rollback surface: `create` (snapshots the workspace, becomes the active checkpoint), `list`, `restore` (files, plus — with `restore_data=true` and `confirm_destructive=true` — the journaled data mutations: the undo runs under the company context the mutation used, turns read shapes into write values, marks each op so a retry never compensates it twice, refuses a journal from another destination, and reports every field it could not restore; it always REPORTS files created after the checkpoint and deletes them only with `remove_created=true`), `drop`, `journal`. |
 | `odoo_docs` | Documentation for a module, usable **on its own** (no spec, phase, checkpoint or instance), so an existing module can simply be documented: `check` (OCA fragments mapped to Diátaxis, version scheme, changelog, `index.html`, docstrings, xpath comments, OWL directives → ERROR/WARN with `file:line`), `plan`, `scaffold` (create-only skeletons, never overwrites) and `report` (persists `docs-report.md`; APPROVED only when nothing is still a scaffold). The changelog entry is mandatory for any change to a released module. |
 | `odoo_security_scan` | Local static security review (no instance needed): raw SQL by concatenation, `eval`/`exec`/`pickle`, hardcoded secrets, unjustified `sudo()`, `auth="none"`, disabled CSRF, QWeb `t-raw`. Findings carry `file:line` + a fix hint; any ERROR blocks `DONE`. |
-| `sdd_handoff` | Writes `specs/<id>/handoff.md` (final phase, verdict, decisions, blockers, checkpoints, journal, effective config, next steps) when the run closes. |
+| `sdd_handoff` | Writes `specs/<id>/handoff.md` (final phase, verdict, decisions, blockers, checkpoints, the COMPLETE per-spec data journal, effective config, next steps) when the run closes. |
 | `odoo_config` | Reads or updates the persistent configuration and answers **"which project am I in?"**: the resolved root, its provenance (session cwd / configured / process cwd), the specs base, the effective spec directory and the config file in use. |
 
 ---
@@ -327,13 +327,18 @@ has a way back and a way to prove what happened.
   snapshots the project tree, so with the **central** specs layout the spec
   documents (which live outside the project) are deliberately not part of it:
   the spec is the immutable source of truth, not code to roll back.
-- **Data rollback (best effort).** Every `create`/`write`/`unlink` through
-  `odoo_execute` records its pre-image in the checkpoint journal, stamped with the
-  database it was applied to; `restore restore_data=true
-  confirm_destructive=true` replays it in reverse and refuses if the journal was
-  recorded against a different database. This covers data written through the
-  plugin — **not** side effects of a module install/upgrade, which are not
-  reverted at database level.
+- **Data rollback (best effort, and honest about it).** Every
+  `create`/`write`/`unlink` through `odoo_execute` records its pre-image in the
+  checkpoint journal, stamped with the database **and** the destination
+  (url+db+user) it was applied to; `restore restore_data=true
+  confirm_destructive=true` replays it in reverse and refuses a journal from
+  another destination. The replay runs under the company context the mutation
+  used, converts read shapes into write values (many2one, x2many), marks each
+  operation as it is compensated so a retry never repeats one, and reports the
+  fields it could not restore (binary content, read-only or non-stored fields).
+  Re-created records get NEW ids — the report says so. This covers data written
+  through the plugin — **not** side effects of a module install/upgrade, which
+  are not reverted at database level.
 - **Restore reports drift.** `restore` always lists the files created *after* the
   checkpoint, so nothing is silently left behind; `remove_created=true` deletes
   them (inside the snapshotted roots only) to match the snapshot exactly.

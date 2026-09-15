@@ -78,6 +78,10 @@ import {
 	writeJournal,
 	appendDataOp,
 	isSafeSegment,
+	toWriteValues,
+	fieldMetaFor,
+	writeCheckpointJournal,
+	type FieldMeta,
 	type DataOp,
 } from "./checkpoints.js";
 import {
@@ -1247,7 +1251,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			"specs/<id>/ skeleton), status (snapshot), mark_spec_loaded (spec.md assimilated), advance " +
 			"(transition phase; gated phases need approval_marker='APPROVED' — fail-closed), fail " +
 			"(record a failed verification; 3 consecutive failures force deep diagnosis), succeed " +
-			"(record a passed verification with honest verdict). stop.md in the spec dir halts everything.",
+			"(record a passed verification with honest verdict; refused unless every AC row in " +
+			"test-plan.md reads an explicit `pass`), rollback (restore the active checkpoint), diagnose " +
+			"(record the root-cause analysis the ladder demands). stop.md in the spec dir halts everything.",
 		parameters: {
 			operation: {
 				type: "string",
@@ -1948,6 +1954,17 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	 * Best-effort undo of the journaled data operations, newest first:
 	 *   create -> unlink the created ids;  write -> restore the pre-image;
 	 *   unlink -> re-create the pre-image rows.
+	 *
+	 * Four honesties this must keep, because a replay is the last line of defence:
+	 *   - it runs under the SAME context (company/lang) the mutation ran under, so
+	 *     a multi-company instance is not compensated in the wrong company;
+	 *   - the pre-image is converted from read shapes to write shapes (relations
+	 *     included) using field metadata, and everything it refuses to restore is
+	 *     REPORTED instead of silently dropped;
+	 *   - each op is marked as compensated and the journal is rewritten after it,
+	 *     so a retry never compensates the same op twice;
+	 *   - it refuses to touch a destination (db, or url+db+user) other than the
+	 *     one the journal was recorded against.
 	 * What cannot be undone is reported, never silently swallowed.
 	 */
 	const undoJournal = async (projectRoot: string, checkpointId: string): Promise<{ undone: string[]; detail: string }> => {
@@ -1968,54 +1985,119 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					"journal) before undoing data.",
 			};
 		}
+		// Destination identity: the database alone cannot tell two users apart.
+		const targets = [...new Set(ops.map((o) => o.target).filter((t): t is string => typeof t === "string"))];
+		const currentTarget =
+			credentials === null ? undefined : fingerprintOf(credentials.url, credentials.db, credentials.username);
+		if (targets.length > 0 && currentTarget !== undefined && !targets.includes(currentTarget)) {
+			return {
+				undone: [],
+				detail:
+					"refused: the journal was recorded against a different destination (url+db+user) than the " +
+					"current one. Point .env back at the original target (or drop the journal) before undoing " +
+					"data: replaying under another user can be refused by ACLs or touch records you never saw.",
+			};
+		}
+
+		const alreadyDone = ops.filter((o) => o.undoneAt !== undefined).length;
+		const pending = ops.filter((o) => o.undoneAt === undefined);
+		if (pending.length === 0) {
+			writeCheckpointJournal(projectRoot, checkpointId, []);
+			return { undone: [], detail: `${alreadyDone} operation(s) were already compensated — journal cleared` };
+		}
+
+		// Field metadata per model, fetched once per replay. A failed lookup is
+		// NOT fatal: the conversion falls back to the observable shape and says so.
+		const meta = new Map<string, Record<string, FieldMeta>>();
+		const metaFor = async (model: string): Promise<Record<string, FieldMeta>> => {
+			const cached = meta.get(model);
+			if (cached !== undefined) return cached;
+			const fetched = await fieldMetaFor(client, model);
+			meta.set(model, fetched);
+			return fetched;
+		};
+
 		const undone: string[] = [];
 		const failed: string[] = [];
-		for (const op of [...ops].reverse()) {
+		const notRestored = new Map<string, string>();
+		const withContext = (op: DataOp): Record<string, unknown> => (op.context === undefined ? {} : { context: op.context });
+		/** Mark one op compensated and persist immediately (a crash must not lose it). */
+		const markDone = (op: DataOp): void => {
+			op.undoneAt = new Date().toISOString();
+			writeCheckpointJournal(projectRoot, checkpointId, ops);
+		};
+
+		for (const op of [...pending].reverse()) {
 			try {
+				const fields = await metaFor(op.model);
 				if (op.method === "create" && op.createdIds.length > 0) {
-					const r = await client.executeKw<unknown>(op.model, "unlink", [op.createdIds], {});
-					if (r.ok) undone.push(`unlink ${op.model} ${JSON.stringify(op.createdIds)}`);
-					else failed.push(`${op.model}.unlink: ${r.error.slice(0, 120)}`);
+					const r = await client.executeKw<unknown>(op.model, "unlink", [op.createdIds], withContext(op));
+					if (r.ok) {
+						undone.push(`unlink ${op.model} ${JSON.stringify(op.createdIds)}`);
+						markDone(op);
+					} else {
+						failed.push(`${op.model}.unlink: ${r.error.slice(0, 120)}`);
+					}
 				} else if (op.method === "write" && op.preImage.length > 0) {
+					let ok = true;
 					for (const row of op.preImage) {
 						const id = Number(row["id"]);
 						if (!Number.isFinite(id)) continue;
-						const values: Record<string, unknown> = { ...row };
-						delete values["id"];
-						const r = await client.executeKw<unknown>(op.model, "write", [[id], values], {});
+						const values = toWriteValues(row, fields, (field, why) => notRestored.set(`${op.model}.${field}`, why));
+						if (Object.keys(values).length === 0) continue;
+						const r = await client.executeKw<unknown>(op.model, "write", [[id], values], withContext(op));
 						if (r.ok) undone.push(`restore ${op.model} ${id}`);
-						else failed.push(`${op.model}.write ${id}: ${r.error.slice(0, 120)}`);
+						else {
+							ok = false;
+							failed.push(`${op.model}.write ${id}: ${r.error.slice(0, 120)}`);
+						}
 					}
+					if (ok) markDone(op);
 				} else if (op.method === "unlink" && op.preImage.length > 0) {
+					let ok = true;
 					for (const row of op.preImage) {
-						const values: Record<string, unknown> = { ...row };
-						delete values["id"];
-						const r = await client.executeKw<unknown>(op.model, "create", [values], {});
-						if (r.ok) undone.push(`recreate ${op.model}`);
-						else failed.push(`${op.model}.create: ${r.error.slice(0, 120)}`);
+						const values = toWriteValues(row, fields, (field, why) => notRestored.set(`${op.model}.${field}`, why));
+						if (Object.keys(values).length === 0) continue;
+						const r = await client.executeKw<number>(op.model, "create", [values], withContext(op));
+						if (r.ok) {
+							// The original id is NOT restored by a re-create; say the new one.
+							undone.push(`recreate ${op.model} as id ${String(r.value)} (original id not preserved)`);
+						} else {
+							ok = false;
+							failed.push(`${op.model}.create: ${r.error.slice(0, 120)}`);
+						}
 					}
+					if (ok) markDone(op);
+				} else {
+					// Nothing compensable in this op (e.g. a create with no ids):
+					// mark it so it does not keep the journal alive forever.
+					markDone(op);
 				}
 			} catch (err) {
 				failed.push(err instanceof Error ? err.message.slice(0, 120) : String(err));
 			}
 		}
-		if (failed.length === 0) {
-			writeJournalForCheckpoint(projectRoot, checkpointId, []);
-			return { undone, detail: `${undone.length} operation(s) undone` };
+
+		const skippedNote =
+			notRestored.size === 0
+				? ""
+				: `; NOT restored (${notRestored.size} field(s)): ` +
+					[...notRestored.entries()].slice(0, 5).map(([f, why]) => `${f} (${why})`).join(", ") +
+					(notRestored.size > 5 ? ", …" : "");
+		const remaining = readCheckpointJournalFile(projectRoot, checkpointId).filter((o) => o.undoneAt === undefined);
+		if (remaining.length === 0) {
+			writeCheckpointJournal(projectRoot, checkpointId, []);
+			return {
+				undone,
+				detail: `${undone.length} operation(s) undone${alreadyDone > 0 ? `, ${alreadyDone} already compensated` : ""}${skippedNote}`,
+			};
 		}
 		return {
 			undone,
-			detail: `${undone.length} undone, ${failed.length} FAILED (journal kept): ${failed.slice(0, 3).join("; ")}`,
+			detail:
+				`${undone.length} undone, ${failed.length} FAILED (journal kept: the compensated ones are marked ` +
+				`and will not be repeated): ${failed.slice(0, 3).join("; ")}${skippedNote}`,
 		};
-	};
-
-	/** Replace one checkpoint's journal (after a clean undo). */
-	const writeJournalForCheckpoint = (projectRoot: string, checkpointId: string, ops: DataOp[]): void => {
-		try {
-			writeFileAtomic(join(projectRoot, ".sdd", "checkpoints", checkpointId, "journal.json"), JSON.stringify(ops, null, 2));
-		} catch {
-			// best effort
-		}
 	};
 
 	ctx.tools.register(defineTool({
@@ -2175,6 +2257,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					(files.missing.length > 0 ? `; ${files.missing.length} failed: ${files.missing.slice(0, 5).join(", ")}` : "") +
 					`. Data undo: ${dataNote}` +
 					(restoredData.length > 0 ? ` (${restoredData.length} record op(s))` : "") +
+					// Name what was undone: a re-created record keeps a NEW id and
+					// that caveat is worthless if it never reaches the operator.
+					(restoredData.length === 0
+						? ""
+						: `\n${restoredData.slice(0, 10).map((u) => `  - ${u}`).join("\n")}` +
+							(restoredData.length > 10 ? `\n  … and ${restoredData.length - 10} more` : "")) +
 					drift +
 					`\n${rootNote(root)}`,
 			};
@@ -2267,7 +2355,43 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const verdict = readVerdict(specDir);
 			const kb = kbRead(specDir);
 			const checkpoints = listCheckpoints(cfg.projectRoot);
-			const journal = readJournal(cfg.projectRoot);
+			/**
+			 * The COMPLETE data record of this spec: the active journal plus the
+			 * journal of every checkpoint that belongs to it, deduplicated and in
+			 * chronological order.
+			 *
+			 * Reading only the active checkpoint's last 20 ops loses the history
+			 * exactly when it matters: a run that rolls back, creates a new
+			 * checkpoint and carries on would hand off a report that cannot say
+			 * what was applied to the instance.
+			 */
+			const specJournal = ((): DataOp[] => {
+				const seen = new Set<string>();
+				const all: DataOp[] = [];
+				const add = (ops: DataOp[]): void => {
+					for (const op of ops) {
+						const key = `${op.ts}|${op.model}|${op.method}|${JSON.stringify(op.ids)}|${JSON.stringify(op.createdIds)}`;
+						if (seen.has(key)) continue;
+						seen.add(key);
+						all.push(op);
+					}
+				};
+				const activeId = readActiveState(cfg.projectRoot).checkpointId;
+				for (const checkpoint of checkpoints) {
+					if (checkpoint.id === activeId) continue; // read once, below
+					if (checkpoint.specId !== args.spec_id) continue;
+					add(readCheckpointJournalFile(cfg.projectRoot, checkpoint.id));
+				}
+				// The active journal is what a naive read would use, and it belongs
+				// to THIS spec only when it says so (or was created without one):
+				// including another spec's ops here would put operations in the
+				// handoff that this spec never applied.
+				const activeManifest = checkpoints.find((c) => c.id === activeId);
+				if (activeManifest === undefined || activeManifest.specId === null || activeManifest.specId === args.spec_id) {
+					add(readJournal(cfg.projectRoot));
+				}
+				return all.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+			})();
 			const blockers = kb.filter((n) => n.kind === "blocker");
 			const decisions = kb.filter((n) => n.kind === "decision");
 			const securityReport = join(specDir, "security-report.md");
@@ -2295,7 +2419,37 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			lines.push(checkpoints.length === 0 ? "- (none)" : checkpoints.map((c) => `- ${c.id} — ${c.label} (${c.files.length} file(s))`).join("\n"));
 			lines.push("");
 			lines.push("## Journaled data operations");
-			lines.push(journal.length === 0 ? "- (none)" : journal.slice(-20).map((o) => `- ${o.ts} ${o.model}.${o.method} ids=${JSON.stringify(o.ids)} created=${JSON.stringify(o.createdIds)}`).join("\n"));
+			if (specJournal.length === 0) {
+				lines.push("- (none)");
+			} else {
+				// The complete record, bounded with an EXPLICIT omission count and
+				// where to read the rest (never a silent truncation).
+				const shown = specJournal.slice(0, 50);
+				lines.push(
+					shown
+						.map((o) => {
+							const marks = [
+								typeof o.db === "string" ? `db=${o.db}` : "",
+								typeof o.target === "string" ? `target=${o.target.slice(0, 8)}…` : "",
+								o.undoneAt === undefined ? "" : "compensated",
+							].filter((m) => m !== "");
+							return (
+								`- ${o.ts} ${o.model}.${o.method} ids=${JSON.stringify(o.ids)} ` +
+								`created=${JSON.stringify(o.createdIds)}${marks.length > 0 ? ` [${marks.join(", ")}]` : ""}`
+							);
+						})
+						.join("\n"),
+				);
+				if (specJournal.length > shown.length) {
+					lines.push(
+						`- … and ${specJournal.length - shown.length} more (full record: .sdd/checkpoints/<id>/journal.json of this spec)`,
+					);
+				}
+				lines.push(
+					`- Total: ${specJournal.length} operation(s) across the active journal and ` +
+						`${checkpoints.filter((c) => c.specId === args.spec_id).length} checkpoint(s) of this spec.`,
+				);
+			}
 			lines.push("");
 			lines.push("## Decisions (logbook)");
 			lines.push(decisions.length === 0 ? "- (none)" : decisions.slice(-20).map((d) => `- ${sanitize(d.summary)}`).join("\n"));
@@ -2520,12 +2674,16 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		recordDataOp: (op, exec) => {
 			try {
 				const cfg = effectiveConfig(exec);
-				// Stamp the database so a replay against a DIFFERENT database can
-				// be detected instead of silently mutating another instance.
-				const db = clientFor(cfg.projectRoot).credentials?.db;
+				// Stamp the destination so a replay against a DIFFERENT database or
+				// a different user/url on the same database is detected instead of
+				// silently mutating the wrong instance.
+				const credentials = clientFor(cfg.projectRoot).credentials;
+				const target =
+					credentials === null ? undefined : fingerprintOf(credentials.url, credentials.db, credentials.username);
 				appendDataOp(cfg.projectRoot, {
 					ts: new Date().toISOString(),
-					...(db !== undefined ? { db } : {}),
+					...(credentials !== null && credentials !== undefined ? { db: credentials.db } : {}),
+					...(target !== undefined ? { target } : {}),
 					...op,
 				});
 			} catch {

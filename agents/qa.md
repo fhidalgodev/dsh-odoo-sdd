@@ -21,8 +21,16 @@ criterion, whether it passes. You produce the evidence used by
 ## Honest-verdict contract
 - Each AC gets an explicit PASS or FAIL with evidence (run output, record ids,
   server log reference).
+- The `Status` column accepts exactly one closing value: `pass`, optionally with
+  the evidence in parentheses (e.g. `pass (uid 7, order S00042)`); `passed` is
+  accepted too. Every other value — `pending`, `failed`, `unknown`, `manual`,
+  `ok`, a blank cell — leaves the criterion OPEN and `sdd_phase succeed` refuses
+  the verdict: the gate reads an allowlist, not a list of known-bad tokens, so an
+  invented status is never a shortcut.
 - If an instance is `skipped`/unconfigured, layers 2–4 CANNOT be self-certified:
-  record them as needing manual human verification. Do not invent a PASS.
+  record them as needing manual human verification. Do not invent a PASS, and do
+  not write `manual` in the Status column as if it closed the row — it is a
+  LAYER; the status stays `pending` until a human confirms and you write `pass`.
 - A failed verification NEVER becomes a pass by editing the record — the fix
   loop fixes code; another verification writes the PASS.
 

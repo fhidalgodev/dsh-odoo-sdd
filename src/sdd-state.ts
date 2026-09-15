@@ -614,9 +614,35 @@ export function securityGaps(specDir: string): string[] {
 }
 
 /**
+ * The ONLY status a test-plan row may carry to close its acceptance criterion.
+ *
+ * Fail-closed on purpose: the previous check listed the four values it rejected
+ * (`""`, `pending`, `todo`, `-`), so every OTHER token — `failed`, `unknown`,
+ * `manual`, `blocked`, a typo — passed the gate and let `sdd_phase succeed`
+ * persist a PASSED verdict with an unverified (or explicitly failed) criterion.
+ * An allowlist inverts that: anything that is not an explicit pass is a gap, and
+ * an optional parenthetical carries the evidence without weakening the token.
+ */
+const AC_PASS_PATTERN = /^(pass|passed)(\s*\(.*\))?$/;
+
+/**
+ * Normalize one Status cell before matching: case, surrounding spaces, and the
+ * markdown decorations an author may wrap the value in.
+ * @param cell - raw cell text.
+ * @returns the comparable value.
+ */
+function normalizeAcStatus(cell: string): string {
+	return cell.replace(/[`*]/g, "").trim().toLowerCase();
+}
+
+/**
  * Evidence gate behind a PASSED verdict: every acceptance criterion in
- * `test-plan.md` must have moved past `pending`. Returns one entry per gap so
- * the caller can name exactly what is untested.
+ * `test-plan.md` must carry an explicit PASS. Returns one entry per gap so the
+ * caller can name exactly what is untested.
+ *
+ * FAIL-CLOSED: only `pass` / `passed` (optionally `pass (evidence…)`) closes a
+ * criterion. A pending, failed, unknown, manual-without-confirmation or
+ * unrecognized status is a gap; a missing row set is a gap.
  * @param specDir - spec directory holding test-plan.md.
  * @returns the list of unmet evidence requirements (empty when complete).
  */
@@ -637,9 +663,13 @@ export function evidenceGaps(specDir: string): string[] {
 		if (/^[-: ]+$/.test(cols[0])) continue; // markdown separator row
 		if (/^ac$/i.test(cols[0])) continue; // header row
 		rows += 1;
-		const status = cols[3].toLowerCase();
-		if (status === "" || status === "pending" || status === "todo" || status === "-") {
-			gaps.push(`AC "${cols[0]}" is still ${status === "" ? "unset" : status} in test-plan.md.`);
+		const status = normalizeAcStatus(cols[3]);
+		if (!AC_PASS_PATTERN.test(status)) {
+			gaps.push(
+				`AC "${cols[0]}" reads "${cols[3]}" in test-plan.md: only an explicit ` +
+					'`pass` (optionally `pass (evidence…)`) closes an acceptance criterion — ' +
+					"record the real result, and a manual criterion needs the human confirmation first.",
+			);
 		}
 	}
 	if (rows === 0) {
@@ -872,7 +902,10 @@ export function initSpecDir(specDir: string): void {
 		[
 			"test-plan.md",
 			"# Test Plan\n\n| AC | Scenario | Layer (static/server/rpc/ui/manual) | Status |\n|---|---|---|---|\n" +
-				"| AC1 | ... | static | pending |\n",
+				"| AC1 | ... | static | pending |\n\n" +
+				"<!-- Status must become an explicit `pass` (optionally `pass (evidence: …)`) for\n" +
+				"     every row: `sdd_phase succeed` refuses `pending`, `failed`, `unknown`,\n" +
+				"     `manual` and anything it cannot read as a pass. -->\n",
 		],
 	] as const) {
 		const file = join(specDir, name);

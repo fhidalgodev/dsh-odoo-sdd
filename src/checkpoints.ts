@@ -82,6 +82,165 @@ export interface DataOp {
 	createdIds: number[];
 	/** Odoo context the mutation ran under (company/lang), so an undo replays alike. */
 	context?: Record<string, unknown>;
+	/**
+	 * Destination identity (`url+db+username` fingerprint) the op was applied to.
+	 * The database alone cannot tell two users on the same database apart, and a
+	 * replay under the wrong user may be refused by ACLs — or touch records the
+	 * original writer never saw.
+	 */
+	target?: string;
+	/**
+	 * Instant this op was compensated. Marking each op as it is undone is what
+	 * stops a failed replay from compensating the already-undone ones again when
+	 * the operator retries.
+	 */
+	undoneAt?: string;
+}
+
+/** Minimal field metadata needed to turn a pre-image row back into write values. */
+export interface FieldMeta {
+	/** Odoo field type (`many2one`, `binary`, `char`…). */
+	type?: string;
+	/** True when the ORM refuses (or ignores) writes to the field. */
+	readonly?: boolean;
+	/** False for computed fields that are not stored. */
+	store?: boolean;
+}
+
+/** Read-only/derived columns that must never be written back by a replay. */
+const NON_WRITABLE_META = new Set([
+	"id",
+	"display_name",
+	"__last_update",
+	"create_date",
+	"create_uid",
+	"write_date",
+	"write_uid",
+]);
+
+/**
+ * Ids out of any of the shapes a `read` can return for an x2many: plain ids,
+ * `[id, display_name]` pairs, or `{ id, name }` objects.
+ * @param raw - the read value.
+ * @returns the ids it carries (empty when it carries none).
+ */
+function relationIds(raw: unknown): number[] {
+	if (!Array.isArray(raw)) return [];
+	const out: number[] = [];
+	for (const entry of raw) {
+		if (typeof entry === "number") out.push(entry);
+		else if (Array.isArray(entry) && typeof entry[0] === "number") out.push(entry[0]);
+		else if (entry !== null && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "number") {
+			out.push((entry as { id: number }).id);
+		}
+	}
+	return out;
+}
+
+/**
+ * Convert one pre-image row into values a `write`/`create` accepts.
+ *
+ * A pre-image comes from `read`, whose shapes are NOT write shapes: a many2one
+ * arrives as `[id, display_name]` and an x2many as a list of ids, so replaying
+ * the row verbatim fails (or writes nonsense). The conversion is driven by
+ * `fields_get` metadata when available and falls back to the observable shape
+ * otherwise, and every field it refuses to restore is REPORTED — an undo that
+ * silently skips half a row is worse than one that says so.
+ * @param row - one pre-image row.
+ * @param fields - field metadata for the model, or `{}` when unavailable.
+ * @param onSkip - called per field that is not restored, with the reason.
+ * @returns the write values.
+ */
+export function toWriteValues(
+	row: Record<string, unknown>,
+	fields: Record<string, FieldMeta>,
+	onSkip?: (field: string, why: string) => void,
+): Record<string, unknown> {
+	const values: Record<string, unknown> = {};
+	for (const [name, raw] of Object.entries(row)) {
+		if (NON_WRITABLE_META.has(name)) {
+			// Structural/ORM-managed columns: `id` is the write TARGET and the
+			// audit columns are owned by the ORM. Never restored, never reported
+			// as a loss (that would bury the real ones in noise).
+			continue;
+		}
+		const meta = fields[name];
+		if (meta === undefined) {
+			// No metadata for this field: shape-based conversion, so an untyped
+			// relational value is never written raw. A conversion is not a loss,
+			// so it is not reported as one.
+			if (raw === null || raw === undefined) {
+				values[name] = false;
+			} else if (Array.isArray(raw) && raw.length === 2 && typeof raw[0] === "number" && typeof raw[1] === "string") {
+				values[name] = raw[0];
+			} else if (Array.isArray(raw) && raw.every((e) => typeof e === "number")) {
+				values[name] = [[6, 0, raw]];
+			} else {
+				values[name] = raw;
+			}
+			continue;
+		}
+		if (meta.readonly === true || meta.store === false) {
+			onSkip?.(name, "read-only or non-stored field");
+			continue;
+		}
+		if (meta.type === "binary") {
+			onSkip?.(name, "binary content is not restorable");
+			continue;
+		}
+		if (meta.type === "many2one") {
+			values[name] = raw === null || raw === undefined || raw === false ? false : Array.isArray(raw) ? (raw[0] ?? false) : raw;
+			continue;
+		}
+		if (meta.type === "one2many" || meta.type === "many2many") {
+			values[name] = [[6, 0, relationIds(raw)]];
+			continue;
+		}
+		values[name] = raw;
+	}
+	return values;
+}
+
+/**
+ * Field metadata a replay needs, straight from the instance.
+ *
+ * `fields_get` is a READ method, so this never needs the mutation allowlist and
+ * can be called before a compensating write is built.
+ * @param client - RPC client for the destination.
+ * @param model - Odoo model name.
+ * @returns the metadata keyed by field name (empty when the call failed).
+ */
+export async function fieldMetaFor(
+	client: {
+		executeKw<T>(
+			model: string,
+			method: string,
+			args: unknown[],
+			kwargs: Record<string, unknown>,
+		): Promise<{ ok: true; value: T } | { ok: false; error: string }>;
+	},
+	model: string,
+): Promise<Record<string, FieldMeta>> {
+	const res = await client.executeKw<Record<string, FieldMeta>>(model, "fields_get", [], {
+		attributes: ["type", "readonly", "store"],
+	});
+	return res.ok && res.value !== null && typeof res.value === "object" ? res.value : {};
+}
+
+/**
+ * Replace one checkpoint's journal file: used after each compensated op and to
+ * clear it once nothing is left to undo.
+ * @param projectRoot - project root owning the checkpoint.
+ * @param checkpointId - checkpoint id.
+ * @param ops - the journal to persist.
+ */
+export function writeCheckpointJournal(projectRoot: string, checkpointId: string, ops: DataOp[]): void {
+	if (!isSafeSegment(checkpointId)) return;
+	try {
+		writeFileAtomic(join(checkpointsDir(projectRoot), checkpointId, "journal.json"), JSON.stringify(ops, null, 2));
+	} catch {
+		// best effort: the journal lives in .sdd/, never in the project tree
+	}
 }
 
 /** Checkpoint metadata persisted beside the copied files. */

@@ -145,6 +145,42 @@ check("retry refused while a diagnosis is owed", r.ok === false && /diagnosis/i.
 const refused = sdd.recordSuccess(st, "all ACs verified");
 check("PASSED refused while test-plan.md still has a pending AC", refused.ok === false && refused.gaps.length > 0);
 check("no PASSED verdict was written on refusal", sdd.readVerdict(specDir) === null);
+
+// The evidence gate is an ALLOWLIST, not a list of known-bad tokens: a row in
+// FAILED (or unknown/manual) must not let a PASSED verdict through, which is
+// exactly what the previous check allowed (it only rejected pending/todo/empty/-).
+{
+	const gateDir = join(dir, "specs", "001b-acstatus");
+	sdd.initSpecDir(gateDir);
+	const rowWith = (status) =>
+		"# Test Plan\n\n| AC | Scenario | Layer (static/server/rpc/ui/manual) | Status |\n|---|---|---|---|\n" +
+		`| AC1 | create a record | rpc | ${status} |\n`;
+	const attempt = (status) => {
+		writeFileSync(join(gateDir, "test-plan.md"), rowWith(status));
+		const s = sdd.loadState(gateDir);
+		s.phase = "FIX_LOOP";
+		return sdd.recordSuccess(s, `AC1 (${status})`);
+	};
+	const failedRow = attempt("failed");
+	check("a FAILED AC row does NOT allow a PASSED verdict", failedRow.ok === false && failedRow.gaps.length > 0);
+	check("the refusal names the offending row", failedRow.gaps.some((g) => /AC1/.test(g) && /failed/.test(g)));
+	check("an unknown status token does NOT allow a PASSED verdict", attempt("green-ish").ok === false);
+	check("a bare `manual` status does NOT allow a PASSED verdict", attempt("manual").ok === false);
+	check("a blocked status does NOT allow a PASSED verdict", attempt("blocked").ok === false);
+	check("an empty status does NOT allow a PASSED verdict", attempt("").ok === false);
+	check("a dash status does NOT allow a PASSED verdict", attempt("-").ok === false);
+	check("`pass` closes the criterion", attempt("pass").ok === true);
+	check("`PASS` (any case) closes the criterion", attempt("PASS").ok === true);
+	check("`passed` closes the criterion", attempt("passed").ok === true);
+	check("`pass` with evidence in parentheses closes the criterion", attempt("pass (uid 7, order S00042)").ok === true);
+	check("markdown decoration around the token is tolerated", attempt("**pass**").ok === true);
+	// A row left in FAILED must keep blocking: a second attempt is not a fix.
+	writeFileSync(join(gateDir, "test-plan.md"), rowWith("failed"));
+	const retried = sdd.loadState(gateDir);
+	retried.phase = "FIX_LOOP";
+	check("a FAILED row keeps blocking a later attempt", sdd.recordSuccess(retried, "retry").ok === false);
+}
+
 sdd.recordDiagnosis(st, "root cause: the compute field lacked a depends");
 check("recorded diagnosis clears the ladder", sdd.diagnosisPending(st) === false);
 r = sdd.transition(st, "VERIFY", null, "retry after diagnosis");
@@ -855,6 +891,232 @@ check("create without dirs defaults to whole project", cpR.ok === true);
 	check("a legacy manifest cannot prune (reports unsupported)", legacy.pruneUnsupported === true && legacy.pruned.length === 0);
 }
 
+// ---- data undo: context, write shapes, no double compensation -------------
+// The replay is the last line of defence for a mutation. It used to (a) run
+// without the company context, (b) write read-shaped rows straight back, and
+// (c) re-compensate already-undone ops after a partial failure. Each of those
+// is a way to make the undo itself the incident.
+console.log("== data undo (context, write shapes, progressive compensation) ==");
+{
+	const grantsMod = await import(new URL("grants.js", libDir).href);
+	const undoProj = join(dir, "projUndo");
+	mkdirSync(join(undoProj, ".sdd"), { recursive: true });
+	mkdirSync(join(undoProj, "mod"), { recursive: true });
+	writeFileSync(join(undoProj, "mod", "a.py"), "V1\n", { mode: 0o600 });
+	writeFileSync(
+		join(undoProj, ".sdd", ".env"),
+		"ODOO_URL=http://127.0.0.1:8069\nODOO_DB=dev\nODOO_USERNAME=admin\nODOO_PASSWORD=k\n",
+		{ mode: 0o600 },
+	);
+	const target = grantsMod.fingerprintOf("http://127.0.0.1:8069", "dev", "admin");
+	grantsMod.writeGrant(undoProj, { kind: "connection", fingerprint: target, reason: "undo test" });
+
+	plugin.apply(fakeCtx, { projectRoot: undoProj });
+	const undoTool = registered.get("sdd_checkpoint");
+	const created = await undoTool.execute({ operation: "create", label: "before data", dirs: ["mod"] });
+	check("a checkpoint exists to journal the data ops", created.ok === true && typeof created.activeCheckpoint === "string");
+	const undoId = created.activeCheckpoint;
+
+	// The instance answers fields_get with metadata and records every call.
+	const rpc = [];
+	const realFetchUndo = globalThis.fetch;
+	globalThis.fetch = async (url, init) => {
+		const body = JSON.parse(init.body);
+		const params = body.params ?? {};
+		if (String(params.method) === "authenticate") {
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: 7 }), { status: 200 });
+		}
+		const [, , , model, method, args, kwargs] = params.args ?? [];
+		rpc.push({ model, method, args, kwargs });
+		if (method === "fields_get") {
+			return new Response(JSON.stringify({
+				jsonrpc: "2.0",
+				id: body.id,
+				result: {
+					name: { type: "char", readonly: false, store: true },
+					product_id: { type: "many2one", readonly: false, store: true },
+					tag_ids: { type: "many2many", readonly: false, store: true },
+					image_1920: { type: "binary", readonly: false, store: true },
+					computed_total: { type: "float", readonly: true, store: false },
+				},
+			}), { status: 200 });
+		}
+		if (method === "create") {
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: 9001 }), { status: 200 });
+		}
+		return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: true }), { status: 200 });
+	};
+
+	try {
+		// One created record and one written row, both recorded under a company.
+		cps.writeCheckpointJournal(undoProj, undoId, [
+			{
+				ts: "2026-01-01T00:00:01Z",
+				db: "dev",
+				target,
+				model: "res.partner",
+				method: "create",
+				ids: [],
+				preImage: [],
+				createdIds: [501],
+				context: { company_id: 3 },
+			},
+			{
+				ts: "2026-01-01T00:00:03Z",
+				db: "dev",
+				target,
+				model: "res.partner",
+				method: "unlink",
+				ids: [88],
+				preImage: [{ id: 88, name: "gone", country_id: [1, "VE"] }],
+				createdIds: [],
+				context: { company_id: 3 },
+			},
+			{
+				ts: "2026-01-01T00:00:02Z",
+				db: "dev",
+				target,
+				model: "product.template",
+				method: "write",
+				ids: [77],
+				preImage: [{
+					id: 77,
+					name: "old",
+					product_id: [12, "Partner"],
+					tag_ids: [4, 5],
+					image_1920: "QUJD",
+					computed_total: 3,
+					write_date: "2026-01-01 00:00:00",
+					display_name: "Product",
+				}],
+				createdIds: [],
+				context: { allowed_company_ids: [3], company_id: 3 },
+			},
+		]);
+
+		let ur = await undoTool.execute({ operation: "restore", checkpoint_id: undoId, restore_data: true, confirm_destructive: true });
+		check("the data undo reports what it did", ur.ok === true && ur.detail.includes("Data undo"));
+		const undoUnlink = rpc.find((c) => c.method === "unlink");
+		const undoWrite = rpc.find((c) => c.method === "write");
+		check(
+			"the compensation runs under the mutation's company context",
+			undoUnlink !== undefined && JSON.stringify(undoUnlink.kwargs.context) === JSON.stringify({ company_id: 3 }) &&
+				undoWrite !== undefined && JSON.stringify(undoWrite.kwargs.context) === JSON.stringify({ allowed_company_ids: [3], company_id: 3 }),
+		);
+		const values = undoWrite?.args?.[1] ?? {};
+		check("a many2one pre-image becomes a scalar id", values.product_id === 12);
+		check("an x2many pre-image becomes a (6,0,ids) command", JSON.stringify(values.tag_ids) === JSON.stringify([[6, 0, [4, 5]]]));
+		check("a scalar pre-image is written unchanged", values.name === "old");
+		check("binary content is NOT written back", !("image_1920" in values));
+		check("read-only/non-stored fields are NOT written back", !("computed_total" in values));
+		check("audited metadata is NOT written back", !("write_date" in values) && !("display_name" in values) && !("id" in values));
+		check("the fields it refused to restore are REPORTED", /NOT restored/.test(ur.detail) && /image_1920/.test(ur.detail));
+		check("the journal is cleared once nothing is left to undo", cps.readJournal(undoProj).length === 0);
+		const recreated = rpc.find((c) => c.method === "create");
+		check(
+			"an unlink is compensated by re-creating the pre-image row",
+			recreated !== undefined && recreated.model === "res.partner" &&
+				recreated.args?.[0]?.name === "gone" && recreated.args?.[0]?.country_id === 1,
+		);
+		check(
+			"the re-create runs under the mutation's context too",
+			recreated !== undefined && JSON.stringify(recreated.kwargs.context) === JSON.stringify({ company_id: 3 }),
+		);
+		check("a re-create says the original id is not preserved", /original id not preserved/.test(ur.detail));
+
+		// --- partial failure must not re-compensate what already succeeded ---
+		rpc.length = 0;
+		let failUnlink = false; // flipped per phase to break the NEWEST op first
+		const origFetch = globalThis.fetch;
+		globalThis.fetch = async (url, init) => {
+			const body = JSON.parse(init.body);
+			const params = body.params ?? {};
+			if (String(params.method) === "authenticate") {
+				return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: 7 }), { status: 200 });
+			}
+			const [, , , model, method, args, kwargs] = params.args ?? [];
+			rpc.push({ model, method, args, kwargs });
+			if (method === "fields_get") {
+				return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { name: { type: "char", readonly: false, store: true } } }), { status: 200 });
+			}
+			if (method === "unlink" && failUnlink) {
+				return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, error: { message: "Access Error", data: { message: "not allowed" } } }), { status: 200 });
+			}
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: true }), { status: 200 });
+		};
+		try {
+			const second = await undoTool.execute({ operation: "create", label: "partial", dirs: ["mod"] });
+			const secondId = second.activeCheckpoint;
+			cps.writeCheckpointJournal(undoProj, secondId, [
+				{ ts: "t1", db: "dev", target, model: "res.partner", method: "write", ids: [11], preImage: [{ id: 11, name: "old-11" }], createdIds: [] },
+				{ ts: "t2", db: "dev", target, model: "res.partner", method: "create", ids: [], preImage: [], createdIds: [22] },
+			]);
+			failUnlink = true; // the newest op (t2) cannot be compensated
+			let pr = await undoTool.execute({ operation: "restore", checkpoint_id: secondId, restore_data: true, confirm_destructive: true });
+			check("a failed compensation is reported, not hidden", /FAILED/.test(pr.detail));
+			const journal = cps.readJournal(undoProj);
+			check(
+				"the op that succeeded is marked as compensated",
+				journal.some((o) => o.method === "write" && typeof o.undoneAt === "string"),
+			);
+			check(
+				"the op that failed stays unmarked in the journal",
+				journal.some((o) => o.createdIds.includes(22) && o.undoneAt === undefined),
+			);
+			const firstRunWrites = rpc.filter((c) => c.method === "write").length;
+			const firstRunUnlinks = rpc.filter((c) => c.method === "unlink").length;
+			check("the successful compensation ran once", firstRunWrites === 1 && firstRunUnlinks === 1);
+
+			// Retry with the instance healthy again: ONLY the failed op is retried.
+			failUnlink = false;
+			rpc.length = 0;
+			pr = await undoTool.execute({ operation: "restore", checkpoint_id: secondId, restore_data: true, confirm_destructive: true });
+			check("the retry compensates the pending op", rpc.some((c) => c.method === "unlink") && /undone/.test(pr.detail));
+			check("the retry does NOT repeat the already-compensated op", !rpc.some((c) => c.method === "write"));
+			check("the journal is cleared after the retry", cps.readJournal(undoProj).length === 0);
+
+			// --- the destination of the journal is verified, not assumed ---
+			rpc.length = 0;
+			const third = await undoTool.execute({ operation: "create", label: "foreign", dirs: ["mod"] });
+			const thirdId = third.activeCheckpoint;
+			cps.writeCheckpointJournal(undoProj, thirdId, [
+				{ ts: "t1", db: "dev", target: grantsMod.fingerprintOf("http://127.0.0.1:8069", "dev", "other-user"), model: "res.partner", method: "write", ids: [9], preImage: [{ id: 9, name: "x" }], createdIds: [] },
+			]);
+			const refusedTarget = await undoTool.execute({ operation: "restore", checkpoint_id: thirdId, restore_data: true, confirm_destructive: true });
+			check("a journal from another destination is refused", /different destination/.test(refusedTarget.detail));
+			check("nothing is sent to the instance on refusal", rpc.length === 0);
+			check("the journal survives the refusal (not lost)", cps.readJournal(undoProj).length === 1);
+		} finally {
+			globalThis.fetch = origFetch;
+		}
+	} finally {
+		globalThis.fetch = realFetchUndo;
+	}
+
+	// The conversion itself, without metadata: shape-based and reported.
+	const skipped = [];
+	const values = cps.toWriteValues(
+		{ id: 1, partner_id: [5, "P"], tag_ids: [1, 2], name: "n", note: false },
+		{},
+		(f, why) => skipped.push(`${f}:${why}`),
+	);
+	check("untyped many2one is converted by shape", values.partner_id === 5);
+	check("untyped x2many is converted by shape", JSON.stringify(values.tag_ids) === JSON.stringify([[6, 0, [1, 2]]]));
+	check("a null relation becomes false, not null", values.note === false);
+	check("a conversion is not reported as a loss (no noise)", skipped.length === 0);
+	check("the id column is never written back", !("id" in values));
+	const skippedMeta = [];
+	cps.toWriteValues(
+		{ id: 2, display_name: "P", write_date: "d", name: "ok", image_1920: "QUJD", computed: 1 },
+		{ name: { type: "char" }, image_1920: { type: "binary" }, computed: { type: "float", readonly: true, store: false } },
+		(f, why) => skippedMeta.push(`${f}:${why}`),
+	);
+	check(
+		"only the fields that are really lost are reported",
+		skippedMeta.length === 2 && skippedMeta.some((s) => /image_1920/.test(s)) && skippedMeta.some((s) => /computed/.test(s)),
+	);
+}
+
 // ---- durable state: atomic writes and visible corruption recovery (lote 3) ----
 {
 	const atomicMod = await import(new URL("atomic.js", libDir).href);
@@ -1200,6 +1462,30 @@ console.log("== odoo_execute capability (context, read_group, fields_get) ==");
 	);
 	check("read_group puts pagination in kwargs", rg.kwargs.limit === 5 && rg.kwargs.orderby === "amount_total desc");
 
+	// ---- offset: paging a large model instead of trusting one response ------
+	// The plan's "discover fields with projection and pagination": field
+	// projection already existed (`fields`), paging did not.
+	rpcCalls.length = 0;
+	await rx.execute({ model: "sale.order", method: "search_read", domain: [], fields: ["name"], limit: 50, offset: 100 });
+	check("search_read forwards offset in kwargs", rpcCalls[0].kwargs.offset === 100 && rpcCalls[0].kwargs.limit === 50);
+	rpcCalls.length = 0;
+	await rx.execute({ model: "sale.order", method: "search_read", domain: [], limit: 10 });
+	check("no offset is invented when the caller omits it", rpcCalls[0].kwargs.offset === undefined);
+	rpcCalls.length = 0;
+	await rx.execute({ model: "sale.order", method: "search_count", domain: [], offset: 25 });
+	check("search_count forwards offset too", rpcCalls[0].kwargs.offset === 25);
+	rpcCalls.length = 0;
+	await rx.execute({ model: "sale.order", method: "read_group", domain: [], fields: ["amount_total:sum"], groupby: ["partner_id"], limit: 5, offset: 10 });
+	check("read_group forwards offset", rpcCalls[0].kwargs.offset === 10);
+	// A bad offset is refused, not clamped: a silently wrong window looks like a
+	// complete answer.
+	rpcCalls.length = 0;
+	const badOffset = await rx.execute({ model: "sale.order", method: "search_read", domain: [], offset: -5 });
+	check("a negative offset is refused with a reason", badOffset.denied === true && /offset/.test(badOffset.reason));
+	const fractional = await rx.execute({ model: "sale.order", method: "search_read", domain: [], offset: 1.5 });
+	check("a fractional offset is refused", fractional.denied === true && /non-negative integer/.test(fractional.reason));
+	check("a refused offset sends no RPC at all", rpcCalls.length === 0);
+
 	// fields_get: no positional args, just attributes.
 	rpcCalls.length = 0;
 	await rx.execute({ model: "sale.order", method: "fields_get", attributes: ["type", "string"] });
@@ -1227,6 +1513,41 @@ console.log("== odoo_execute capability (context, read_group, fields_get) ==");
 		"the journal records the context of the mutation",
 		journaled.length === 1 && JSON.stringify(journaled[0].context) === JSON.stringify({ company_id: 3 }),
 	);
+
+	// The PRE-IMAGE must be read under the same context: in multi-company the
+	// record may be invisible in the default company, and an empty pre-image
+	// makes a write impossible to undo.
+	rpcCalls.length = 0;
+	await rx.execute({
+		model: "sale.order",
+		method: "write",
+		ids: [42],
+		values: { name: "renamed" },
+		confirm_destructive: true,
+		context: { allowed_company_ids: [3], company_id: 3 },
+	});
+	const preRead = rpcCalls.find((c) => c.method === "read");
+	check("the pre-image read is issued before the mutation", preRead !== undefined && rpcCalls[rpcCalls.length - 1].method === "write");
+	check(
+		"the pre-image read carries the mutation's context",
+		preRead !== undefined && JSON.stringify(preRead.kwargs.context) === JSON.stringify({ allowed_company_ids: [3], company_id: 3 }),
+	);
+	check("the pre-image read keeps asking only for the written fields", preRead !== undefined && JSON.stringify(preRead.kwargs.fields) === JSON.stringify(["name"]));
+
+	// Same for unlink, whose pre-image asks for every stored field.
+	rpcCalls.length = 0;
+	await rx.execute({ model: "sale.order", method: "unlink", ids: [43], confirm_destructive: true, context: { company_id: 4 } });
+	const unlinkPre = rpcCalls.find((c) => c.method === "read");
+	check(
+		"the unlink pre-image read carries the context too",
+		unlinkPre !== undefined && JSON.stringify(unlinkPre.kwargs.context) === JSON.stringify({ company_id: 4 }),
+	);
+
+	// Without a context nothing is invented: the read stays context-free.
+	rpcCalls.length = 0;
+	await rx.execute({ model: "sale.order", method: "write", ids: [44], values: { name: "y" }, confirm_destructive: true });
+	const plainPre = rpcCalls.find((c) => c.method === "read");
+	check("no context is invented when the call has none", plainPre !== undefined && plainPre.kwargs.context === undefined);
 }
 
 
@@ -1357,6 +1678,42 @@ check("handoff written", hR.ok === true && existsSync(join(projH, "specs", "001-
 const hText = readFileSync(join(projH, "specs", "001-h", "handoff.md"), "utf8");
 check("handoff documents next steps", hText.includes("## Next steps"));
 check("handoff documents configuration", hText.includes("## Configuration in effect"));
+
+// The data record handed off must be the WHOLE story of the spec, not the last
+// 20 ops of whichever checkpoint happens to be active: a run that checkpoints,
+// rolls back and checkpoints again would otherwise hand off an incomplete list.
+{
+	const projJ = join(dir, "projJournal");
+	mkdirSync(join(projJ, "mod"), { recursive: true });
+	writeFileSync(join(projJ, "mod", "j.py"), "J\n", { mode: 0o600 });
+	// Apply FIRST: `registered` is overwritten by each apply, so a reference
+	// captured earlier would keep talking to the previous project.
+	plugin.apply(fakeCtx, { projectRoot: projJ });
+	const phaseJ = registered.get("sdd_phase");
+	const cpJ = registered.get("sdd_checkpoint");
+	const handoffJ = registered.get("sdd_handoff");
+	await phaseJ.execute({ operation: "init", spec_id: "010-journal" });
+
+	// Two checkpoints of the SAME spec, each with its own journaled op.
+	const cpJ1 = await cpJ.execute({ operation: "create", label: "j1", spec_id: "010-journal", dirs: ["mod"] });
+	cps.appendDataOp(projJ, { ts: "2026-02-01T10:00:00Z", db: "dev", model: "res.partner", method: "write", ids: [1], preImage: [{ id: 1, name: "a" }], createdIds: [] });
+	const cpJ2 = await cpJ.execute({ operation: "create", label: "j2", spec_id: "010-journal", dirs: ["mod"] });
+	cps.appendDataOp(projJ, { ts: "2026-02-01T11:00:00Z", db: "dev", model: "res.partner", method: "create", ids: [], preImage: [], createdIds: [2] });
+	check("both same-spec checkpoints exist", cpJ1.ok === true && cpJ2.ok === true);
+
+	// A checkpoint of ANOTHER spec becomes ACTIVE: its journal must not leak.
+	await cpJ.execute({ operation: "create", label: "other", spec_id: "011-other", dirs: ["mod"] });
+	cps.appendDataOp(projJ, { ts: "2026-02-01T12:00:00Z", db: "dev", model: "account.move", method: "write", ids: [3], preImage: [{ id: 3, ref: "x" }], createdIds: [] });
+
+	const hj = await handoffJ.execute({ spec_id: "010-journal" });
+	check("the handoff still writes", hj.ok === true);
+	const hjText = readFileSync(join(projJ, "specs", "010-journal", "handoff.md"), "utf8");
+	const section = hjText.slice(hjText.indexOf("## Journaled data operations"), hjText.indexOf("## Decisions"));
+	check("the handoff includes ops from EVERY checkpoint of the spec", section.includes("2026-02-01T10:00:00Z") && section.includes("2026-02-01T11:00:00Z"));
+	check("the handoff does NOT include another spec's ops", !section.includes("account.move") && !section.includes("2026-02-01T12:00:00Z"));
+	check("the handoff states the total and the sources", /Total: 2 operation\(s\)/.test(section) && /2 checkpoint\(s\) of this spec/.test(section));
+	check("the handoff carries the destination stamp", section.includes("db=dev"));
+}
 
 // ---- root resolution: the declared project root beats the process cwd -----
 // Regression for a real split-brain: the deployment projectRoot was empty, so

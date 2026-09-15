@@ -128,6 +128,7 @@ export function registerRuntimeTools(
 			order: { type: "string", description: "Order clause for search_read." },
 			confirm_destructive: { type: "boolean", description: "REQUIRED true for create/write/unlink." },
 			limit: { type: "number", description: "Row cap for reads (default 10)." },
+			offset: { type: "number", description: "Rows to skip before the window (search_read/read_group/search_count), so a large model can be paged instead of relying on one truncated response." },
 			groupby: { type: "array", items: { type: "string" }, description: "read_group: fields to group by, e.g. [\"state\"]." },
 			attributes: { type: "array", items: { type: "string" }, description: "fields_get: attributes to return, e.g. [\"type\",\"string\",\"required\"]." },
 			context: { type: "object", additionalProperties: true, description: "Odoo context forwarded verbatim as kwargs.context (allowed_company_ids, company_id, lang, tz)." },
@@ -163,12 +164,23 @@ export function registerRuntimeTools(
 				order?: string;
 				confirm_destructive?: boolean;
 				limit?: number;
+				offset?: number;
 				groupby?: string[];
 				attributes?: string[];
 				context?: Record<string, unknown>;
 			};
 			const model = a.model.trim();
 			const method = a.method;
+			// Pagination is validated up front, fail-closed: a fractional or
+			// negative offset is a typo, not something to clamp silently (a wrong
+			// window is a wrong answer, and it looks like a complete one).
+			if (a.offset !== undefined && (!Number.isInteger(a.offset) || a.offset < 0)) {
+				return {
+					denied: true,
+					reason: `\`offset\` must be a non-negative integer (got ${JSON.stringify(a.offset)}).`,
+					result: "",
+				};
+			}
 			// Explicit classification (fail-closed): a method in neither set is
 			// refused rather than silently treated as a read.
 			if (!READ_METHODS.has(method) && !MUTATING_METHODS.has(method)) {
@@ -213,6 +225,7 @@ export function registerRuntimeTools(
 			let callKwargs: Record<string, unknown> = {};
 			if (method === "search_read" || method === "search_count") {
 				callArgs = [Array.isArray(a.domain) ? a.domain : []];
+				if (typeof a.offset === "number") callKwargs["offset"] = a.offset;
 				if (method === "search_read") {
 					if (Array.isArray(a.fields)) callKwargs["fields"] = a.fields;
 					callKwargs["limit"] = typeof a.limit === "number" ? a.limit : 10;
@@ -227,6 +240,7 @@ export function registerRuntimeTools(
 					Array.isArray(a.groupby) ? a.groupby : [],
 				];
 				if (typeof a.limit === "number") callKwargs["limit"] = a.limit;
+				if (typeof a.offset === "number") callKwargs["offset"] = a.offset;
 				if (typeof a.order === "string" && a.order !== "") callKwargs["orderby"] = a.order;
 			} else if (method === "fields_get") {
 				// Field discovery: no positional args, just the requested
@@ -269,15 +283,26 @@ export function registerRuntimeTools(
 			}
 
 			// ---- pre-image capture (for the rollback journal) ----------------
+			// The pre-image MUST be read under the SAME context as the mutation:
+			// with `allowed_company_ids`/`company_id` set, a plain read can return
+			// nothing (record not visible in the default company) and the journal
+			// would then hold an empty pre-image for a write it cannot undo.
+			const withCallContext = (kwargs: Record<string, unknown>): Record<string, unknown> =>
+				callContext === undefined ? kwargs : { ...kwargs, context: callContext };
 			let preImage: Array<Record<string, unknown>> = [];
 			if (isMutating && deps.recordDataOp) {
 				const ids = Array.isArray(a.ids) ? a.ids : [];
 				if (method === "write" && ids.length > 0) {
 					const fields = Object.keys(a.values ?? {});
-					const pre = await client.executeKw<Array<Record<string, unknown>>>(model, "read", [ids], fields.length > 0 ? { fields } : {});
+					const pre = await client.executeKw<Array<Record<string, unknown>>>(
+						model,
+						"read",
+						[ids],
+						withCallContext(fields.length > 0 ? { fields } : {}),
+					);
 					if (pre.ok && Array.isArray(pre.value)) preImage = pre.value;
 				} else if (method === "unlink" && ids.length > 0) {
-					const pre = await client.executeKw<Array<Record<string, unknown>>>(model, "read", [ids], {});
+					const pre = await client.executeKw<Array<Record<string, unknown>>>(model, "read", [ids], withCallContext({}));
 					if (pre.ok && Array.isArray(pre.value)) preImage = pre.value;
 				}
 			}

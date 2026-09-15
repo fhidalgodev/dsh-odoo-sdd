@@ -251,15 +251,15 @@ specs/<NNN>-<slug>/
 | `odoo_connect` | Sonda la instancia: versión del servidor + autenticación. Reporte enmascarado; distingue los estados `NEEDS_SETUP` / `NEEDS_SECRET` / `DEFERRED` / `SKIPPED` (nunca pide secretos por chat). |
 | `odoo_setup` | Onboarding: `check` (cascada + gitignore + modo de delegación), `interactive` (scaffold chmod 600 sin secreto), **`authorize`** (pide al DESARROLLADOR, vía aprobación nativa, un grant de conexión atado al url/db/usuario actual), **`revoke`** (elimina los grants), **`purge`** (primero muestra el plan y, con `confirm_destructive=true` + aprobación humana, borra solo el estado propio del plugin bajo `.sdd/`), `later`, `skip`, `reset`, `autonomy` (supervised \| autonomous, aprobado por un humano). Los secretos nunca se aceptan como parámetros. |
 | `odoo_module` | `info` / `install` / `upgrade` sobre `ir.module.module` (`button_immediate_*`). Devuelve la salida o el traceback del servidor, redactado — el bucle de feedback cerrado. |
-| `odoo_execute` | CRUD/RPC genérico (`execute_kw`) con allowlist fail-closed. Los métodos se clasifican explícitamente y uno sin clasificar se rechaza: lecturas (`search_read`, `read`, `search_count`, `read_group`, `fields_get`) permitidas; mutaciones (`create`/`write`/`unlink`) exigen `confirm_destructive=true` Y el modelo en `executeAllowlist`, y se journalizan para que el undo de datos pueda replicarlas. `context` se reenvía tal cual — usalo para `allowed_company_ids`/`company_id` en instancias multi-company — y el servidor sigue aplicando su propia ACL. No requiere instancia para evaluar denegaciones. |
+| `odoo_execute` | CRUD/RPC genérico (`execute_kw`) con allowlist fail-closed. Los métodos se clasifican explícitamente y uno sin clasificar se rechaza: lecturas (`search_read`, `read`, `search_count`, `read_group`, `fields_get`) permitidas, con `fields`/`limit`/`order`/`offset` para proyección y paginado (un `offset` decimal o negativo se rechaza, nunca se recorta en silencio); mutaciones (`create`/`write`/`unlink`) exigen `confirm_destructive=true` Y el modelo en `executeAllowlist`, y se journalizan para que el undo de datos pueda replicarlas. `context` se reenvía tal cual — usalo para `allowed_company_ids`/`company_id` en instancias multi-company — y el servidor sigue aplicando su propia ACL. No requiere instancia para evaluar denegaciones. |
 | `odoo_validate` | Validación LOCAL del módulo sin instancia: `__manifest__.py` + depends, los XML declarados existen, `security/ir.model.access.csv` cuando hay modelos. Devuelve findings file:line, más el `module_dir` y la raíz del proyecto que resolvió (una ruta relativa se resuelve contra la carpeta de la sesión, nunca contra el cwd del proceso). |
 | `odoo_errors` | Lee errores recientes del servidor (`ir.logging`) — el equivalente remoto de obtener los logs del entorno. |
 | `odoo_session` | Mintea una sesión web sin contraseña (patrón `connect_as_user`) guardada en `.sdd/session.json` (chmod 600) para pruebas UI con Playwright. La cookie nunca se devuelve. |
-| `sdd_phase` | Máquina de fases: `init`, `clarify`, `status` (resumen del logbook, directorio del spec y ubicación de los specs), `mark_spec_loaded`, `advance` (gates fail-closed + provenance `approval_source`), `fail` (escalera de fallos + veredicto FAILED), `succeed` (veredicto PASSED), `rollback` (restaura un checkpoint y vuelve a WRITE_CODE), `diagnose`. |
-| `sdd_checkpoint` | La superficie de rollback: `create` (snapshot del workspace, queda activo), `list`, `restore` (archivos y, con `restore_data=true` + `confirm_destructive=true`, las mutaciones de datos registradas; **siempre reporta** los archivos creados después del checkpoint y los borra solo con `remove_created=true`), `drop`, `journal`. |
+| `sdd_phase` | Máquina de fases: `init`, `clarify`, `status` (resumen del logbook, directorio del spec y ubicación de los specs), `mark_spec_loaded`, `advance` (gates fail-closed + provenance `approval_source`), `fail` (escalera de fallos + veredicto FAILED), `succeed` (veredicto PASSED; se rechaza salvo que cada fila de AC en `test-plan.md` lea un `pass` explícito), `rollback` (restaura un checkpoint y vuelve a WRITE_CODE), `diagnose`. |
+| `sdd_checkpoint` | La superficie de rollback: `create` (snapshot del workspace, queda activo), `list`, `restore` (archivos y, con `restore_data=true` + `confirm_destructive=true`, las mutaciones de datos registradas: el undo corre bajo el contexto de compañía que usó la mutación, convierte formas de lectura en valores de escritura, marca cada operación para que un reintento no la compense dos veces, rechaza un journal de otro destino y reporta cada campo que no pudo restaurar; **siempre reporta** los archivos creados después del checkpoint y los borra solo con `remove_created=true`), `drop`, `journal`. |
 | `odoo_docs` | Documentación de un módulo, usable **por sí sola** (sin spec, fase, checkpoint ni instancia), así que un módulo existente se puede documentar sin más: `check` (fragmentos OCA mapeados a Diátaxis, esquema de versión, changelog, `index.html`, docstrings, comentarios xpath, directiva OWL → ERROR/WARN con `file:line`), `plan`, `scaffold` (esqueletos create-only, nunca sobrescribe) y `report` (persiste `docs-report.md`; APPROVED solo si nada quedó en esqueleto). La entrada de changelog es obligatoria para cualquier cambio a un módulo ya publicado. |
 | `odoo_security_scan` | Revisión de seguridad estática local (sin instancia): SQL concatenado, `eval`/`exec`/`pickle`, secretos hardcodeados, `sudo()` sin justificar, `auth="none"`, CSRF desactivado, `t-raw` en QWeb. Hallazgos con `file:line` + sugerencia; cualquier ERROR bloquea `DONE`. |
-| `sdd_handoff` | Escribe `specs/<id>/handoff.md` (fase final, veredicto, decisiones, blockers, checkpoints, journal, config efectiva, próximos pasos) al cerrar la ejecución. |
+| `sdd_handoff` | Escribe `specs/<id>/handoff.md` (fase final, veredicto, decisiones, blockers, checkpoints, el journal de datos **completo** de la spec, config efectiva, próximos pasos) al cerrar la ejecución. |
 | `odoo_config` | Lee o actualiza la configuración persistente y responde **"¿en qué proyecto estoy?"**: la raíz resuelta, su procedencia (cwd de la sesión / configurada / cwd del proceso), la base de specs, el directorio de spec efectivo y el archivo de configuración en uso. |
 
 ---
@@ -330,13 +330,18 @@ camino de mutación tiene vuelta atrás y forma de probar qué pasó.
   captura el árbol del proyecto, así que con la disposición **central** de specs
   los documentos de spec (que viven fuera del proyecto) no forman parte de él a
   propósito: la spec es la fuente de verdad inmutable, no código a revertir.
-- **Rollback de datos (best effort).** Cada `create`/`write`/`unlink` vía
-  `odoo_execute` guarda su pre-imagen en el journal del checkpoint, marcada con la
-  base de datos donde se aplicó; `restore restore_data=true
-  confirm_destructive=true` la reaplica en orden inverso y se niega si el journal
-  se registró contra otra base. Cubre los datos escritos a través del plugin —
-  **no** los efectos de un install/upgrade de módulo, que no se revierten a nivel
-  de base de datos.
+- **Rollback de datos (best effort, y honesto al respecto).** Cada
+  `create`/`write`/`unlink` vía `odoo_execute` guarda su pre-imagen en el journal
+  del checkpoint, marcada con la base de datos **y** el destino (url+db+usuario)
+  donde se aplicó; `restore restore_data=true confirm_destructive=true` la
+  reaplica en orden inverso y se niega ante un journal de otro destino. El replay
+  corre bajo el contexto de compañía que usó la mutación, convierte formas de
+  lectura en valores de escritura (many2one, x2many), marca cada operación a
+  medida que la compensa para que un reintento no la repita, y reporta los campos
+  que no pudo restaurar (contenido binario, campos readonly o no almacenados).
+  Los registros re-creados reciben ids NUEVOS — el informe lo dice. Cubre los
+  datos escritos a través del plugin — **no** los efectos de un install/upgrade de
+  módulo, que no se revierten a nivel de base de datos.
 - **El restore reporta el drift.** `restore` siempre lista los archivos creados
   *después* del checkpoint, así que nada queda en silencio; `remove_created=true`
   los borra (solo dentro de las raíces del snapshot) para igualar el snapshot.

@@ -711,8 +711,9 @@ console.log("== settings source drives the effective configuration ==");
 	let hooks = null;
 	let live = {};
 	const localRegistry = new Map();
+	const localGuards = [];
 	const settingsCtx = {
-		tools: { register: (t) => localRegistry.set(t.name, t), guard: () => () => {} },
+		tools: { register: (t) => localRegistry.set(t.name, t), guard: (g) => { localGuards.push(g); return () => {}; } },
 		on: () => () => {},
 		// The host hands the section hooks through ctx.inject(["settings"], cb).
 		inject: (_deps, cb) => cb({ settings: { installSection: (_o, _ns, _schema, _entry, h) => { hooks = h; } } }),
@@ -747,6 +748,53 @@ console.log("== settings source drives the effective configuration ==");
 	hooks.onChange();
 	sr = await setExec.execute({ model: "sale.order", method: "create", values: { name: "x" }, confirm_destructive: true });
 	check("clearing the settings layer falls back (no crash, still evaluable)", typeof sr.reason === "string");
+
+	// The Specs card writes the SAME layer, so the layout it selects must reach
+	// the tools too (otherwise the panel would persist a preference nobody reads).
+	const settingsRootForSpecs = join(dir, "settings-central-specs");
+	live = { specsMode: "central", specsRoot: settingsRootForSpecs };
+	hooks.onChange();
+	const setPhase = localRegistry.get("sdd_phase");
+	const setInit = await setPhase.execute({ operation: "init", spec_id: "001-from-settings" });
+	const specLocMod = await import(new URL("specs-location.js", libDir).href);
+	check(
+		"a layout chosen in the settings layer drives sdd_phase",
+		existsSync(join(settingsRootForSpecs, specLocMod.projectSlug(projSet), "001-from-settings", "state.json")),
+	);
+	check("the settings-provided layout is reported back", setInit.detail.includes(join(settingsRootForSpecs, specLocMod.projectSlug(projSet))));
+
+	// Precedence, pinned because it is surprising: the project's own
+	// `.sdd/config.json` (written by `odoo_config mode=set`) OUTRANKS the
+	// settings layer, so a panel edit can look ignored when the project file
+	// pins that key.
+	writeFileSync(join(projSet, ".sdd", "config.json"), JSON.stringify({ specsMode: "project", specsDir: "specs" }, null, 2), { mode: 0o600 });
+	const fileWins = await setPhase.execute({ operation: "init", spec_id: "002-file-wins" });
+	check(
+		"the project config file outranks the settings layer",
+		existsSync(join(projSet, "specs", "002-file-wins", "state.json")) && fileWins.detail.includes(join(projSet, "specs")),
+	);
+	rmSync(join(projSet, ".sdd", "config.json"), { force: true });
+
+	// The same precedence in the direction that matters for safety: a project
+	// file may also RELAX a guard the panel armed, and the plugin must obey the
+	// more specific layer instead of the global one. The active spec is put in
+	// WRITE_CODE so the ONLY policy under test is the checkpoint requirement
+	// (an earlier phase would deny for its own reason and hide the difference).
+	const cpsMod = await import(new URL("checkpoints.js", libDir).href);
+	cpsMod.writeActiveState(projSet, { specId: "001-from-settings", phase: "WRITE_CODE", checkpointId: null });
+	const setGuard = localGuards[localGuards.length - 1];
+	const mutCall = { name: "odoo_execute", arguments: { model: "sale.order", method: "create", values: {}, confirm_destructive: true } };
+	live = { requireCheckpointBeforeMutation: true };
+	hooks.onChange();
+	check("the panel's guard setting is armed in the guard", /checkpoint/i.test(setGuard(mutCall) ?? ""));
+	writeFileSync(join(projSet, ".sdd", "config.json"), JSON.stringify({ requireCheckpointBeforeMutation: false }, null, 2), { mode: 0o600 });
+	check(
+		"the project file can override the panel's guard setting",
+		(setGuard(mutCall) ?? "ALLOWED") === "ALLOWED",
+		setGuard(mutCall) ?? "ALLOWED",
+	);
+	rmSync(join(projSet, ".sdd", "config.json"), { force: true });
+	check("removing the file restores the panel's guard setting", /checkpoint/i.test(setGuard(mutCall) ?? ""));
 }
 
 

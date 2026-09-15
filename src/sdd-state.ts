@@ -52,6 +52,25 @@ export type LicenseStrategy = "community" | "enterprise";
 /** Non-terminal phases that require an explicit human/agent approval gate. */
 export const GATED_PHASES: readonly Phase[] = ["READ_SPEC", "ARCHITECTURE"];
 
+/**
+ * Explicit phase-transition graph. `transition()` refuses a `next` that is not
+ * reachable from the current phase, so a run cannot skip phases after CLARIFY
+ * (e.g. jump straight to DONE) or move backwards arbitrarily. `BLOCKED` is a
+ * reachable escape from every non-terminal phase; `DONE` is reachable from
+ * VERIFY/FIX_LOOP once the honest PASSED verdict gate (checked separately)
+ * passes.
+ */
+export const PHASE_EDGES: Record<Phase, readonly Phase[]> = {
+	CLARIFY: ["READ_SPEC", "BLOCKED"],
+	READ_SPEC: ["ARCHITECTURE", "BLOCKED"],
+	ARCHITECTURE: ["WRITE_CODE", "BLOCKED"],
+	WRITE_CODE: ["VERIFY", "BLOCKED"],
+	VERIFY: ["FIX_LOOP", "DONE", "BLOCKED"],
+	FIX_LOOP: ["VERIFY", "DONE", "BLOCKED"],
+	DONE: [],
+	BLOCKED: [],
+};
+
 /** One node of the append-only knowledge-base graph. */
 export interface KbNode {
 	id: number;
@@ -241,6 +260,22 @@ export function transition(
 		kbAppend(state, "blocker", `Pipeline halted by stop.md: ${stop}`);
 		saveState(state);
 		return { ok: false, reason: `stop.md present — pipeline halted. Reason: ${stop}`, state };
+	}
+
+	// Phase-graph gate: `next` must be a legal transition from the current phase
+	// (fail-closed). This prevents skipping phases after CLARIFY (e.g. a jump
+	// straight to DONE) or moving backwards before the appropriate stage.
+	if (next !== state.phase) {
+		const allowed = PHASE_EDGES[state.phase] ?? [];
+		if (!allowed.includes(next)) {
+			return {
+				ok: false,
+				reason:
+					`Illegal phase transition ${state.phase} -> ${next}. Allowed from ` +
+					`${state.phase}: ${allowed.length > 0 ? allowed.join(", ") : "(none — terminal)"}.`,
+				state,
+			};
+		}
 	}
 
 	// Fail-closed approval gates.

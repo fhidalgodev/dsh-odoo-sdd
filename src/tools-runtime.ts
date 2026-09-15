@@ -62,7 +62,11 @@ export function registerRuntimeTools(
 				enum: ["search_read", "read", "create", "write", "unlink", "search_count"],
 				description: "Method to call.",
 			},
-			domain: { type: "array", items: { type: "array", items: { type: "object", additionalProperties: true } }, description: "search_read/search_count domain, e.g. [[\"state\",\"=\",\"draft\"]]." },
+			// Odoo domains are lists of terms; a term is either a triple with a
+			// SCALAR value (`["state","=","draft"]`) or a bare logical operator
+			// (`"|"`, `"&"`, `"!"`). Constraining items to objects rejected every
+			// valid domain, so the array is left unconstrained.
+			domain: { type: "array", description: "search_read/search_count domain, e.g. [[\"state\",\"=\",\"draft\"]] or [\"|\",[\"a\",\"=\",1],[\"b\",\"=\",2]]." },
 			ids: { type: "array", items: { type: "number" }, description: "Record ids (read/write/unlink)." },
 			values: { type: "object", additionalProperties: true, description: "Field values (create/write)." },
 			fields: { type: "array", items: { type: "string" }, description: "Fields to read." },
@@ -81,8 +85,13 @@ export function registerRuntimeTools(
 				},
 			},
 			render: (_args: unknown, value: unknown) => {
-				const v = value as { denied: boolean; reason: string };
-				return [{ type: "text", text: v.denied ? `[DENIED] ${v.reason}` : v.reason }];
+				// The renderer must carry the actual payload/traceback: dropping
+				// `result` broke the closed feedback loop (the model saw only the
+				// reason line, never the data or the server error).
+				const v = value as { denied: boolean; reason: string; result?: string };
+				if (v.denied) return [{ type: "text", text: `[DENIED] ${v.reason}` }];
+				const detail = typeof v.result === "string" && v.result !== "" ? v.result : "";
+				return [{ type: "text", text: detail === "" ? v.reason : `${v.reason}\n\n${detail}` }];
 			},
 		},
 		async execute(args: unknown) {
@@ -174,7 +183,10 @@ export function registerRuntimeTools(
 			// ---- execute ----------------------------------------------------
 			const rpc = await client.executeKw<unknown>(model, method, callArgs, callKwargs);
 			if (!rpc.ok) {
-				return { denied: false, reason: "SERVER ERROR", result: rpc.error };
+				// Domain failure over a successful transport: keep `denied:false`
+				// (this is NOT a policy denial) but mark it unmistakably so the
+				// model, the renderer and any text consumer never read it as OK.
+				return { denied: false, reason: "SERVER ERROR — RPC call failed", result: rpc.error };
 			}
 
 			// ---- journal the applied mutation (best-effort undo) ------------

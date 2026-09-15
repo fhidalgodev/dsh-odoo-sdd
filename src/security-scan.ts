@@ -170,7 +170,17 @@ export function scanModule(moduleDir: string): ScanResult {
 	const findings: SecurityFinding[] = [];
 	const files: Array<{ abs: string; rel: string }> = [];
 	if (!existsSync(moduleDir)) {
-		return { findings, scannedFiles: 0, truncated: false, clean: true };
+		// A non-existent path must NOT be reported as a clean scan: doing so
+		// silently certifies a module that was never inspected.
+		findings.push({
+			severity: "ERROR",
+			rule: "path-not-found",
+			file: moduleDir,
+			line: 0,
+			message: `Scan target does not exist: ${moduleDir}`,
+			hint: "Pass an existing module directory (the one holding __manifest__.py).",
+		});
+		return { findings, scannedFiles: 0, truncated: false, clean: false };
 	}
 	const truncated = collectFiles(moduleDir, "", files);
 	for (const file of files) {

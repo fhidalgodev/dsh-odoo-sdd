@@ -65,6 +65,9 @@ import { purgeOwnedState, purgePlan, PRESERVED } from "./lifecycle.js";
 import { withAudit } from "./audit.js";
 import { registerRuntimeTools } from "./tools-runtime.js";
 import { registerDocsTool } from "./docs-tool.js";
+import { registerFunctionalTool, activeFunctionalRun, functionalDir, readPlan, readRun, countOps } from "./functional.js";
+import { sha256 } from "./functional.js";
+import { RUNBOOK_FILE, runbookGaps } from "./sdd-state.js";
 import { appendAuditLine, recordAudit } from "./audit.js";
 import {
 	readActiveState,
@@ -89,6 +92,7 @@ import {
 	hasValidGrant,
 	writeGrant,
 	revokeGrants,
+	readGrants,
 } from "./grants.js";
 import { scanModule } from "./security-scan.js";
 import { OdooClient } from "./odoo-client.js";
@@ -105,8 +109,12 @@ import {
 	kbRead,
 	kbAppend,
 	readVerdict,
+	recordIntent,
+	isPipelineMode,
 	type Phase,
+	type PipelineMode,
 	PHASES,
+	PIPELINE_MODES,
 } from "./sdd-state.js";
 import { join, resolve, dirname, isAbsolute, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -470,65 +478,107 @@ interface SkillApi {
 const ODOO_SDD_SKILL_NAME = "odoo-sdd-workflow";
 
 /**
- * Register the bundled workflow as a runtime skill so DSH advertises it in the
- * model-facing catalog (modelInvocable) and the user-facing catalog
- * (userInvocable) on every new session. This is what makes the protocol
- * discoverable automatically after a user installs the plugin, instead of
- * requiring them to reach into `skills/odoo-sdd-workflow/SKILL.md` by hand.
+ * Skills this plugin bundles and registers at mount time.
+ *
+ * Each entry is a directory under `skills/` holding a `SKILL.md` with
+ * frontmatter, plus the resource base relative resources in its body resolve
+ * against (the personas for the development workflow, the skill's own folder for
+ * a skill whose reference lives beside it).
  */
-function registerOdooSddSkill(ctx: unknown): void {
+const ODOO_SDD_SKILLS: Array<{ dir: string; resourceBase: string; fallbackDescription: string }> = [
+	{
+		dir: ODOO_SDD_SKILL_NAME,
+		resourceBase: "agents",
+		fallbackDescription:
+			"Spec-Driven Development pipeline for Odoo modules on top of the dsh-odoo-sdd plugin.",
+	},
+	{
+		dir: "odoo-functional-sdd",
+		resourceBase: "skills/odoo-functional-sdd",
+		fallbackDescription:
+			"Functional Odoo work on a running instance: discover what the version and the installed " +
+			"modules actually provide, configure and import in human-approved batches, and close with an " +
+			"operational runbook a person can repeat.",
+	},
+];
+
+/**
+ * Read one bundled skill and split its frontmatter from its instructions.
+ * @param dir - skill directory under `skills/`.
+ * @returns the parsed definition, or null when the file cannot be read.
+ */
+function readBundledSkill(dir: string): {
+	name: string;
+	description: string;
+	whenToUse?: string;
+	content: string;
+	path: string;
+} | null {
+	const skillPath = join(dirname(fileURLToPath(import.meta.url)), "..", "skills", dir, "SKILL.md");
+	let raw: string;
 	try {
-		const c = ctx as { skills?: SkillApi };
-		const skillPath = join(
-			dirname(fileURLToPath(import.meta.url)),
-			"..",
-			"skills",
-			"odoo-sdd-workflow",
-			"SKILL.md",
-		);
-		const raw = readFileSync(skillPath, "utf8");
-		// Strip the `---` frontmatter from the body and lift its single-line
-		// keys into the registry summary, so the model sees a clean description
-		// and the body is pure instructions.
-		const front = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
-		let name = ODOO_SDD_SKILL_NAME;
-		let description = "";
-		let whenToUse: string | undefined;
-		let content = raw;
-		if (front) {
-			content = raw.slice(front[0].length);
-			for (const line of front[1].split(/\r?\n/)) {
-				const m = /^(\w[\w-]*)\s*:\s*(.*)$/.exec(line);
-				if (!m) continue;
-				const value = m[2].trim().replace(/^["']|["']$/g, "");
-				if (m[1] === "name") name = value;
-				else if (m[1] === "description") description += (description ? " " : "") + value;
-				else if (m[1] === "whenToUse" || m[1] === "when-to-use") whenToUse = value;
-			}
+		raw = readFileSync(skillPath, "utf8");
+	} catch {
+		return null;
+	}
+	// Strip the `---` frontmatter from the body and lift its single-line keys
+	// into the registry summary, so the model sees a clean description and the
+	// body is pure instructions.
+	const front = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw);
+	let name = dir;
+	let description = "";
+	let whenToUse: string | undefined;
+	let content = raw;
+	if (front) {
+		content = raw.slice(front[0].length);
+		for (const line of front[1].split(/\r?\n/)) {
+			const m = /^(\w[\w-]*)\s*:\s*(.*)$/.exec(line);
+			if (!m) continue;
+			const value = m[2].trim().replace(/^["']|["']$/g, "");
+			if (m[1] === "name") name = value;
+			else if (m[1] === "description") description += (description ? " " : "") + value;
+			else if (m[1] === "whenToUse" || m[1] === "when-to-use") whenToUse = value;
 		}
-		const api = c.skills;
+	}
+	return { name, description, ...(whenToUse === undefined ? {} : { whenToUse }), content, path: skillPath };
+}
+
+/**
+ * Register the bundled skills as runtime skills so DSH advertises them in the
+ * model-facing catalog (modelInvocable) and the user-facing catalog
+ * (userInvocable) on every new session. This is what makes the protocols
+ * discoverable automatically after a user installs the plugin, instead of
+ * requiring them to reach into `skills/<dir>/SKILL.md` by hand.
+ *
+ * Fail-open by design: a missing or unreadable skill must never break the
+ * plugin mount — the file stays available in the repository either way.
+ */
+function registerOdooSddSkills(ctx: unknown): void {
+	try {
+		const api = (ctx as { skills?: SkillApi }).skills;
 		if (!api || typeof api.register !== "function") return; // fail-open: no skills host
 		const pkgRoot = dirname(fileURLToPath(import.meta.url)); // .../lib
-		api.register({
-			name,
-			description:
-				description ||
-				"Spec-Driven Development pipeline for Odoo modules on top of the dsh-odoo-sdd plugin.",
-			...(whenToUse ? { whenToUse } : {}),
-			content,
-			invocation: { modelInvocable: true, userInvocable: true },
-			// `source` is part of the host SkillRegistration contract (the
-			// registry re-validates it when the definition is loaded); omitting
-			// it can make the registry reject the skill even though apply ran.
-			source: "runtime",
-			// Resolve relative resources (agents/*.md) from the installed package
-			// location, not from cwd.
-			resourceBase: { kind: "directory", path: join(pkgRoot, "..", "agents") },
-			path: skillPath,
-		});
+		for (const entry of ODOO_SDD_SKILLS) {
+			const skill = readBundledSkill(entry.dir);
+			if (skill === null) continue;
+			api.register({
+				name: skill.name,
+				description: skill.description || entry.fallbackDescription,
+				...(skill.whenToUse === undefined ? {} : { whenToUse: skill.whenToUse }),
+				content: skill.content,
+				invocation: { modelInvocable: true, userInvocable: true },
+				// `source` is part of the host SkillRegistration contract (the
+				// registry re-validates it when the definition is loaded); omitting
+				// it can make the registry reject the skill even though apply ran.
+				source: "runtime",
+				// Resolve relative resources from the installed package location,
+				// not from cwd.
+				resourceBase: { kind: "directory", path: join(pkgRoot, "..", entry.resourceBase) },
+				path: skill.path,
+			});
+		}
 	} catch {
-		// A missing/unreadable skill must never break the plugin mount; the
-		// workflow stays available in the repository as a file.
+		// A skills host that throws must not take the tool surface down with it.
 	}
 }
 
@@ -548,9 +598,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			"upgrade the harness or check the profile composition.",
 		);
 	}
-	// A skill registry is optional on some hosts; register the bundled workflow
-	// when present so it is advertised to the model on every new session.
-	registerOdooSddSkill(ctx);
+	// A skill registry is optional on some hosts; register the bundled skills
+	// (development workflow + functional workflow) when present so both are
+	// advertised to the model on every new session.
+	registerOdooSddSkills(ctx);
 	// S2: sanitizer for any agent-supplied text the pipeline persists.
 	const sanitize = (textValue: string): string => {
 		const loaded = loadCredentials(effectiveConfig().projectRoot);
@@ -871,6 +922,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						(result.removed.length > 0 ? `: ${result.removed.join(", ")}` : "") +
 						(result.failed.length > 0 ? `. FAILED (left in place): ${result.failed.join(", ")}` : "") +
 						(result.absent.length > 0 ? `. Absent already: ${result.absent.length}` : "") +
+						(result.kept.length > 0
+							? `. KEPT because it is evidence of a run that is not finished: ${result.kept.join(", ")} ` +
+								"(reconcile or finish it, then purge again)"
+							: "") +
 						".\nPreserved: " +
 						PRESERVED.map((p) => p.rel).join(", ") +
 						". The purge itself is recorded in .sdd/audit.jsonl (the only file it recreates). " +
@@ -1268,7 +1323,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 			mode: {
 				type: "string",
-				enum: ["create", "bug"],
+				enum: [...PIPELINE_MODES],
 				description: "Job type (for operation=clarify): create a new module, or resolve a bug on an existing one.",
 			},
 			licensed: {
@@ -1320,7 +1375,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		async execute(args: {
 			operation: "init" | "clarify" | "status" | "mark_spec_loaded" | "advance" | "fail" | "succeed" | "rollback" | "diagnose";
 			spec_id: string;
-			mode?: "create" | "bug";
+			mode?: PipelineMode;
 			licensed?: "community" | "enterprise";
 			next_phase?: Phase;
 			approval_marker?: string;
@@ -1345,15 +1400,37 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const projectRootForAudit = projectRoot;
 			appendAuditLine(projectRootForAudit, "sdd_phase/" + args.operation, args, clientFor(projectRootForAudit).credentials);
 			if (args.operation === "init") {
-				initSpecDir(specDir);
+				// The mode decides the template set, the phase graph and the content
+				// gates, so it is chosen HERE and frozen by recordIntent().
+				const requested: PipelineMode | null =
+					args.mode === undefined ? null : isPipelineMode(args.mode) ? args.mode : null;
+				if (args.mode !== undefined && requested === null) {
+					return {
+						operation: "init" as string, phase: loadState(specDir).phase as string, ok: false, requireDiagnosis: false,
+						summary: summarize(loadState(specDir)),
+						detail: `Unsupported mode "${String(args.mode)}" — expected one of: ${PIPELINE_MODES.join(", ")}.`,
+					};
+				}
+				initSpecDir(specDir, requested);
 				const state = loadState(specDir);
+				if (requested !== null && state.mode !== null && state.mode !== requested) {
+					return {
+						operation: "init" as string, phase: state.phase as string, ok: false, requireDiagnosis: false,
+						summary: summarize(state),
+						detail:
+							`This spec already runs as "${state.mode}" and init cannot change it to ` +
+							`"${requested}": the mode decides the phase graph and the gates. Create a new spec id.`,
+					};
+				}
+				if (requested !== null) state.mode = requested;
 				saveState(state);
 				writeActiveState(projectRoot, { specId: args.spec_id, phase: state.phase });
 				return {
 					operation: "init" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
 					summary: summarize(state),
 					detail:
-						`Spec directory initialized at ${displayPath(specDir)} (spec.md, architecture.md, test-plan.md, state.json). ` +
+						`Spec directory initialized at ${displayPath(specDir)} (spec.md, architecture.md, test-plan.md, state.json) ` +
+						`for mode=${state.mode ?? "to be decided in CLARIFY"}. ` +
 						`Fill spec.md, then mark_spec_loaded.\nSpecs location: ${describeSpecsLocation({ projectRoot, specsMode: cfgPhase.specsMode, specsDir: cfgPhase.specsDir, specsRoot: cfgPhase.specsRoot })}\n${rootNote(root)}`,
 				};
 			}
@@ -1392,11 +1469,26 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					return {
 						operation: "clarify" as string, phase: stateC.phase as string, ok: false, requireDiagnosis: false,
 						summary: summarize(stateC),
-						detail: "operation=clarify requires BOTH mode (create|bug) and licensed (enterprise|oca|community) to record the intent.",
+						detail:
+							`operation=clarify requires BOTH mode (${PIPELINE_MODES.join("|")}) and licensed ` +
+							"(enterprise|community) to record the intent.",
 					};
 				}
-				stateC.mode = args.mode;
-				stateC.licensed = args.licensed;
+				if (!isPipelineMode(args.mode)) {
+					return {
+						operation: "clarify" as string, phase: stateC.phase as string, ok: false, requireDiagnosis: false,
+						summary: summarize(stateC),
+						detail: `Unsupported mode "${String(args.mode)}" — expected one of: ${PIPELINE_MODES.join(", ")}.`,
+					};
+				}
+				const intent = recordIntent(stateC, args.mode, args.licensed);
+				if (!intent.ok) {
+					return {
+						operation: "clarify" as string, phase: stateC.phase as string, ok: false, requireDiagnosis: false,
+						summary: summarize(stateC),
+						detail: intent.reason ?? "the intent cannot be changed at this point.",
+					};
+				}
 				kbAppend(stateC, "decision", `Intent clarified: mode=${stateC.mode}, licensed=${stateC.licensed}. ${note}`);
 				saveState(stateC);
 				return {
@@ -2396,6 +2488,142 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const decisions = kb.filter((n) => n.kind === "decision");
 			const securityReport = join(specDir, "security-report.md");
 
+			/**
+			 * Build the functional runbook from the plan and the durable run state.
+			 *
+			 * The runbook is the deliverable of a functional run: it is what a person
+			 * follows by hand in Odoo. It is generated from real, recorded facts (who
+			 * approved what, which operations applied, which criteria they cover) and
+			 * it is explicit about what this plugin could NOT verify — a menu path
+			 * needs a human or a browser, so it is marked as such instead of invented.
+			 */
+			const buildRunbook = (): string => {
+				const plan = readPlan(cfg.projectRoot, args.spec_id);
+				const run = readRun(cfg.projectRoot, args.spec_id);
+				const counts = countOps(run.ops);
+				const receipts = readGrants(cfg.projectRoot).grants.filter((g) => g.kind === "batch");
+				const testPlan = existsSync(join(specDir, "test-plan.md")) ? readFileSync(join(specDir, "test-plan.md"), "utf8") : "";
+				const acStatus = new Map<string, string>();
+				for (const line of testPlan.split(/\r?\n/)) {
+					if (!line.trim().startsWith("|")) continue;
+					const cols = line.split("|").slice(1, -1).map((c) => c.trim());
+					if (cols.length < 4 || /^[-: ]+$/.test(cols[0]) || /^ac$/i.test(cols[0])) continue;
+					acStatus.set(cols[0], cols[3]);
+				}
+				const out: string[] = [];
+				out.push(`# Functional runbook — ${args.spec_id}`);
+				out.push("");
+				out.push(`<!-- generated by sdd_handoff from .sdd/functional/${args.spec_id}/; it is regenerated on every handoff -->`);
+				out.push("");
+				out.push(`- Environment: ${plan?.environment ?? "(no plan)"}`);
+				if (plan?.serverVersion !== undefined) out.push(`- Server version (as detected when planning): ${plan.serverVersion}`);
+				out.push(`- Batches applied: ${new Set(run.ops.filter((o) => o.state === "applied").map((o) => o.batchId)).size}`);
+				out.push(`- Operations: ${run.ops.length} — applied ${counts.applied}, failed ${counts.failed}, indeterminate ${counts.indeterminate}`);
+				out.push(`- State: ${run.state}`);
+				out.push("");
+
+				out.push("## Batches applied");
+				const appliedBatches = [...new Set(run.ops.filter((o) => o.state === "applied").map((o) => o.batchId))];
+				if (appliedBatches.length === 0) {
+					out.push("- (none)");
+				} else {
+					for (const batchId of appliedBatches) {
+						const batch = plan?.batches.find((b) => b.id === batchId);
+						const ops = run.ops.filter((o) => o.batchId === batchId);
+						const receipt = receipts.find((g) => g.details?.["batchId"] === batchId);
+						out.push(
+							`- **${batchId}** — ${batch?.title ?? "(not in the plan)"} [${batch?.scope ?? "?"}]\n` +
+								`  - Operations applied: ${ops.filter((o) => o.state === "applied").length}/${batch?.operations.length ?? ops.length}` +
+								`${ops.some((o) => o.state !== "applied") ? ` (${ops.filter((o) => o.state !== "applied").length} not applied)` : ""}\n` +
+								`  - Companies: ${(batch?.companies ?? []).join(", ") || "(default company of the connection)"}\n` +
+								`  - Approved by a human: ${receipt === undefined ? "receipt not found in .sdd/grants.json" : `${receipt.createdAt} (expires ${receipt.expiresAt})`}` +
+								`${batch?.highRisk === true ? `\n  - HIGH RISK${(batch.backupReference ?? "") === "" ? "" : `, backup: ${batch.backupReference}`}` : ""}`,
+						);
+					}
+				}
+				out.push("");
+
+				out.push("## Procedures");
+				const procedures: string[] = [];
+				for (const batchId of appliedBatches) {
+					const batch = plan?.batches.find((b) => b.id === batchId);
+					if (batch === undefined) continue;
+					procedures.push(`### ${batch.id} — ${batch.title}`);
+					procedures.push(
+						`Environment: ${plan?.environment ?? "?"} · Companies: ${(batch.companies ?? []).join(", ") || "(default)"} · ` +
+							`Acceptance criteria: ${(batch.acceptance ?? []).join(", ") || "(none declared)"}`,
+					);
+					if ((batch.manualSteps ?? []).length > 0) {
+						procedures.push("Steps declared in the plan:");
+						for (const step of batch.manualSteps ?? []) procedures.push(`1. ${step}`);
+					} else {
+						procedures.push(
+							"Steps: NOT DECLARED in the plan. This procedure cannot be completed from this document alone — " +
+								"a human must write the menu path and the field labels before this batch can be repeated.",
+						);
+					}
+					procedures.push("What the batch did, operation by operation:");
+					for (const op of run.ops.filter((o) => o.batchId === batchId)) {
+						procedures.push(
+							`- [${op.state}] ${op.intent} — ${op.model}.${op.method}` +
+								(op.ids === undefined || op.ids.length === 0 ? "" : ` ids=${JSON.stringify(op.ids)}`) +
+								(op.createdIds === undefined || op.createdIds.length === 0 ? "" : ` created=${JSON.stringify(op.createdIds)}`) +
+								(op.resolution === undefined ? "" : ` — ${op.resolution}`),
+						);
+					}
+					procedures.push(
+						"Verification route: MENU PATH NOT VERIFIED by this plugin (no browser, no instance): confirm it in the " +
+							"instance, or record the source/documentation you used, before treating this procedure as complete.",
+					);
+					procedures.push("");
+				}
+				if (procedures.length === 0) {
+					out.push("- (no applied batch: nothing to repeat yet)");
+				} else {
+					out.push(...procedures);
+				}
+				if (run.ops.some((o) => o.state === "indeterminate")) {
+					out.push("> Operations with an UNKNOWN outcome are listed above as `indeterminate`; reconcile them before repeating anything.");
+					out.push("");
+				}
+
+				out.push("## Verification evidence");
+				const evidence: string[] = [];
+				for (const batchId of appliedBatches) {
+					const batch = plan?.batches.find((b) => b.id === batchId);
+					for (const ac of batch?.acceptance ?? []) {
+						const status = acStatus.get(ac);
+						evidence.push(
+							`- ${ac}: batch ${batchId} applied ${run.ops.filter((o) => o.batchId === batchId && o.state === "applied").length} operation(s)` +
+								(status === undefined
+									? " — WARNING: this criterion does not appear in test-plan.md"
+									: ` — test-plan.md reads \`${status}\``),
+						);
+					}
+				}
+				out.push(evidence.length === 0 ? "- (no acceptance criterion is claimed by an applied batch)" : evidence.join("\n"));
+				out.push("");
+
+				out.push("## Recovery");
+				const recovery: string[] = [];
+				for (const batchId of appliedBatches) {
+					const batch = plan?.batches.find((b) => b.id === batchId);
+					const kinds = [...new Set((batch?.operations ?? []).map((o) => o.recovery?.kind ?? "undeclared"))];
+					recovery.push(`- ${batchId}: ${kinds.join(", ")}${kinds.includes("none") ? " — some operations CANNOT be undone" : ""}`);
+				}
+				const compensation = plan?.batches.find((b) => b.scope === "compensate");
+				if (compensation !== undefined) recovery.push(`- compensation batch prepared: ${compensation.id} (apply it only after its own approval)`);
+				recovery.push(
+					"- What cannot be undone by this plugin: module installs/upgrades, and anything an operation declared as " +
+						"`none`. Compensation covers what the journal recorded, nothing else.",
+				);
+				if (plan?.environment === "production") {
+					recovery.push("- Production: the declared backup is the recovery of last resort for what compensation cannot undo.");
+				}
+				out.push(recovery.join("\n"));
+				return out.join("\n") + "\n";
+			};
+
 			const lines: string[] = [];
 			lines.push(`# Handoff — ${args.spec_id}`);
 			lines.push("");
@@ -2461,6 +2689,38 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (state.phase === "DONE") lines.push("- Delivered. Review the diff and commit with the project's conventions.");
 			else if (state.phase === "BLOCKED") lines.push("- Blocked: resolve the open blockers above (or remove stop.md) and resume the pipeline.");
 			else lines.push(`- Resume at ${state.phase}. Check .sdd/audit.jsonl for the recorded activity.`);
+
+			// A functional spec also gets its RUNBOOK, regenerated from the plan and
+			// the run state. A runbook a human wrote is never overwritten: it wins,
+			// and the handoff only reports whether it satisfies the closing gate.
+			let runbookNote = "";
+			if (state.mode === "functional") {
+				const runbookPath = join(specDir, RUNBOOK_FILE);
+				const existing = existsSync(runbookPath) ? readFileSync(runbookPath, "utf8") : "";
+				const isGenerated = existing === "" || existing.includes("generated by sdd_handoff");
+				if (isGenerated) {
+					try {
+						mkdirSync(specDir, { recursive: true });
+						writeFileSync(runbookPath, buildRunbook(), { mode: 0o600 });
+						runbookNote = `${RUNBOOK_FILE} regenerated from the plan and the run state.`;
+					} catch (err) {
+						runbookNote = `could not write ${RUNBOOK_FILE}: ${err instanceof Error ? err.message : String(err)}`;
+					}
+				} else {
+					runbookNote = `${RUNBOOK_FILE} was written by a human: left untouched.`;
+				}
+				lines.push("");
+				lines.push("## Functional runbook");
+				lines.push(`- ${runbookNote}`);
+				const gaps = runbookGaps(specDir);
+				lines.push(
+					gaps.length === 0
+						? "- The closing gate is satisfied: every required section has content."
+						: `- Still missing for DONE:\n${gaps.map((g) => `  - ${g}`).join("\n")}`,
+				);
+				const applied = countOps(readRun(cfg.projectRoot, args.spec_id).ops).applied;
+				lines.push(`- Operations recorded as applied: ${applied} (see .sdd/functional/${args.spec_id}/run.json).`);
+			}
 
 			try {
 				mkdirSync(specDir, { recursive: true });
@@ -2560,7 +2820,28 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						}
 					}
 
-					// 2) Mutation policy (checkpoint + phase).
+					// 2) While a FUNCTIONAL batch is being applied, the approved plan
+					// is the ONLY mutation path: a direct call to any other tool would
+					// bypass the batches, the hashes and the journal that make the run
+					// auditable. Reads and local tools stay available.
+					const functionalRun = activeFunctionalRun(cfg.projectRoot);
+					if (functionalRun !== null) {
+						const blockedByFunctional =
+							(isMutatingCall(name, args) && name !== "odoo_functional") ||
+							(name === "sdd_checkpoint" && args["operation"] === "restore" && args["restore_data"] === true);
+						if (blockedByFunctional) {
+							return denyWithAudit(
+								name,
+								args,
+								`Blocked: a functional run (spec ${functionalRun.specId}, batch ${functionalRun.batchId}) is in ` +
+									"progress and its approved batches are the only mutation path. Wait for it, or use " +
+									"odoo_functional (approve a batch / compensate) instead of mutating directly.",
+								execution,
+							);
+						}
+					}
+
+					// 3) Mutation policy (checkpoint + phase).
 					if (isMutatingCall(name, args)) {
 						if (cfg.requireCheckpointBeforeMutation && active.checkpointId === null) {
 							return denyWithAudit(
@@ -2663,6 +2944,95 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			});
 		},
 		configuredLanguage: () => effectiveConfig().documentationLanguage,
+		display: (v) => displayPath(v),
+	});
+
+	// ---------------------------------------------------------------------
+	// odoo_functional — the batch executor of the functional path
+	// ---------------------------------------------------------------------
+	registerFunctionalTool(ctx, {
+		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
+		specDir: (specId, exec) => {
+			const cfg = effectiveConfig(exec);
+			return specDirOf(cfg.projectRoot, cfg.specsDir, specId, {
+				specsMode: cfg.specsMode,
+				specsRoot: cfg.specsRoot,
+			});
+		},
+		client: (exec) => {
+			const cfg = effectiveConfig(exec);
+			const { client, report, credentials } = clientFor(cfg.projectRoot);
+			return {
+				client,
+				report,
+				...(credentials === null
+					? {}
+					: {
+							target: `${credentials.url} db=${credentials.db} user=${credentials.username}`,
+							...(credentials.environment === undefined ? {} : { environment: credentials.environment }),
+						}),
+			};
+		},
+		approve: (exec, reason) => requestNativeApproval(ctx, exec, "odoo_functional", reason),
+		hashes: (specId, exec) => {
+			const cfg = effectiveConfig(exec);
+			const dir = specDirOf(cfg.projectRoot, cfg.specsDir, specId, {
+				specsMode: cfg.specsMode,
+				specsRoot: cfg.specsRoot,
+			});
+			const read = (name: string): string => {
+				try {
+					return readFileSync(join(dir, name), "utf8");
+				} catch {
+					return "";
+				}
+			};
+			return { specHash: sha256(read("spec.md")), designHash: sha256(read("architecture.md")) };
+		},
+		grants: {
+			write: (input) => {
+				writeGrant(effectiveConfig().projectRoot, {
+					kind: "batch",
+					fingerprint: input.fingerprint,
+					...(input.ttlMinutes === undefined ? {} : { ttlMinutes: input.ttlMinutes }),
+					...(input.reason === undefined ? {} : { reason: input.reason }),
+					...(input.details === undefined ? {} : { details: input.details }),
+				});
+			},
+			valid: (fingerprint) => hasValidGrant(effectiveConfig().projectRoot, "batch", fingerprint),
+		},
+		audit: (entry) => {
+			const cfg = effectiveConfig();
+			const active = readActiveState(cfg.projectRoot);
+			recordAudit(
+				cfg.projectRoot,
+				{
+					tool: "odoo_functional",
+					op: `${entry.batchId}[${entry.index + 1}] ${entry.model}.${entry.method}`,
+					outcome: entry.state === "applied" ? "ok" : "error",
+					source: "tool",
+					kind: "functional",
+					...(entry.reason === undefined ? {} : { reason: entry.reason }),
+					phase: active.phase ?? undefined,
+					specId: active.specId ?? undefined,
+				},
+				clientFor(cfg.projectRoot).credentials,
+			);
+		},
+		recordDataOp: (op, exec) => {
+			const cfg = effectiveConfig(exec);
+			const credentials = clientFor(cfg.projectRoot).credentials;
+			appendDataOp(cfg.projectRoot, {
+				ts: new Date().toISOString(),
+				...(credentials === null
+					? {}
+					: {
+							db: credentials.db,
+							target: fingerprintOf(credentials.url, credentials.db, credentials.username),
+						}),
+				...op,
+			});
+		},
 		display: (v) => displayPath(v),
 	});
 

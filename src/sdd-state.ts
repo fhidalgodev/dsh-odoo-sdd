@@ -37,6 +37,7 @@ export const PHASES = [
 	"CLARIFY",
 	"READ_SPEC",
 	"ARCHITECTURE",
+	"APPLY_CONFIG",
 	"WRITE_CODE",
 	"VERIFY",
 	"FIX_LOOP",
@@ -45,32 +46,75 @@ export const PHASES = [
 ] as const;
 
 export type Phase = (typeof PHASES)[number];
-/** Pipeline modality: create a new module, or resolve a bug on an existing one. */
-export type PipelineMode = "create" | "bug";
+
+/** Every pipeline modality. */
+export const PIPELINE_MODES = ["create", "bug", "functional"] as const;
+
+/**
+ * Pipeline modality: create a new module, resolve a bug on an existing one, or
+ * configure/import data on a running instance without writing code.
+ */
+export type PipelineMode = (typeof PIPELINE_MODES)[number];
 /** Licensing strategy for reused functionality. OCA is ALWAYS searched too. */
 export type LicenseStrategy = "community" | "enterprise";
+
+/** Narrow an unknown value to a supported pipeline mode. */
+export function isPipelineMode(value: unknown): value is PipelineMode {
+	return typeof value === "string" && (PIPELINE_MODES as readonly string[]).includes(value);
+}
 
 /** Non-terminal phases that require an explicit human/agent approval gate. */
 export const GATED_PHASES: readonly Phase[] = ["READ_SPEC", "ARCHITECTURE"];
 
 /**
- * Explicit phase-transition graph. `transition()` refuses a `next` that is not
- * reachable from the current phase, so a run cannot skip phases after CLARIFY
- * (e.g. jump straight to DONE) or move backwards arbitrarily. `BLOCKED` is a
- * reachable escape from every non-terminal phase; `DONE` is reachable from
- * VERIFY/FIX_LOOP once the honest PASSED verdict gate (checked separately)
- * passes.
+ * Explicit phase-transition graph for the DEVELOPMENT modes (create/bug).
+ * `transition()` refuses a `next` that is not reachable from the current phase,
+ * so a run cannot skip phases after CLARIFY (e.g. jump straight to DONE) or move
+ * backwards arbitrarily. `BLOCKED` is a reachable escape from every non-terminal
+ * phase; `DONE` is reachable from VERIFY/FIX_LOOP once the honest PASSED verdict
+ * gate (checked separately) passes.
+ *
+ * `APPLY_CONFIG` is unreachable here: configuration/import belongs to the
+ * functional graph, and keeping it empty is what makes crossing modes impossible.
  */
 export const PHASE_EDGES: Record<Phase, readonly Phase[]> = {
 	CLARIFY: ["READ_SPEC", "BLOCKED"],
 	READ_SPEC: ["ARCHITECTURE", "BLOCKED"],
 	ARCHITECTURE: ["WRITE_CODE", "BLOCKED"],
+	APPLY_CONFIG: [],
 	WRITE_CODE: ["VERIFY", "BLOCKED"],
 	VERIFY: ["FIX_LOOP", "DONE", "BLOCKED"],
 	FIX_LOOP: ["VERIFY", "DONE", "BLOCKED"],
 	DONE: [],
 	BLOCKED: [],
 };
+
+/**
+ * Phase graph for the FUNCTIONAL mode: the deliverable is a configured/imported
+ * instance, not source code, so `APPLY_CONFIG` takes the place of `WRITE_CODE`
+ * and a fix iteration means preparing and approving ANOTHER batch.
+ */
+export const PHASE_EDGES_FUNCTIONAL: Record<Phase, readonly Phase[]> = {
+	CLARIFY: ["READ_SPEC", "BLOCKED"],
+	READ_SPEC: ["ARCHITECTURE", "BLOCKED"],
+	ARCHITECTURE: ["APPLY_CONFIG", "BLOCKED"],
+	APPLY_CONFIG: ["VERIFY", "BLOCKED"],
+	WRITE_CODE: [],
+	VERIFY: ["FIX_LOOP", "DONE", "BLOCKED"],
+	FIX_LOOP: ["APPLY_CONFIG", "VERIFY", "DONE", "BLOCKED"],
+	DONE: [],
+	BLOCKED: [],
+};
+
+/**
+ * Legal transitions out of a phase for one mode. A spec whose mode is still
+ * unset (before CLARIFY resolves it) uses the development graph: functional is
+ * opt-in, and the CLARIFY gate refuses to leave the phase without a mode anyway.
+ */
+export function edgesFor(phase: Phase, mode: PipelineMode | null): readonly Phase[] {
+	const table = mode === "functional" ? PHASE_EDGES_FUNCTIONAL : PHASE_EDGES;
+	return table[phase] ?? [];
+}
 
 /** One node of the append-only knowledge-base graph. */
 export interface KbNode {
@@ -262,7 +306,7 @@ export function transition(
 	// (fail-closed). This prevents skipping phases after CLARIFY (e.g. a jump
 	// straight to DONE) or moving backwards before the appropriate stage.
 	if (next !== state.phase) {
-		const allowed = PHASE_EDGES[state.phase] ?? [];
+		const allowed = edgesFor(state.phase, state.mode);
 		if (!allowed.includes(next)) {
 			return {
 				ok: false,
@@ -294,7 +338,7 @@ export function transition(
 		// Headings gate: before EARNING approval for the CURRENT phase, its
 		// deliverable (spec.md for READ_SPEC, architecture.md + test-plan.md
 		// for ARCHITECTURE) must contain the required sections.
-		const headings = requiredHeadings(state.phase);
+		const headings = requiredHeadings(state.phase, state.mode);
 		const missing = headings.missing(state.specDir);
 		if (missing.length > 0) {
 			return {
@@ -309,20 +353,23 @@ export function transition(
 		// NOT a permission model — refuse to approve and say exactly what is
 		// missing, so the agent asks instead of inventing.
 		if (state.phase === "ARCHITECTURE") {
-			const gaps = securityGaps(state.specDir);
+			const gaps = securityGaps(state.specDir, state.mode);
 			if (gaps.length > 0) {
 				return {
 					ok: false,
 					reason:
 						"ARCHITECTURE cannot advance: the security model is incomplete. Missing: " +
 						gaps.join("; ") +
-						". Ask the developer (groups, CRUD matrix per group, record rules) or record an explicit decision; " +
-						"never invent permissions.",
+						(state.mode === "functional"
+							? ". Ask the developer which users/groups may run the configured flows and which " +
+								"companies are touched, or record an explicit decision; never invent permissions."
+							: ". Ask the developer (groups, CRUD matrix per group, record rules) or record an explicit decision; " +
+								"never invent permissions."),
 					state,
 				};
 			}
 			// Documentation is the other decision ARCHITECTURE must record.
-			const docGaps = documentationGaps(state.specDir);
+			const docGaps = documentationGaps(state.specDir, state.mode);
 			if (docGaps.length > 0) {
 				return {
 					ok: false,
@@ -354,7 +401,7 @@ export function transition(
 	// the clarifying interview; an unresolved CLARIFY never auto-advances.
 	if (state.phase === "CLARIFY" && next !== "BLOCKED") {
 		const unresolved: string[] = [];
-		if (state.mode !== "create" && state.mode !== "bug") unresolved.push("mode");
+		if (!isPipelineMode(state.mode)) unresolved.push("mode");
 		if (state.licensed !== "community" && state.licensed !== "enterprise") unresolved.push("licensed");
 		if (unresolved.length > 0) {
 			return {
@@ -362,9 +409,9 @@ export function transition(
 				reason:
 					`CLARIFY incomplete: before any work, the intent must be clear. ` +
 					`Missing: ${unresolved.join(", ")}. In SUPERVISED mode, ask the ` +
-					"developer (create vs bug; enterprise/OCA/community licensing " +
-					"strategy). In AUTONOMOUS mode, detect them from the request " +
-					"before proceeding.",
+					"developer (create vs bug vs functional/configuration; " +
+					"enterprise/OCA/community licensing strategy). In AUTONOMOUS mode, " +
+					"detect them from the request before proceeding.",
 				state,
 			};
 		}
@@ -393,8 +440,34 @@ export function transition(
 				state,
 			};
 		}
+		// A FUNCTIONAL spec closes on its own terms, and they are not negotiable
+		// by `documentationPolicy`: the runbook is the only way a human repeats a
+		// configuration/import, and the batch executor can change business data,
+		// so the security review is mandatory rather than policy-driven.
+		if (state.mode === "functional") {
+			const runbookGapList = runbookGaps(state.specDir);
+			if (runbookGapList.length > 0) {
+				return {
+					ok: false,
+					reason:
+						"Cannot reach DONE (functional): the operational runbook is incomplete. " +
+						runbookGapList.join(" "),
+					state,
+				};
+			}
+			const reviewGaps = securityReviewGaps(state.specDir);
+			if (reviewGaps.length > 0) {
+				return {
+					ok: false,
+					reason:
+						"Cannot reach DONE (functional): a run that changed business data needs the security " +
+						"review. " + reviewGaps.join(" "),
+					state,
+				};
+			}
+		}
 		// Documentation is a declared policy too (required by default).
-		if (policy?.documentationPolicy === "required") {
+		if (state.mode !== "functional" && policy?.documentationPolicy === "required") {
 			const docsGaps = documentationReviewGaps(state.specDir);
 			if (docsGaps.length > 0) {
 				return {
@@ -553,11 +626,14 @@ export function recordFailedVerdict(state: SddState, detail: string): SddState {
 }
 
 /** Required section headings per gated phase/output file. */
-const HEADING_REQUIREMENTS: Array<{
+interface HeadingRule {
 	phase: Phase;
 	file: string;
 	required: string[];
-}> = [
+}
+
+/** Headings the DEVELOPMENT modes (create/bug) must produce. */
+const HEADING_REQUIREMENTS: HeadingRule[] = [
 	{
 		phase: "READ_SPEC",
 		file: "spec.md",
@@ -576,15 +652,158 @@ const HEADING_REQUIREMENTS: Array<{
 ];
 
 /**
+ * Headings the FUNCTIONAL mode must produce.
+ *
+ * The gates are not disabled for a configuration/import run, they are REPLACED
+ * by the decisions that run actually needs: what is configured, where it
+ * applies, who may do it, in which companies, how it is validated and how it is
+ * undone. Asking a functional run for `## Manifest` or an ACL CSV would be
+ * asking it to invent a module that does not exist.
+ */
+const HEADING_REQUIREMENTS_FUNCTIONAL: HeadingRule[] = [
+	{
+		phase: "READ_SPEC",
+		file: "spec.md",
+		// `## Sources and Decisions` is the functional addition: business facts
+		// must be traceable to a source, an explicit hypothesis or a confirmation.
+		required: [
+			"## Context",
+			"## Sources and Decisions",
+			"## Acceptance Criteria",
+			"## Constraints",
+			"## Target Odoo Version",
+		],
+	},
+	{
+		phase: "ARCHITECTURE",
+		file: "architecture.md",
+		required: [
+			"## Functional Design",
+			"## Destination",
+			"## Operations",
+			"## Access and Companies",
+			"## Validation",
+			"## Risks and Recovery",
+			"## Documentation",
+		],
+	},
+	{
+		phase: "ARCHITECTURE",
+		file: "test-plan.md",
+		required: ["| AC", "Scenario"],
+	},
+];
+
+/** The heading rules that apply to one mode. */
+function headingRules(mode: PipelineMode | null): HeadingRule[] {
+	return mode === "functional" ? HEADING_REQUIREMENTS_FUNCTIONAL : HEADING_REQUIREMENTS;
+}
+
+/**
+ * Closing gate for a FUNCTIONAL spec: the runbook must exist and carry its
+ * sections with real content (template comments do not count). The runbook IS
+ * the documentation deliverable of a change that ships no code, so it is
+ * required regardless of `documentationPolicy`.
+ */
+export const RUNBOOK_FILE = "functional-runbook.md";
+export const RUNBOOK_REQUIREMENTS = [
+	"## Batches applied",
+	"## Procedures",
+	"## Verification evidence",
+	"## Recovery",
+];
+
+/**
+ * List the unmet runbook requirements of a functional spec.
+ * @param specDir - spec directory holding the runbook.
+ * @returns the list of unmet requirements (empty when complete).
+ */
+export function runbookGaps(specDir: string): string[] {
+	const path = join(specDir, RUNBOOK_FILE);
+	if (!existsSync(path)) {
+		return [
+			`${RUNBOOK_FILE} is missing: a functional run closes only with a procedure a human can ` +
+				"repeat (generate or refresh it with sdd_handoff).",
+		];
+	}
+	const text = readFileSync(path, "utf8");
+	const gaps: string[] = [];
+	for (const heading of RUNBOOK_REQUIREMENTS) {
+		const idx = text.indexOf(heading);
+		if (idx < 0) {
+			gaps.push(`${RUNBOOK_FILE}: ${heading} is missing`);
+			continue;
+		}
+		const rest = text.slice(idx + heading.length);
+		const next = rest.indexOf("\n## ");
+		const body = (next < 0 ? rest : rest.slice(0, next)).replace(/<!--[\s\S]*?-->/g, "").trim();
+		if (body === "" || /^\(none\)$/i.test(body)) {
+			gaps.push(`${RUNBOOK_FILE}: ${heading} has no content`);
+		}
+	}
+	return gaps;
+}
+
+/**
  * Content-level security gate for ARCHITECTURE: the `## Security` section must
  * actually say WHO may do WHAT. A heading alone is not a decision, and an
  * undefined permission model is exactly where an agent starts inventing one.
  * Each gap is reported with the concrete fix.
  */
-export function securityGaps(specDir: string): string[] {
+/** Body of one `## <heading>` section, with template comments stripped. */
+function sectionBody(text: string, heading: string): string {
+	const idx = text.indexOf(heading);
+	if (idx < 0) return "";
+	const rest = text.slice(idx + heading.length);
+	const next = rest.indexOf("\n## ");
+	return (next < 0 ? rest : rest.slice(0, next)).replace(/<!--[\s\S]*?-->/g, "").trim();
+}
+
+/**
+ * Functional counterpart of the security gate: `## Access and Companies` must
+ * decide WHO may run the configured flows, WHICH companies are touched, and
+ * whether the permission model changes at all. Same fail-closed posture — a
+ * heading with no decision is a gap — but the decisions are the ones a
+ * configuration run can actually take (no ACL CSV exists to name).
+ * @param text - architecture.md content.
+ * @returns the list of missing decisions.
+ */
+function functionalAccessGaps(text: string): string[] {
+	const section = sectionBody(text, "## Access and Companies");
+	if (section === "") {
+		return ["`## Access and Companies` is empty (template comments do not count as a decision)"];
+	}
+	const gaps: string[] = [];
+	const lower = section.toLowerCase();
+	// Who: a named user/group, a role, or an explicit "no access change" decision.
+	const hasWho = /group|grupo|user|usuario|role|rol|permiso|access|acceso|administrador/i.test(section);
+	if (!hasWho) gaps.push("`## Access and Companies`: state who may run the configured flows (users/groups/roles)");
+	// Companies: multi-company is the classic silent disaster here.
+	const hasCompanies = /compan(y|ies)|compa[ñn][íi]a|multicompany|multi-company|multiempresa|allowed_company_ids|company_id/i.test(section);
+	if (!hasCompanies) gaps.push("`## Access and Companies`: state which company/companies the configuration touches");
+	// The permission decision itself, in either direction.
+	const aclChange = /ir\.model\.access|access\.csv|acl|record rule|ir\.rule|permiso|privilegio/i.test(section);
+	const aclWaived = /(no|sin|not|ninguna|n\/a)\s+.{0,24}(acl|permiso|privilegio|access|record rule|regla)/i.test(lower);
+	if (!aclChange && !aclWaived) {
+		gaps.push("`## Access and Companies`: state whether the permission model changes, or that none is needed");
+	}
+	return gaps;
+}
+
+/**
+ * Content-level security gate for ARCHITECTURE: the security section must
+ * actually say WHO may do WHAT. A heading alone is not a decision, and an
+ * undefined permission model is exactly where an agent starts inventing one.
+ * Each gap is reported with the concrete fix.
+ * @param specDir - spec directory holding architecture.md.
+ * @param mode - pipeline mode; the functional mode checks access/companies.
+ * @returns the list of missing decisions (empty when complete).
+ */
+export function securityGaps(specDir: string, mode: PipelineMode | null = null): string[] {
 	const path = join(specDir, "architecture.md");
 	if (!existsSync(path)) return ["architecture.md is missing"];
 	const text = readFileSync(path, "utf8");
+	if (mode === "functional") return functionalAccessGaps(text);
 	const security = (() => {
 		const idx = text.indexOf("## Security");
 		if (idx < 0) return "";
@@ -688,10 +907,30 @@ export function evidenceGaps(specDir: string): string[] {
  * @param specDir - spec directory holding architecture.md.
  * @returns the list of missing decisions (empty when complete).
  */
-export function documentationGaps(specDir: string): string[] {
+export function documentationGaps(specDir: string, mode: PipelineMode | null = null): string[] {
 	const path = join(specDir, "architecture.md");
 	if (!existsSync(path)) return ["architecture.md is missing"];
 	const text = readFileSync(path, "utf8");
+	if (mode === "functional") {
+		const section = sectionBody(text, "## Documentation");
+		if (section === "") {
+			return ["`## Documentation` is empty (template comments do not count as a decision)"];
+		}
+		const gaps: string[] = [];
+		if (!/\b(en|es|pt|fr|de|it)\b|english|espa[ñn]ol|spanish|language|idioma/i.test(section)) {
+			gaps.push("state the language of the operational documentation (default English unless the project says otherwise)");
+		}
+		if (!/runbook|procedimiento|procedure|manual/i.test(section)) {
+			gaps.push(`state that the deliverable is the operational runbook (${RUNBOOK_FILE})`);
+		}
+		// The "no module, no OCA fragments" decision must be explicit, so nobody
+		// later interprets a missing README.rst as an omission.
+		const noModule = /(no (oca )?(fragments?|readme|module)|sin (fragmentos|readme|m[óo]dulo)|not applicable)/i.test(section);
+		if (!noModule) {
+			gaps.push("state explicitly that no OCA fragments or index.html are produced (there is no module)");
+		}
+		return gaps;
+	}
 	const idx = text.indexOf("## Documentation");
 	if (idx < 0) return ["`## Documentation` is missing"];
 	const rest = text.slice(idx + "## Documentation".length);
@@ -784,7 +1023,10 @@ const NO_REPORTS = /no reports needed|no report (is )?needed|sin reportes|no req
  * architect did not ask/decide them, we surface a warning so the agent asks
  * instead of leaving an implicit assumption — but we never refuse to advance.
  */
-export function designWarnings(specDir: string): string[] {
+export function designWarnings(specDir: string, mode: PipelineMode | null = null): string[] {
+	// A functional spec ships no views and no reports: the inventory below would
+	// warn about sections that must not exist there.
+	if (mode === "functional") return [];
 	const path = join(specDir, "architecture.md");
 	if (!existsSync(path)) return [];
 	const text = readFileSync(path, "utf8");
@@ -819,8 +1061,11 @@ export function designWarnings(specDir: string): string[] {
 }
 
 /** Find which required headings are missing for advancing past `phase`. */
-function requiredHeadings(phase: Phase): { file: string; missing: (specDir: string) => string[] } {
-	const rules = HEADING_REQUIREMENTS.filter((r) => r.phase === phase);
+function requiredHeadings(
+	phase: Phase,
+	mode: PipelineMode | null,
+): { file: string; missing: (specDir: string) => string[] } {
+	const rules = headingRules(mode).filter((r) => r.phase === phase);
 	if (rules.length === 0) {
 		return { file: "", missing: () => [] };
 	}
@@ -863,7 +1108,7 @@ export function summarize(state: SddState): string {
 		`stop.md: ${stopRequested(state.specDir) === null ? "absent" : "PRESENT — pipeline halted"}`,
 		logbook,
 	];
-	const designWarn = state.phase === "ARCHITECTURE" ? designWarnings(state.specDir) : [];
+	const designWarn = state.phase === "ARCHITECTURE" ? designWarnings(state.specDir, state.mode) : [];
 	if (designWarn.length > 0) {
 		lines.push("design (guide, non-blocking):");
 		for (const w of designWarn) lines.push(`  - ${w}`);
@@ -878,10 +1123,20 @@ export function summarize(state: SddState): string {
 	return lines.join("\n");
 }
 
-/** Ensure the spec directory exists with its skeleton files. */
-export function initSpecDir(specDir: string): void {
+/** Ensure the spec directory exists with the skeleton files of one mode. */
+export function initSpecDir(specDir: string, mode: PipelineMode | null = null): void {
 	mkdirSync(specDir, { recursive: true });
-	for (const [name, body] of [
+	// The test plan is identical in every mode: an acceptance criterion is an
+	// acceptance criterion, and the explicit-pass gate reads the same table.
+	const testPlan: [string, string] = [
+		"test-plan.md",
+		"# Test Plan\n\n| AC | Scenario | Layer (static/server/rpc/ui/manual) | Status |\n|---|---|---|---|\n" +
+			"| AC1 | ... | static | pending |\n\n" +
+			"<!-- Status must become an explicit `pass` (optionally `pass (evidence: …)`) for\n" +
+			"     every row: `sdd_phase succeed` refuses `pending`, `failed`, `unknown`,\n" +
+			"     `manual` and anything it cannot read as a pass. -->\n",
+	];
+	const development: Array<[string, string]> = [
 		[
 			"spec.md",
 			"# Specification\n\n## Context\n\n<!-- Business context: what problem, who uses it. -->\n\n" +
@@ -899,16 +1154,81 @@ export function initSpecDir(specDir: string): void {
 				"     Reference/Explanation), and whether index.html, Web Tours and migrations apply.\n" +
 				"     Write \"no extra fragments\" explicitly when none are needed. -->\n",
 		],
+		testPlan,
+	];
+	/**
+	 * Functional templates: the deliverables of a run that configures and
+	 * imports, so the sections are the decisions it must take (destination,
+	 * operations, access/companies, validation, recovery, runbook) instead of
+	 * models/views/manifest for a module that will never exist.
+	 */
+	const functional: Array<[string, string]> = [
 		[
-			"test-plan.md",
-			"# Test Plan\n\n| AC | Scenario | Layer (static/server/rpc/ui/manual) | Status |\n|---|---|---|---|\n" +
-				"| AC1 | ... | static | pending |\n\n" +
-				"<!-- Status must become an explicit `pass` (optionally `pass (evidence: …)`) for\n" +
-				"     every row: `sdd_phase succeed` refuses `pending`, `failed`, `unknown`,\n" +
-				"     `manual` and anything it cannot read as a pass. -->\n",
+			"spec.md",
+			"# Functional specification\n\n## Context\n\n<!-- Current situation and why a change is needed. -->\n\n" +
+				"## Sources and Decisions\n\n<!-- For every business fact: the SOURCE it came from (page, file,\n" +
+				"     document, human), the HYPOTHESES still open, and the CONFIRMED decisions with who\n" +
+				"     confirmed them. Never present a deduction as a confirmation. -->\n\n" +
+				"## Acceptance Criteria\n\n- [ ] AC1: ...\n\n" +
+				"## Constraints\n\n<!-- Non-negotiables: environment, company, users, fiscal/legal review, volume. -->\n\n" +
+				"## Target Odoo Version\n\n- [ ] V: <detected, with how it was detected>\n",
 		],
-	] as const) {
+		[
+			"architecture.md",
+			"# Functional architecture\n\n## Functional Design\n\n<!-- The to-be process in business terms. -->\n\n" +
+				"## Destination\n\n<!-- Instance, database, environment (dev/staging/production), companies and the\n" +
+				"     modules/capabilities the version actually provides. -->\n\n" +
+				"## Operations\n\n<!-- The ordered batches: model/method/fields, dependencies, record identity,\n" +
+				"     preconditions, expected result. Import batches list their columns here and keep the\n" +
+				"     machine-readable mapping in mapping.json. -->\n\n" +
+				"## Access and Companies\n\n<!-- Who may run these flows (users/groups/roles), which companies are\n" +
+				"     touched, and whether the permission model (ACLs, record rules) changes — or an explicit\n" +
+				"     \"no permission change needed\". -->\n\n" +
+				"## Validation\n\n<!-- How each batch is validated after applying it (re-reads, counts, business checks). -->\n\n" +
+				"## Risks and Recovery\n\n<!-- Risks, rollback limits, how each batch is undone, and what CANNOT be undone. -->\n\n" +
+				"## Documentation\n\n<!-- Language of the operational documentation, the runbook as the deliverable,\n" +
+				"     and an explicit statement that no OCA fragments or index.html are produced (there is no\n" +
+				"     module). -->\n",
+		],
+		testPlan,
+	];
+	for (const [name, body] of mode === "functional" ? functional : development) {
 		const file = join(specDir, name);
 		if (!existsSync(file)) writeFileSync(file, body);
 	}
+}
+
+/**
+ * Record the intent of a run (mode + licensing) exactly once.
+ *
+ * The mode decides which phase graph and which content gates apply, so it is
+ * frozen the moment real work starts: while the spec is still in CLARIFY and
+ * nothing was loaded, a change is allowed (the developer may correct the
+ * request); afterwards it is refused — switching here would let a run change the
+ * rules it is being judged by, and crossing development and functional is not a
+ * change of plan but a different job.
+ * @param state - the spec state to update (in place).
+ * @param mode - requested mode.
+ * @param licensed - requested licensing strategy.
+ * @returns whether the intent was recorded, and why not when it was not.
+ */
+export function recordIntent(
+	state: SddState,
+	mode: PipelineMode,
+	licensed: LicenseStrategy,
+): { ok: boolean; reason?: string } {
+	const settled = state.mode !== null && (state.phase !== "CLARIFY" || state.specLoaded);
+	if (settled && state.mode !== mode) {
+		return {
+			ok: false,
+			reason:
+				`This spec is already running as "${state.mode}" (phase ${state.phase}` +
+				`${state.specLoaded ? ", spec loaded" : ""}). The mode decides which phase graph and ` +
+				"which gates apply, so it cannot change mid-run: create a new spec id for a " +
+				`"${mode}" job.`,
+		};
+	}
+	state.mode = mode;
+	state.licensed = licensed;
+	return { ok: true };
 }

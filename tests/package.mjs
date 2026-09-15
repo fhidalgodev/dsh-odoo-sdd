@@ -150,8 +150,17 @@ for (const agent of [
 	"human-proxy",
 	"security-reviewer",
 	"documentation",
+	"functional",
 ]) {
 	required.push(`agents/${agent}.md`);
+}
+// Both bundled skills travel with the package: the runtime reads them by path
+// (the functional reference resolves through the skill's resource base).
+for (const skillFile of [
+	"skills/odoo-functional-sdd/SKILL.md",
+	"skills/odoo-functional-sdd/references/functional-domains.md",
+]) {
+	required.push(skillFile);
 }
 for (const file of required) {
 	check(`ships ${file}`, shipped.has(file));

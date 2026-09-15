@@ -45,6 +45,23 @@ rolled back. Ask `odoo_config mode=read` (it returns
 the spec directory and the specs location) when you need concrete paths. In this
 document `specs/<id>/...` means "the reported spec directory".
 
+## Is this even a development job?
+
+This workflow ends in **code**: a module (new or fixed) that is installed and
+verified on a running instance. Before phase 1, check that the request really is
+that, because the two paths are not interchangeable and the mode is frozen once
+the spec is loaded:
+
+| The request is about… | Path |
+|---|---|
+| creating, extending, fixing or auditing a module, a model, a view or a security rule | **this skill** (`mode=create` or `mode=bug`) |
+| configuring an existing instance (company, users/access, taxes/localisation, routes, POS) or loading data into it (CSV/Excel imports, master data migration) | **`odoo-functional-sdd`** (`mode=functional`) |
+| both — a configuration that also needs code | two specs: the functional one runs first and records the gap, then a technical spec is proposed and authorised separately |
+
+If you already started a development spec and the work turns out to be
+configuration, do not stretch this workflow: record what happened, close or park
+the spec honestly, and open a `functional` spec with its own id.
+
 ## Global rules (non-negotiable)
 
 1. **Credentials**: live only in the gitignored `.env` (chmod 600). NEVER ask

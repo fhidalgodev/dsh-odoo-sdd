@@ -14,7 +14,7 @@
  *
  * @module dsh-odoo-sdd/lifecycle
  */
-import { existsSync, lstatSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /** What an owned path is, for a readable plan. */
@@ -25,7 +25,8 @@ export type OwnedKind =
 	| "audit log"
 	| "plugin configuration"
 	| "setup decision"
-	| "checkpoints";
+	| "checkpoints"
+	| "functional runs";
 
 /** One plugin-owned path. */
 export interface OwnedPath {
@@ -78,6 +79,7 @@ export function ownedStatePaths(projectRoot: string): OwnedPath[] {
 		{ rel: ".sdd/config.json", kind: "plugin configuration", dir: false },
 		{ rel: ".sdd/setup-state.json", kind: "setup decision", dir: false },
 		{ rel: ".sdd/checkpoints", kind: "checkpoints", dir: true },
+		{ rel: ".sdd/functional", kind: "functional runs", dir: true },
 	];
 	return defs.map((d) => {
 		const abs = join(projectRoot, d.rel);
@@ -100,6 +102,8 @@ export interface PurgeResult {
 	failed: string[];
 	/** Relative paths that did not exist. */
 	absent: string[];
+	/** Relative paths deliberately KEPT because they are live evidence. */
+	kept: string[];
 }
 
 /**
@@ -113,10 +117,19 @@ export function purgeOwnedState(projectRoot: string): PurgeResult {
 	const removed: string[] = [];
 	const failed: string[] = [];
 	const absent: string[] = [];
+	const kept: string[] = [];
 	for (const entry of ownedStatePaths(projectRoot)) {
 		const abs = join(projectRoot, entry.rel);
 		if (!entry.exists) {
 			absent.push(entry.rel);
+			continue;
+		}
+		// The functional state is the ONLY record of what a batch did to a live
+		// instance. A run that is not finished (or that has an operation whose
+		// outcome is unknown) is evidence somebody still needs: deleting it here
+		// would erase the trail exactly when it matters most.
+		if (entry.rel === ".sdd/functional" && functionalEvidenceAtRisk(projectRoot)) {
+			kept.push(entry.rel);
 			continue;
 		}
 		try {
@@ -126,7 +139,44 @@ export function purgeOwnedState(projectRoot: string): PurgeResult {
 			failed.push(entry.rel);
 		}
 	}
-	return { removed, failed, absent };
+	return { removed, failed, absent, kept };
+}
+
+/**
+ * Whether the functional state holds a run that cannot be safely deleted: one
+ * that is still marked running, or that has an operation whose outcome was never
+ * determined.
+ * @param projectRoot - workspace root.
+ * @returns true when the purge must leave `.sdd/functional` alone.
+ */
+export function functionalEvidenceAtRisk(projectRoot: string): boolean {
+	const base = join(projectRoot, ".sdd", "functional");
+	let specs: string[] = [];
+	try {
+		specs = readdirSync(base);
+	} catch {
+		return false;
+	}
+	for (const specId of specs) {
+		let run: { state?: unknown; ops?: unknown } | null = null;
+		try {
+			run = JSON.parse(readFileSync(join(base, specId, "run.json"), "utf8")) as { state?: unknown; ops?: unknown };
+		} catch {
+			continue;
+		}
+		if (run === null) continue;
+		if (run.state === "running" || run.state === "blocked") return true;
+		const ops = Array.isArray(run.ops) ? run.ops : [];
+		if (
+			ops.some((op) => {
+				const state = (op as { state?: unknown }).state;
+				return state === "indeterminate" || state === "in_progress";
+			})
+		) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /** Total bytes the plugin currently occupies on disk. */

@@ -52,6 +52,35 @@ export interface OdooCredentials {
 	envFile: string;
 	/** Cascade tier the .env file was loaded from. */
 	source: CredentialSource;
+	/**
+	 * Declared environment of the target (`ODOO_SDD_ENVIRONMENT`), when the
+	 * developer declared one. UNDEFINED means "not declared": the functional
+	 * executor refuses to apply anything until it is, because guessing `dev` on a
+	 * production database is the most expensive mistake this plugin can make.
+	 */
+	environment?: TargetEnvironment;
+}
+
+/** Declared environment of a target instance. */
+export type TargetEnvironment = "dev" | "staging" | "production";
+
+/** Accepted environment values, in declaration order. */
+export const TARGET_ENVIRONMENTS: readonly TargetEnvironment[] = ["dev", "staging", "production"];
+
+/**
+ * Parse the declared environment of a target.
+ * @param raw - the raw `ODOO_SDD_ENVIRONMENT` value.
+ * @returns the environment, or null when absent.
+ * @throws TypeError through the caller when the value is not recognized (the
+ *   caller reports it as a configuration problem instead of guessing).
+ */
+export function parseEnvironment(raw: string | undefined): TargetEnvironment | null {
+	const value = (raw ?? "").trim().toLowerCase();
+	if (value === "") return null;
+	if (value === "development" || value === "local") return "dev";
+	if (value === "stage" || value === "preprod" || value === "pre-production") return "staging";
+	if (value === "prod") return "production";
+	return (TARGET_ENVIRONMENTS as readonly string[]).includes(value) ? (value as TargetEnvironment) : null;
 }
 
 /** Structured "not configured" report returned instead of throwing. */
@@ -63,7 +92,8 @@ export interface CredentialsProblem {
 		| "env_file_insecure"
 		| "required_var_missing"
 		| "invalid_url"
-		| "insecure_url";
+		| "insecure_url"
+		| "invalid_environment";
 	/** Developer-facing remediation instructions (never contains secrets). */
 	message: string;
 	/** Path of the .env file that was (or should be) used. */
@@ -372,6 +402,21 @@ export function loadCredentials(projectRoot: string): CredentialsResult {
 			message: `Invalid ODOO_URL in ${displayPath(envFile)}: ${parsed.message}`,
 		};
 	}
+	// The declared environment is never guessed: an unrecognized value is a
+	// CONFIGURATION problem (someone meant production and typed "prod1"), so it is
+	// reported instead of being read as "undeclared".
+	const declaredEnv = (vars["ODOO_SDD_ENVIRONMENT"] ?? "").trim();
+	const environment = parseEnvironment(declaredEnv);
+	if (declaredEnv !== "" && environment === null) {
+		return {
+			ok: false,
+			reason: "invalid_environment",
+			envFile,
+			message:
+				`ODOO_SDD_ENVIRONMENT="${declaredEnv}" is not recognized in ${displayPath(envFile)}. ` +
+				`Use one of: ${TARGET_ENVIRONMENTS.join(", ")} (or remove the line to leave it undeclared).`,
+		};
+	}
 	return {
 		ok: true,
 		credentials: {
@@ -381,6 +426,7 @@ export function loadCredentials(projectRoot: string): CredentialsResult {
 			secret: vars["ODOO_PASSWORD"]!,
 			envFile,
 			source: location.source,
+			...(environment === null ? {} : { environment }),
 		},
 		...(permission.enforced ? {} : { permissionNote: permission.note ?? POSIX_MODE_NOTE }),
 	};
@@ -415,9 +461,13 @@ export function describeCredentials(credentials: OdooCredentials): string {
 			? " — legacy location; consider moving it to " +
 				displayPath(targetEnvPath("user", ""))
 			: "";
+	const environment =
+		credentials.environment === undefined
+			? " environment=UNDECLARED (the functional executor will refuse to apply batches)"
+			: ` environment=${credentials.environment}`;
 	return (
 		`url=${credentials.url} db=${credentials.db} user=${credentials.username} ` +
 		`secret=***masked*** (source: ${credentials.source}, file: ` +
-		displayPath(credentials.envFile) + ")" + legacyNote
+		displayPath(credentials.envFile) + ")" + legacyNote + environment
 	);
 }

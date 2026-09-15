@@ -60,7 +60,7 @@ plugin.apply(
 	{},
 );
 const toolNames = [...registered.keys()].sort();
-check("the plugin registers 13 tools", toolNames.length === 13, `got ${toolNames.length}`);
+check("the plugin registers 14 tools", toolNames.length === 14, `got ${toolNames.length}`);
 
 /**
  * Line indexes that are OUTSIDE fenced code blocks. Every structural assertion
@@ -198,6 +198,17 @@ for (const doc of docs) {
 			const thanks = idx(/^## .*(Acknowledgments|Agradecimientos)/);
 			const license = idx(/^## .*(License|Licencia)/);
 			return star !== -1 && thanks !== -1 && license !== -1 && star < thanks && thanks < license;
+		})(),
+	);
+
+	// The number in the section title is documentation too: it went stale once
+	// (the table said 12 while 13 were registered), so it is asserted.
+	check(
+		`${doc.file}: the tool-count in the section title matches the code`,
+		(() => {
+			const heading = doc.text.split("\n").find((l) => /^## .*\btools\b/i.test(l)) ?? "";
+			const match = /\b(\d+)\s+tools\b/i.exec(heading);
+			return match !== null && Number(match[1]) === toolNames.length;
 		})(),
 	);
 

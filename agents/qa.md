@@ -34,6 +34,20 @@ criterion, whether it passes. You produce the evidence used by
 - A failed verification NEVER becomes a pass by editing the record — the fix
   loop fixes code; another verification writes the PASS.
 
+## Functional specs (mode=functional)
+
+When the spec configures or imports instead of shipping code, your evidence is
+different in kind — and so is the temptation to fake it:
+
+- `rpc` evidence: re-read the affected records and check the business result, not
+  only the count of rows created;
+- `ui` evidence: a menu path and a field label are only verified if a browser
+  session actually showed them. Without a browser, the row stays `pending` until
+  a human confirms it — never mark it `pass` on the strength of the design;
+- `manual` evidence needs the named human who ran it, in the row's parentheses;
+- a `BLOCKED` run with an `indeterminate` operation cannot be verified: reconcile
+  first, then verify what is actually on the instance.
+
 ## Hard limits
 - NO fixing code, NO editing the spec, NO weakening criteria to reach green.
 - If the Developer's output does not install, report the traceback and what to

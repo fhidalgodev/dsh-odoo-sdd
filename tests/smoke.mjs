@@ -236,6 +236,143 @@ for (let i = 0; i <= st2.maxIterations; i++) {
 }
 check("iteration ceiling leads to BLOCKED", blocked && st2.phase === "BLOCKED");
 
+// ---- functional mode: graph, templates and closing gates -----------------
+// The functional path configures and imports instead of writing code, so it has
+// its own phase graph and its own content gates. Both must be STRICTER about
+// crossing modes than the development path is about its own phases.
+console.log("== functional mode (graph, templates, gates) ==");
+{
+	const fnDir = join(dir, "specs", "020-functional");
+	sdd.initSpecDir(fnDir, "functional");
+	const fnSpec = readFileSync(join(fnDir, "spec.md"), "utf8");
+	const fnArch = readFileSync(join(fnDir, "architecture.md"), "utf8");
+	check("the functional template asks for sources and decisions", fnSpec.includes("## Sources and Decisions"));
+	check(
+		"the functional architecture asks for the functional sections, not a module",
+		fnArch.includes("## Functional Design") && fnArch.includes("## Operations") &&
+			fnArch.includes("## Access and Companies") && fnArch.includes("## Risks and Recovery") &&
+			!fnArch.includes("## Manifest") && !fnArch.includes("## Models"),
+	);
+	check("the test plan is shared by every mode", readFileSync(join(fnDir, "test-plan.md"), "utf8").includes("| AC | Scenario"));
+	// Existing artifacts are never overwritten, whatever mode asks for them.
+	writeFileSync(join(fnDir, "architecture.md"), "# Mine\n\n## Functional Design\nkept\n");
+	sdd.initSpecDir(fnDir, "create");
+	check("re-initializing never overwrites what exists", readFileSync(join(fnDir, "architecture.md"), "utf8").includes("kept"));
+
+	// The graph: APPLY_CONFIG is the functional step, and the two modes cannot cross.
+	const devEdges = sdd.edgesFor("ARCHITECTURE", "create");
+	const fnEdges = sdd.edgesFor("ARCHITECTURE", "functional");
+	check("the development graph still goes ARCHITECTURE -> WRITE_CODE", devEdges.includes("WRITE_CODE") && !devEdges.includes("APPLY_CONFIG"));
+	check("the functional graph goes ARCHITECTURE -> APPLY_CONFIG", fnEdges.includes("APPLY_CONFIG") && !fnEdges.includes("WRITE_CODE"));
+	check("APPLY_CONFIG leads to VERIFY and BLOCKED", JSON.stringify(sdd.edgesFor("APPLY_CONFIG", "functional")) === JSON.stringify(["VERIFY", "BLOCKED"]));
+	check("a fix iteration in functional mode prepares another batch", sdd.edgesFor("FIX_LOOP", "functional").includes("APPLY_CONFIG"));
+	check("WRITE_CODE is unreachable in functional mode", !sdd.edgesFor("ARCHITECTURE", "functional").includes("WRITE_CODE"));
+	check("APPLY_CONFIG is unreachable in development mode", sdd.edgesFor("ARCHITECTURE", "create").every((p) => p !== "APPLY_CONFIG"));
+
+	// Behaviourally: the same spec cannot be driven with the other mode's graph.
+	{
+		const gDir = join(dir, "specs", "021-graph");
+		sdd.initSpecDir(gDir, "functional");
+		const g = sdd.loadState(gDir);
+		g.mode = "functional";
+		g.phase = "ARCHITECTURE";
+		sdd.saveState(g);
+		const wrong = sdd.transition(g, "WRITE_CODE", "APPROVED", "wrong graph");
+		check("functional spec refuses WRITE_CODE", wrong.ok === false && /Illegal phase transition/.test(wrong.reason));
+		// The graph is not the only gate: ARCHITECTURE also needs its functional
+		// content decisions before APPLY_CONFIG opens.
+		const noDecisions = sdd.transition(g, "APPLY_CONFIG", "APPROVED", "no decisions yet");
+		check("APPLY_CONFIG stays blocked while the functional decisions are missing", noDecisions.ok === false);
+		writeFileSync(
+			join(gDir, "architecture.md"),
+			"# Functional architecture\n\n## Functional Design\nload partner master data\n\n" +
+				"## Destination\nstaging, company VE01, Odoo 17 with base_import available\n\n" +
+				"## Operations\nbatch b1: res.partner create, 42 rows from partners.csv\n\n" +
+				"## Access and Companies\nOnly base.group_system runs it; company VE01 only; " +
+				"no ACL or record rule changes are needed.\n\n" +
+				"## Validation\nre-read the 42 partners and compare the VAT against the CSV\n\n" +
+				"## Risks and Recovery\nduplicates: delete by the imported XMLID prefix\n\n" +
+				"## Documentation\nLanguage: es. The deliverable is the operational runbook. " +
+				"No OCA fragments or index.html because there is no module.\n",
+		);
+		const right = sdd.transition(g, "APPLY_CONFIG", "APPROVED", "ok");
+		check(
+			"functional spec reaches APPLY_CONFIG once the content gates pass",
+			right.ok === true && right.state.phase === "APPLY_CONFIG",
+			right.ok ? "" : right.reason,
+		);
+	}
+
+	// Mode immutability: it decides the graph and the gates, so it freezes with work.
+	{
+		const iDir = join(dir, "specs", "022-intent");
+		sdd.initSpecDir(iDir);
+		const i0 = sdd.loadState(iDir);
+		check("the mode can be recorded while CLARIFY is open", sdd.recordIntent(i0, "functional", "community").ok === true);
+		i0.specLoaded = true;
+		const late = sdd.recordIntent(i0, "create", "community");
+		check("the mode cannot change once the spec is loaded", late.ok === false && /cannot change|already running/i.test(late.reason));
+		const same = sdd.recordIntent(i0, "functional", "enterprise");
+		check("re-confirming the same mode is allowed", same.ok === true && i0.licensed === "enterprise");
+	}
+
+	// Content gates: functional decisions instead of module artifacts.
+	{
+		const cDir = join(dir, "specs", "023-content");
+		sdd.initSpecDir(cDir, "functional");
+		check("an untouched functional architecture fails the access gate", sdd.securityGaps(cDir, "functional").length > 0);
+		check("an untouched functional architecture fails the documentation gate", sdd.documentationGaps(cDir, "functional").length > 0);
+		writeFileSync(
+			join(cDir, "architecture.md"),
+			"# Functional architecture\n\n## Functional Design\ndesign\n\n" +
+				"## Access and Companies\nOnly the accounting group (base.group_account_manager) runs these flows, " +
+				"company VE01 only, and no ACL or record rule changes are needed.\n\n" +
+				"## Documentation\nLanguage: es. The deliverable is the operational runbook (functional-runbook.md). " +
+				"No OCA fragments or index.html: there is no module to document.\n",
+		);
+		check("a real access/companies decision passes the gate", sdd.securityGaps(cDir, "functional").length === 0);
+		check("a real runbook decision passes the documentation gate", sdd.documentationGaps(cDir, "functional").length === 0);
+		check("the development gate is untouched by the functional one", sdd.securityGaps(cDir, "create").length > 0);
+		check("the view/report inventory does not apply to a functional spec", sdd.designWarnings(cDir, "functional").length === 0);
+	}
+
+	// Closing: a functional run needs the runbook and the security review, even
+	// when documentationPolicy is optional (the runbook IS the documentation).
+	{
+		const dDir = join(dir, "specs", "024-done");
+		sdd.initSpecDir(dDir, "functional");
+		const d = sdd.loadState(dDir);
+		d.mode = "functional";
+		d.phase = "VERIFY";
+		writeFileSync(
+			join(dDir, "test-plan.md"),
+			"# Test Plan\n\n| AC | Scenario | Layer | Status |\n|---|---|---|---|\n| AC1 | load the CSV | rpc | pass (42 rows created) |\n",
+		);
+		sdd.recordSuccess(d, "AC1 verified");
+		writeFileSync(join(dDir, "security-report.md"), "# Security review\n\nVerdict: APPROVED\n");
+		const noRunbook = sdd.transition(d, "DONE", null, "close", "human", "supervised", { documentationPolicy: "optional" });
+		check(
+			"DONE (functional) is refused without the runbook even with optional documentation",
+			noRunbook.ok === false && /runbook/i.test(noRunbook.reason),
+		);
+		writeFileSync(join(dDir, sdd.RUNBOOK_FILE), "# Runbook\n\n## Batches applied\n(none)\n\n## Procedures\n\n## Verification evidence\n\n## Recovery\n");
+		const partial = sdd.transition(d, "DONE", null, "close", "human", "supervised", { documentationPolicy: "optional" });
+		check("an empty runbook section keeps DONE blocked", partial.ok === false && /no content/i.test(partial.reason));
+		writeFileSync(
+			join(dDir, sdd.RUNBOOK_FILE),
+			"# Runbook\n\n## Batches applied\nb1: 42 partners imported (approved 2026-02-01).\n\n" +
+				"## Procedures\n1. Settings > Users: only the accounting group runs this. Step by step here.\n\n" +
+				"## Verification evidence\nRe-read 42 partners, all have a VAT.\n\n## Recovery\nDelete the 42 partners by XMLID prefix.\n",
+		);
+		const closed = sdd.transition(d, "DONE", null, "close", "human", "supervised", { documentationPolicy: "optional" });
+		check(
+			"a complete functional run closes",
+			closed.ok === true && closed.state.phase === "DONE",
+			closed.ok ? "" : closed.reason,
+		);
+	}
+}
+
 console.log("== credentials & security (S1, S2) ==");
 const miss = creds.loadCredentials(dir);
 check("missing .env reported (fail-closed)", miss.ok === false && miss.reason === "env_file_missing");
@@ -365,6 +502,52 @@ check(
 		/agents$/.test(sddSkill.resourceBase.path),
 );
 
+// The functional path is a second bundled skill, registered the same way and
+// routing on its own: a development request must not land there and vice versa.
+{
+	const fnSkill = skillRegistrations.find((s) => s.name === "odoo-functional-sdd");
+	check("the functional skill is registered alongside the workflow", fnSkill !== undefined);
+	check(
+		"the functional skill is model- and user-invocable too",
+		fnSkill?.invocation?.modelInvocable === true && fnSkill?.invocation?.userInvocable === true,
+	);
+	check(
+		"the functional skill carries its own description and body",
+		typeof fnSkill?.description === "string" && fnSkill.description.length > 40 &&
+			typeof fnSkill?.content === "string" && fnSkill.content.length > 500,
+	);
+	check(
+		"the functional skill body has no raw frontmatter leak",
+		typeof fnSkill?.content === "string" && !/^---\r?\n/.test(fnSkill.content),
+	);
+	check(
+		"the functional skill routes on functional work and points at the other one",
+		typeof fnSkill?.whenToUse === "string" &&
+			/configur|import/i.test(fnSkill.whenToUse) &&
+			/odoo-sdd-workflow/.test(fnSkill.whenToUse),
+	);
+	check(
+		"the functional skill resolves its own reference base",
+		/skills[\\/]odoo-functional-sdd$/.test(String(fnSkill?.resourceBase?.path ?? "")),
+	);
+	check(
+		"the functional body names the functional phase, not WRITE_CODE",
+		typeof fnSkill?.content === "string" &&
+			fnSkill.content.includes("APPLY_CONFIG") &&
+			!/^## Phase \d+ — WRITE_CODE/m.test(fnSkill.content),
+	);
+	check(
+		"the workflow skill routes configuration work away from itself",
+		typeof sddSkill?.content === "string" &&
+			/Is this even a development job/.test(sddSkill.content) &&
+			/odoo-functional-sdd/.test(sddSkill.content),
+	);
+	check(
+		"the functional domain reference exists beside the skill",
+		existsSync(new URL("../skills/odoo-functional-sdd/references/functional-domains.md", import.meta.url)),
+	);
+}
+
 // A host WITH tools but WITHOUT a skills registry must still mount (fail-open).
 threw = false;
 try {
@@ -407,9 +590,9 @@ check("odoo_setup registered", setup !== undefined);
 const expectedTools = [
 	"odoo_connect", "odoo_setup", "odoo_module", "odoo_execute", "odoo_validate",
 	"odoo_errors", "odoo_session", "odoo_config", "sdd_phase", "sdd_checkpoint",
-	"odoo_security_scan", "sdd_handoff", "odoo_docs",
+	"odoo_security_scan", "sdd_handoff", "odoo_docs", "odoo_functional",
 ];
-check("registers exactly the 13 documented tools", registered.size === expectedTools.length);
+check("registers exactly the 14 documented tools", registered.size === expectedTools.length);
 check(
 	"registered tool names match the documented set",
 	expectedTools.every((n) => registered.has(n)),
@@ -515,6 +698,26 @@ console.log("== lifecycle purge (ownership boundaries) ==");
 	// 4) The inventory helper agrees with the boundary.
 	const owned = lifeMod.ownedStatePaths(projLife).filter((e) => e.exists).map((e) => e.rel);
 	check("the inventory lists no preserved path as owned", !owned.includes(".sdd/.env") && !owned.includes(".sdd/stop.md") && !owned.some((r) => r.startsWith("specs")));
+	check("the functional state is owned state too", lifeMod.ownedStatePaths(projLife).some((e) => e.rel === ".sdd/functional"));
+
+	// 5) A purge must NOT delete the only evidence of a functional run that is
+	// still open: deleting it would erase what was applied to a live instance
+	// exactly when somebody needs to read it.
+	{
+		const fnDir = join(projLife, ".sdd", "functional", "001-run");
+		mkdirSync(fnDir, { recursive: true });
+		const writeRunFile = (state, ops) =>
+			writeFileSync(join(fnDir, "run.json"), JSON.stringify({ specId: "001-run", state, ops, updatedAt: "now" }));
+		writeRunFile("blocked", [{ batchId: "b1", state: "indeterminate", index: 0, model: "res.partner", method: "write", intent: "x", scope: "apply" }]);
+		check("an open functional run marks its evidence as at risk", lifeMod.functionalEvidenceAtRisk(projLife) === true);
+		let purged = lifeMod.purgeOwnedState(projLife);
+		check("the purge keeps the functional evidence", purged.kept.includes(".sdd/functional") && existsSync(join(fnDir, "run.json")));
+
+		writeRunFile("idle", [{ batchId: "b1", state: "applied", index: 0, model: "res.partner", method: "write", intent: "x", scope: "apply" }]);
+		check("a finished run is not evidence at risk", lifeMod.functionalEvidenceAtRisk(projLife) === false);
+		purged = lifeMod.purgeOwnedState(projLife);
+		check("a finished run is purged like any owned state", purged.removed.includes(".sdd/functional") && !existsSync(join(projLife, ".sdd", "functional")));
+	}
 	check("PRESERVED documents the three human-owned paths", lifeMod.PRESERVED.length === 3);
 }
 
@@ -1633,6 +1836,35 @@ const gcR = await guardCp.execute({ operation: "create", label: "guard", dirs: [
 check("checkpoint tool created one for the guard", gcR.ok === true);
 gR = guard({ name: "odoo_execute", arguments: { method: "create" } });
 check("guard allows the mutation after a checkpoint exists", gR === undefined);
+
+// While a functional batch is running, the approved plan is the ONLY mutation
+// path: a direct call to any other tool would bypass the batches, the hashes and
+// the journal. Reads and local tools stay available.
+{
+	const runDir = join(projGuard, ".sdd", "functional", "001-run");
+	mkdirSync(runDir, { recursive: true });
+	writeFileSync(
+		join(runDir, "run.json"),
+		JSON.stringify({ specId: "001-run", state: "running", lock: { callId: "c1", at: "now", batchId: "b1" }, ops: [], updatedAt: "now" }),
+	);
+	const execBlocked = guard({ name: "odoo_execute", arguments: { method: "create" } });
+	check("a running functional batch blocks direct mutations", typeof execBlocked === "string" && /functional run/.test(execBlocked));
+	const moduleBlocked = guard({ name: "odoo_module", arguments: { operation: "install", modules: ["x"] } });
+	check("it blocks module installs too", typeof moduleBlocked === "string" && /functional run/.test(moduleBlocked));
+	const restoreBlocked = guard({ name: "sdd_checkpoint", arguments: { operation: "restore", restore_data: true } });
+	check("it blocks a direct data restore (compensation is a batch)", typeof restoreBlocked === "string" && /functional run/.test(restoreBlocked));
+	check("reads stay available during a functional run", guard({ name: "odoo_execute", arguments: { method: "read" } }) === undefined);
+	check("the functional tool itself is allowed", guard({ name: "odoo_functional", arguments: { operation: "apply" } }) === undefined);
+	check("local tools stay available", guard({ name: "odoo_validate", arguments: {} }) === undefined);
+	// A file-only restore is not a mutation of the instance: it stays allowed.
+	check("a file-only restore stays allowed", guard({ name: "sdd_checkpoint", arguments: { operation: "restore", checkpoint_id: "x" } }) === undefined);
+	// Once the run is no longer running, nothing changes for the other tools.
+	const idle = JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"));
+	idle.state = "idle";
+	delete idle.lock;
+	writeFileSync(join(runDir, "run.json"), JSON.stringify(idle));
+	check("an idle functional run does not block anything", guard({ name: "odoo_execute", arguments: { method: "create" } }) === undefined);
+}
 cps.writeActiveState(projGuard, { phase: "READ_SPEC" });
 gR = guard({ name: "odoo_module", arguments: { operation: "install" } });
 check("guard denies a mutation before WRITE_CODE", typeof gR === "string" && gR.includes("READ_SPEC"));
@@ -1713,6 +1945,175 @@ check("handoff documents configuration", hText.includes("## Configuration in eff
 	check("the handoff does NOT include another spec's ops", !section.includes("account.move") && !section.includes("2026-02-01T12:00:00Z"));
 	check("the handoff states the total and the sources", /Total: 2 operation\(s\)/.test(section) && /2 checkpoint\(s\) of this spec/.test(section));
 	check("the handoff carries the destination stamp", section.includes("db=dev"));
+}
+
+// ---- grants: every kind survives the round-trip --------------------------
+// `readGrants` used to filter by a hardcoded kind list, so a newly added kind was
+// silently dropped on read and `hasValidGrant` answered "no grant" for an
+// approval that was on disk. The kinds now come from the union, and this pins it.
+{
+	const grantsRt = await import(new URL("grants.js", libDir).href);
+	const projGt = join(dir, "projGrantKinds");
+	mkdirSync(join(projGt, ".sdd"), { recursive: true });
+	for (const kind of grantsRt.GRANT_KINDS) {
+		grantsRt.writeGrant(projGt, { kind, fingerprint: `fp-${kind}`, reason: "round-trip", details: { kind } });
+		const stored = grantsRt.readGrants(projGt).grants.filter((g) => g.kind === kind);
+		check(`a ${kind} receipt survives the round-trip`, stored.length === 1 && stored[0].details?.kind === kind);
+		check(`hasValidGrant accepts the ${kind} receipt it just wrote`, grantsRt.hasValidGrant(projGt, kind, `fp-${kind}`) === true);
+		check(`hasValidGrant refuses a ${kind} receipt with another fingerprint`, grantsRt.hasValidGrant(projGt, kind, "other") === false);
+	}
+	check("the kinds covered are the ones the code declares", grantsRt.GRANT_KINDS.length === 3);
+}
+
+// ---- functional runbook: generated from the plan and the run state ---------
+// The runbook is what a person follows by hand in Odoo, so it must be built from
+// what actually happened (approvals, operations, criteria) and must say what the
+// plugin could NOT verify instead of inventing a menu path.
+{
+	const projRb = join(dir, "projRunbook");
+	mkdirSync(join(projRb, "mod"), { recursive: true });
+	plugin.apply(fakeCtx, { projectRoot: projRb });
+	const phaseRb = registered.get("sdd_phase");
+	const handoffRb = registered.get("sdd_handoff");
+	await phaseRb.execute({ operation: "init", spec_id: "040-run", mode: "functional" });
+	const specRb = join(projRb, "specs", "040-run");
+	// A spec that reached the closing steps.
+	const rbState = sdd.loadState(specRb);
+	rbState.mode = "functional";
+	rbState.phase = "VERIFY";
+	sdd.saveState(rbState);
+	writeFileSync(
+		join(specRb, "test-plan.md"),
+		"# Test Plan\n\n| AC | Scenario | Layer | Status |\n|---|---|---|---|\n| AC1 | 42 partners exist | rpc | pass (42 rows) |\n",
+	);
+
+	// A plan with one applied batch and one indeterminate operation, plus the
+	// human approval receipt that authorized it.
+	const fnMod = await import(new URL("functional.js", libDir).href);
+	fnMod.writeState(projRb, "040-run", "plan.json", {
+		specId: "040-run",
+		environment: "staging",
+		serverVersion: "17.0",
+		batches: [
+			{
+				id: "b1",
+				scope: "apply",
+				title: "load the partner master data",
+				acceptance: ["AC1"],
+				companies: [1],
+				context: { company_id: 1 },
+				manualSteps: ["Open Contacts and search for the imported VAT."],
+				operations: [
+					{ intent: "create 42 partners from the CSV", model: "res.partner", method: "create", args: [[{ name: "x" }]], recovery: { kind: "unlink_created" } },
+				],
+			},
+			{
+				id: "b2",
+				scope: "apply",
+				title: "rename one partner",
+				acceptance: ["AC1"],
+				companies: [1],
+				operations: [{ intent: "rename partner 7", model: "res.partner", method: "write", args: [[7], { name: "after" }], recovery: { kind: "restore_preimage" } }],
+			},
+		],
+	});
+	fnMod.writeState(projRb, "040-run", "run.json", {
+		specId: "040-run",
+		state: "blocked",
+		updatedAt: "2026-03-01T10:00:00Z",
+		ops: [
+			{ batchId: "b1", scope: "apply", index: 0, model: "res.partner", method: "create", intent: "create 42 partners from the CSV", state: "applied", createdIds: [501], attemptedAt: "t", resultAt: "t" },
+			{ batchId: "b2", scope: "apply", index: 0, model: "res.partner", method: "write", intent: "rename partner 7", state: "indeterminate", ids: [7], attemptedAt: "t", error: "socket hang up" },
+		],
+	});
+	const grantsRb = await import(new URL("grants.js", libDir).href);
+	grantsRb.writeGrant(projRb, {
+		kind: "batch",
+		fingerprint: "fp-1",
+		reason: "test",
+		details: { specId: "040-run", batchId: "b1", scope: "apply", environment: "staging" },
+	});
+
+	const hb = await handoffRb.execute({ spec_id: "040-run" });
+	check("the handoff writes for a functional spec", hb.ok === true, hb.detail);
+	const rbPath = join(specRb, "functional-runbook.md");
+	check("the runbook file is generated", existsSync(rbPath));
+	const rb = readFileSync(rbPath, "utf8");
+	for (const heading of ["## Batches applied", "## Procedures", "## Verification evidence", "## Recovery"]) {
+		check(`the runbook carries ${heading}`, rb.includes(heading));
+	}
+	check("the runbook names the applied batch and its approval", rb.includes("b1") && /Approved by a human: 20/.test(rb));
+	check("the runbook reports the environment it ran in", rb.includes("staging"));
+	check("the runbook covers the acceptance criterion", rb.includes("AC1") && rb.includes("test-plan.md reads"));
+	check("the runbook flags the operation with an unknown outcome", /indeterminate/i.test(rb) && /reconcile/i.test(rb));
+	check(
+		"the runbook does NOT invent a menu path",
+		/MENU PATH NOT VERIFIED/.test(rb),
+	);
+	check("the runbook reports what cannot be undone", /cannot be undone|cannot be undone|NOT undone|CANNOT be undone/i.test(rb));
+	check("the runbook closes the runbook gate", sdd.runbookGaps(specRb).length === 0, JSON.stringify(sdd.runbookGaps(specRb)));
+	check("the handoff reports the closing-gate state", /## Functional runbook/.test(readFileSync(join(specRb, "handoff.md"), "utf8")));
+
+	// A human-written runbook is never overwritten.
+	writeFileSync(rbPath, "# Runbook\n\n## Batches applied\nhand-written\n\n## Procedures\np\n\n## Verification evidence\ne\n\n## Recovery\nr\n");
+	const hb2 = await handoffRb.execute({ spec_id: "040-run" });
+	const handoffRbText = readFileSync(join(specRb, "handoff.md"), "utf8");
+	check(
+		"a human-written runbook is left untouched",
+		readFileSync(rbPath, "utf8").includes("hand-written") && /## Functional runbook[\s\S]*written by a human/.test(handoffRbText),
+	);
+
+	// And the closing gate now lets the functional spec reach DONE.
+	writeFileSync(join(specRb, "security-report.md"), "# Security review\n\nVerdict: APPROVED\n");
+	const rbDone = sdd.loadState(specRb);
+	rbDone.phase = "VERIFY";
+	sdd.recordSuccess(rbDone, "AC1 verified");
+	const close = sdd.transition(rbDone, "DONE", null, "close", "human", "supervised", { documentationPolicy: "optional" });
+	check("the functional spec closes with the generated runbook", close.ok === true, close.ok ? "" : close.reason);
+}
+
+// ---- sdd_phase: the functional mode through the TOOL surface ---------------
+// The state layer is covered above; this drives the surface the model actually
+// calls, because that is where the mode is chosen and frozen.
+{
+	const projFn = join(dir, "projFunctionalTool");
+	mkdirSync(projFn, { recursive: true });
+	plugin.apply(fakeCtx, { projectRoot: projFn });
+	const phaseFn = registered.get("sdd_phase");
+
+	// The parameter enum is enforced by the host schema, so an invented mode never
+	// reaches the handler: that is better than a runtime check, and it is asserted
+	// here so nobody "fixes" it by widening the enum.
+	let badModeRejected = false;
+	try {
+		await phaseFn.execute({ operation: "init", spec_id: "030-fn", mode: "whatever" });
+	} catch (err) {
+		badModeRejected = String(err && err.message).includes("create") && String(err && err.message).includes("functional");
+	}
+	check("an invented mode is rejected by the tool schema", badModeRejected);
+
+	const madeFn = await phaseFn.execute({ operation: "init", spec_id: "030-fn", mode: "functional" });
+	check("init accepts the functional mode", madeFn.ok === true && /mode=functional/.test(madeFn.detail));
+	const fnState = sdd.loadState(join(projFn, "specs", "030-fn"));
+	check("the chosen mode is persisted", fnState.mode === "functional");
+	check(
+		"the functional skeleton was written",
+		readFileSync(join(projFn, "specs", "030-fn", "architecture.md"), "utf8").includes("## Functional Design"),
+	);
+
+	const flipMidRun = await phaseFn.execute({ operation: "clarify", spec_id: "030-fn", mode: "create", licensed: "community" });
+	check("clarify can still correct the mode in CLARIFY", flipMidRun.ok === true);
+
+	await phaseFn.execute({ operation: "init", spec_id: "031-fn", mode: "functional" });
+	await phaseFn.execute({ operation: "clarify", spec_id: "031-fn", mode: "functional", licensed: "community" });
+	await phaseFn.execute({ operation: "mark_spec_loaded", spec_id: "031-fn" });
+	const late = await phaseFn.execute({ operation: "clarify", spec_id: "031-fn", mode: "create", licensed: "community" });
+	check(
+		"the mode cannot be flipped once the spec is loaded",
+		late.ok === false && /cannot change|already running/i.test(late.detail),
+	);
+	const reinited = await phaseFn.execute({ operation: "init", spec_id: "031-fn", mode: "create" });
+	check("init cannot re-open a spec as another mode", reinited.ok === false && /Create a new spec id/.test(reinited.detail));
 }
 
 // ---- root resolution: the declared project root beats the process cwd -----
@@ -2116,7 +2517,7 @@ console.log("== real cordis host: optional services ==");
 		// is awaited (or the fiber is otherwise activated).
 		await ctx.plugin({ name: plugin.name, inject: plugin.inject, apply: (c, cfg) => plugin.apply(c, cfg) }, { projectRoot: hostRoot });
 
-		check("the plugin mounts on a real cordis host", tools.size === 13);
+		check("the plugin mounts on a real cordis host", tools.size === 14);
 
 		// The premise: inside a plugin that did NOT inject the service, the
 		// property read throws (this is what silently disabled the session root).

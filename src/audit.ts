@@ -23,8 +23,8 @@ import { sanitizeForPersist, type OdooCredentials } from "./credentials.js";
 /** Where an entry came from: a tool call, internal bookkeeping, or the guard. */
 export type AuditSource = "tool" | "internal" | "policy";
 
-/** What an entry records: a tool invocation, an RPC attempt, or a decision. */
-export type AuditKind = "tool" | "rpc" | "policy";
+/** What an entry records: a tool invocation, an RPC attempt, a decision, or a functional batch operation. */
+export type AuditKind = "tool" | "rpc" | "policy" | "functional";
 
 /** One sanitized audit entry. */
 export interface AuditEntry {

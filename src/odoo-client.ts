@@ -25,10 +25,22 @@ import { redact } from "./credentials.js";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MODULE_OP_TIMEOUT_MS = 300_000;
 
+/**
+ * Why a call failed, when that is knowable.
+ *
+ * The distinction is not cosmetic: after a MUTATION, `transport` (the request was
+ * sent and no answer came back) may mean the server already committed, so a
+ * retry can double-apply. `server` means Odoo answered with an error and the
+ * transaction was rolled back. `protocol` means we could not even read the
+ * answer. Callers that only mutate must treat `transport`/`protocol` as
+ * INDETERMINATE, never as a plain failure.
+ */
+export type RpcErrorKind = "transport" | "server" | "protocol";
+
 /** Result of a JSON-RPC call: either the payload or a sanitized error. */
 export type RpcResult<T> =
 	| { ok: true; value: T }
-	| { ok: false; error: string };
+	| { ok: false; error: string; errorKind?: RpcErrorKind };
 
 /** Odoo server version info returned by `common.version`. */
 export interface ServerVersion {
@@ -71,7 +83,7 @@ interface JsonRpcEnvelope {
 /** Outcome of a low-level RPC call; headers are kept on both branches. */
 type RpcOutcome<T> =
 	| { ok: true; value: T; headers: Headers }
-	| { ok: false; error: string; headers: Headers | null };
+	| { ok: false; error: string; errorKind?: RpcErrorKind; headers: Headers | null };
 
 /** Client bound to one instance + database. Secret material stays private. */
 export class OdooClient {
@@ -123,23 +135,45 @@ export class OdooClient {
 			const text = await response.text();
 			const sanitized = redact(text, this.#credentials);
 			if (!response.ok) {
-				return { ok: false, error: `HTTP ${response.status}: ${sanitized.slice(0, 4000)}`, headers: response.headers };
+				return {
+					ok: false,
+					error: `HTTP ${response.status}: ${sanitized.slice(0, 4000)}`,
+					errorKind: "server",
+					headers: response.headers,
+				};
 			}
 			let payload: { result?: T; error?: { data?: { message?: string; debug?: string }; message?: string } };
 			try {
 				payload = JSON.parse(sanitized) as typeof payload;
 			} catch {
-				return { ok: false, error: `Non-JSON response: ${sanitized.slice(0, 2000)}`, headers: response.headers };
+				return {
+					ok: false,
+					error: `Non-JSON response: ${sanitized.slice(0, 2000)}`,
+					errorKind: "protocol",
+					headers: response.headers,
+				};
 			}
 			if (payload.error) {
 				const data = payload.error.data;
 				const detail = data?.debug ?? data?.message ?? payload.error.message ?? "unknown error";
-				return { ok: false, error: String(detail).slice(0, 8000), headers: response.headers };
+				return {
+					ok: false,
+					error: String(detail).slice(0, 8000),
+					errorKind: "server",
+					headers: response.headers,
+				};
 			}
 			return { ok: true, value: payload.result as T, headers: response.headers };
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
-			return { ok: false, error: redact(`Request failed: ${message}`, this.#credentials), headers: null };
+			// The request may or may not have reached the server: nothing about the
+			// outcome is knowable from here.
+			return {
+				ok: false,
+				error: redact(`Request failed: ${message}`, this.#credentials),
+				errorKind: "transport",
+				headers: null,
+			};
 		} finally {
 			clearTimeout(timer);
 			if (callerSignal !== undefined) callerSignal.removeEventListener("abort", onCallerAbort);

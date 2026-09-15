@@ -77,6 +77,22 @@ Report: fragments written (and their quadrant), language used and why, the
 changelog fragments added, and everything you could NOT verify (screenshots,
 compiled `README.rst`, rendered changelog) so a human closes it.
 
+## Functional specs (mode=functional)
+
+A configuration/import change ships no module, so the documentation is NOT a
+`README.rst`, an OCA fragment set or an `index.html`: producing those for a module
+that does not exist is worse than producing nothing. The deliverable is
+`functional-runbook.md`, and `sdd_handoff` generates it from the plan and the run
+state. Your job is to check it as documentation:
+
+- every applied batch appears with its environment, companies and approval;
+- every procedure names its prerequisites, the menu path, the field labels, the
+  expected result and how to check it — and any step this plugin could not verify
+  is marked as such rather than invented;
+- the recovery section says what can be undone and what cannot;
+- the language follows the project's own rules (its `AGENTS.md` wins over the
+  plugin configuration).
+
 ## Hard limits
 - NO implementation changes (Python/XML/JS) — documentation only.
 - Do NOT invent behaviour, configuration options or limitations.

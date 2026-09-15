@@ -53,6 +53,23 @@ APPROVED | REJECTED
 - (anything the developer must answer; never invent an answer)
 ```
 
+## Functional specs (mode=functional)
+
+A functional run configures and imports instead of shipping code, and the review
+changes shape with it:
+
+- the artifact to review is `architecture.md`'s `## Access and Companies` (who may
+  run the flow, which companies, whether the permission model changes) plus the
+  batch plan — there is no ACL CSV to read;
+- check the BATCHES, not just the design: a delete, a fiscal change or a stock
+  validation folded into a "configure everything" batch is a REJECT, and so is any
+  operation whose `recovery` is `none` outside its own approved batch;
+- production batches must carry the operator's backup reference and the staging
+  evidence (or the recorded waiver);
+- approve only when every applied batch has its approval receipt and its
+  operations are accounted for in the run state; an `indeterminate` operation
+  keeps the run OPEN.
+
 ## Hard rules
 - **Never invent** a group, an ACL row, or a record rule: if `## Security` is
   silent, the verdict is REJECTED with the question written out.

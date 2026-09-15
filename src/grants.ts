@@ -23,7 +23,18 @@ import { dirname, join } from "node:path";
 import { writeFileAtomic } from "./atomic.js";
 
 /** What a receipt authorizes. */
-export type GrantKind = "connection" | "config";
+export type GrantKind = "connection" | "config" | "batch";
+
+/**
+ * Every kind the reader accepts.
+ *
+ * Kept as a value (not a hardcoded comparison) on purpose: the reader used to
+ * list the kinds it kept, so adding `batch` silently DROPPED every batch receipt
+ * on read — `hasValidGrant` then answered "no grant" for approvals that were
+ * sitting on disk, and the whole per-batch flow would have refused to run in
+ * production while an in-memory test double said otherwise.
+ */
+export const GRANT_KINDS: readonly GrantKind[] = ["connection", "config", "batch"];
 
 /** One stored authorization receipt. Never contains secret material. */
 export interface Grant {
@@ -39,6 +50,13 @@ export interface Grant {
 	callId?: string;
 	/** Human-readable reason shown to the approver. */
 	reason?: string;
+	/**
+	 * What the receipt is bound to, for a `batch` grant: the spec, the batch, its
+	 * scope, the environment, the destination and the hashes that were approved.
+	 * Stored so an operator can audit what a human actually approved, and so a
+	 * mismatch is explainable instead of just "no grant".
+	 */
+	details?: Record<string, unknown>;
 }
 
 /** On-disk shape of the receipts file. */
@@ -85,7 +103,7 @@ export function readGrants(projectRoot: string): GrantsFile {
 					typeof g === "object" &&
 					typeof g.fingerprint === "string" &&
 					typeof g.expiresAt === "string" &&
-					(g.kind === "connection" || g.kind === "config"),
+					(GRANT_KINDS as readonly string[]).includes(g.kind),
 			),
 		};
 	} catch {
@@ -153,7 +171,14 @@ export function hasValidGrant(
  */
 export function writeGrant(
 	projectRoot: string,
-	grant: { kind: GrantKind; fingerprint: string; ttlMinutes?: number; callId?: string; reason?: string },
+	grant: {
+		kind: GrantKind;
+		fingerprint: string;
+		ttlMinutes?: number;
+		callId?: string;
+		reason?: string;
+		details?: Record<string, unknown>;
+	},
 ): Grant {
 	const now = new Date();
 	const ttl = Math.max(1, grant.ttlMinutes ?? DEFAULT_TTL_MINUTES);
@@ -164,6 +189,7 @@ export function writeGrant(
 		expiresAt: new Date(now.getTime() + ttl * 60_000).toISOString(),
 		...(grant.callId !== undefined ? { callId: grant.callId } : {}),
 		...(grant.reason !== undefined ? { reason: grant.reason } : {}),
+		...(grant.details === undefined ? {} : { details: grant.details }),
 	};
 	const data = readGrants(projectRoot);
 	data.grants = data.grants.filter(

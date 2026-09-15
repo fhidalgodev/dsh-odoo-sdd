@@ -48,10 +48,15 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"pipeline": "Pipeline",
 		"pipelineHint": "Estado en vivo del SDD: usa la tool sdd_phase status en la sesión.",
 		"policy": "Política",
-		"workspace": "Workspace",
-		"workspaceHint": "Dónde vive tu proyecto Odoo. El plugin resuelve specs, .env y estado desde acá; vacío = directorio de trabajo del proceso (frágil).",
-		"projectRoot": "Raíz del proyecto",
-		"specsDir": "Carpeta de specs",
+		"specs": "Specs",
+		"specsHint": "El proyecto se toma de la carpeta abierta en esta sesión, así que no se configura acá. Elegí dónde se guardan los documentos de spec.",
+		"specsMode": "Ubicación",
+		"specsModeProject": "Dentro del proyecto",
+		"specsModeCentral": "Carpeta central",
+		"specsRoot": "Carpeta central de specs",
+		"specsSubdir": "Subcarpeta dentro del proyecto",
+		"specsProjectResolved": "Cada proyecto guarda sus specs en <proyecto>/<subcarpeta>/<spec>.",
+		"specsCentralResolved": "Todos los proyectos guardan sus specs en <carpeta central>/<proyecto>/<spec>, cada uno en su propia subcarpeta con un archivo .dsh-project-root que la identifica.",
 		"policyHint": "Guardas fail-closed del plugin. El guard bloquea mutaciones hasta que se cumplan.",
 		"docPolicy": "Documentación del módulo",
 		"docRequired": "Obligatoria",
@@ -108,10 +113,15 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"pipeline": "Pipeline",
 		"pipelineHint": "Live SDD state: use the sdd_phase status tool in the session.",
 		"policy": "Policy",
-		"workspace": "Workspace",
-		"workspaceHint": "Where your Odoo project lives. The plugin resolves specs, .env and state from here; empty = the process working directory (fragile).",
-		"projectRoot": "Project root",
-		"specsDir": "Specs folder",
+		"specs": "Specs",
+		"specsHint": "The project comes from the folder open in this session, so it is not configured here. Choose where the spec documents are stored.",
+		"specsMode": "Location",
+		"specsModeProject": "Inside the project",
+		"specsModeCentral": "Central folder",
+		"specsRoot": "Central specs folder",
+		"specsSubdir": "Subfolder inside the project",
+		"specsProjectResolved": "Each project keeps its specs in <project>/<subfolder>/<spec>.",
+		"specsCentralResolved": "Every project keeps its specs under <central folder>/<project>/<spec>, each in its own subfolder identified by a .dsh-project-root file.",
 		"policyHint": "Fail-closed plugin guards. The guard blocks mutations until they are satisfied.",
 		"docPolicy": "Module documentation",
 		"docRequired": "Required",
@@ -165,6 +175,10 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		".odoo-sdd-input:focus-visible,.odoo-sdd-select:focus-visible{outline:none;border-color:var(--dsw-alias-brand-primary,#4f6ef7);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 22%,transparent)}",
 		".odoo-sdd-input:disabled,.odoo-sdd-select:disabled{opacity:.6;cursor:not-allowed}",
 		".odoo-sdd-input--mono{font-family:var(--dsw-alias-font-mono,ui-monospace,Menlo,monospace);font-size:12px}",
+		// A folder name, a language code or a small count does NOT need a
+		// full-width box: `.odoo-sdd-input` is width:100% inside a column field,
+		// so short values get an explicit, still-responsive cap.
+		".odoo-sdd-input--short{width:min(100%,200px)}",
 		".odoo-sdd-seg{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--dsw-alias-border-l2,#e5e7eb);border-radius:8px;background:var(--dsw-alias-bg-layer-2,#f3f4f6)}",
 		".odoo-sdd-seg-btn{font:inherit;font-size:12px;padding:5px 12px;min-height:30px;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#6b7280);cursor:pointer;transition:background .15s,color .15s}",
 		".odoo-sdd-seg-btn:hover:not(:disabled):not(.is-on){color:var(--dsw-alias-label-primary,#1f2328)}",
@@ -253,6 +267,8 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			licensed: lic,
 			executeAllowlist: asList(s.executeAllowlist),
 			projectRoot: asStr(s.projectRoot, ""),
+			specsMode: s.specsMode === "central" ? "central" : "project",
+			specsRoot: asStr(s.specsRoot, ""),
 			specsDir: asStr(s.specsDir, "specs"),
 			communityRepoUrl: asStr(s.communityRepoUrl, "https://github.com/odoo/odoo"),
 			communityRepoPath: asStr(s.communityRepoPath, ""),
@@ -275,7 +291,8 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			allowlist: snap.executeAllowlist.join(", "),
 			communityUse: snap.communityRepoPath ? "path" : "url",
 			communityUrl: snap.communityRepoUrl,
-			projectRoot: snap.projectRoot,
+			specsMode: snap.specsMode,
+			specsRoot: snap.specsRoot,
 			specsDir: snap.specsDir,
 			communityPath: snap.communityRepoPath,
 			enterpriseUse: snap.enterpriseRepoPath ? "path" : "url",
@@ -410,8 +427,12 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 				licensed: form.licensed,
 				executeAllowlist: parseList(form.allowlist),
 				communityRepoUrl: form.communityUse === "url" ? form.communityUrl : "",
-				projectRoot: form.projectRoot || "",
-				specsDir: form.specsDir || "",
+				// The project root is deliberately NOT written from the panel: it
+				// is resolved from the session's folder. Only the specs LAYOUT is
+				// a plugin setting.
+				specsMode: form.specsMode === "central" ? "central" : "project",
+				specsRoot: form.specsMode === "central" ? (form.specsRoot || "") : "",
+				specsDir: form.specsDir || "specs",
 				communityRepoPath: form.communityUse === "path" ? form.communityPath : "",
 				enterpriseRepoUrl: form.enterpriseUse === "url" ? form.enterpriseUrl : "",
 				enterpriseRepoPath: form.enterpriseUse === "path" ? form.enterprisePath : "",
@@ -601,9 +622,24 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 					canWrite ? t("editable") : t("readonly"))),
 			!canWrite ? h("div", { className: "odoo-sdd-banner" }, h("span", null, t("readonlyHint"))) : null,
 
-			h(SectionCard, { title: t("workspace"), hint: t("workspaceHint") },
-				dirField("projectRoot", t("projectRoot"), "/home/you/my-odoo-project"),
-				dirField("specsDir", t("specsDir"), "specs")),
+			h(SectionCard, { title: t("specs"), hint: t("specsHint") },
+				policyRow(t("specsMode"), seg("specsMode", form.specsMode, [
+					{ value: "project", label: t("specsModeProject") },
+					{ value: "central", label: t("specsModeCentral") }
+				])),
+				form.specsMode === "central"
+					? dirField("specsRoot", t("specsRoot"), "~/.dsh-odoo-sdd/specs")
+					: h("div", { className: "odoo-sdd-field" },
+						h("label", { className: "odoo-sdd-label", htmlFor: prefix + "-specsDir" }, t("specsSubdir")),
+						h("input", {
+							id: prefix + "-specsDir", type: "text", disabled: !canWrite,
+							className: "odoo-sdd-input odoo-sdd-input--mono odoo-sdd-input--short",
+							maxLength: 64, value: form.specsDir || "specs",
+							placeholder: "specs", spellCheck: false, autoComplete: "off",
+							onChange: onField("specsDir")
+						})),
+				h("p", { className: "odoo-sdd-hint" },
+					form.specsMode === "central" ? t("specsCentralResolved") : t("specsProjectResolved"))),
 			h(SectionCard, { title: t("delegation"), hint: t("delegationHint") },
 				seg("autonomy", form.autonomy, [
 					{ value: "supervised", label: t("supervised") },
@@ -639,11 +675,11 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 				])),
 				h("div", { className: "odoo-sdd-field" },
 					h("label", { className: "odoo-sdd-label", htmlFor: prefix + "-doclang" }, t("docLanguage")),
-					h("input", { id: prefix + "-doclang", type: "text", className: "odoo-sdd-input", value: form.documentationLanguage, placeholder: "en", disabled: !canWrite, spellCheck: false, onChange: onField("documentationLanguage") }),
+					h("input", { id: prefix + "-doclang", type: "text", className: "odoo-sdd-input odoo-sdd-input--short", maxLength: 12, value: form.documentationLanguage, placeholder: "en", disabled: !canWrite, spellCheck: false, onChange: onField("documentationLanguage") }),
 					h("div", { className: "odoo-sdd-hint" }, t("docLanguageHint"))),
 				h("div", { className: "odoo-sdd-field" },
 					h("label", { className: "odoo-sdd-label", htmlFor: prefix + "-maxcp" }, t("maxCheckpoints")),
-					h("input", { id: prefix + "-maxcp", type: "number", min: "1", className: "odoo-sdd-input", value: form.maxCheckpoints, disabled: !canWrite, onChange: onField("maxCheckpoints") }))),
+					h("input", { id: prefix + "-maxcp", type: "number", min: "1", inputMode: "numeric", className: "odoo-sdd-input odoo-sdd-input--short", value: form.maxCheckpoints, disabled: !canWrite, onChange: onField("maxCheckpoints") }))),
 
 			h(SectionCard, { title: t("pipeline"), hint: t("pipelineHint") }, null),
 
@@ -657,6 +693,13 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 
 	function apply(ctx) {
 		try {
+			// NOTE (pre-existing wart, left as-is on purpose): the host ships only
+			// the `zh` and `en` locales, and English is the fallback, so the `zh`
+			// dictionary below is where the Spanish copy lives. Registering it
+			// under a new id would be ignored (ids are a fixed built-in set), and
+			// dropping it would silently switch the panel to English-only. Anyone
+			// who selects 中文 sees Spanish instead of Chinese: the honest fix is a
+			// language-pack provider, not a rename here.
 			ctx.effect(function () { ctx.locale.register(NS, { zh: zh, en: en }); }, "odoo-sdd: dictionaries");
 			var t = ctx.locale.bind(NS);
 			// Registered as an effect so dispose/HMR removes the stylesheet it

@@ -67,6 +67,37 @@ chat, ni un auto-committer.
   error explícito en lugar de arrancar roto (fail-closed, como el propio
   market).
 
+## Soporte de plataformas
+
+El plugin corre donde corre DSH y declara soporte para **Linux, macOS y
+Windows** — una afirmación que la matriz de CI verifica en lugar de asumir
+(`ubuntu-latest` **y** `windows-latest`, en Node 20 y 22).
+
+| Aspecto | Comportamiento |
+| --- | --- |
+| Rutas | `module_dir` y una raíz explícita aceptan formas POSIX (`/opt/odoo`) y Windows (`C:\odoo`, UNC); una ruta absoluta nunca se concatena bajo la raíz del proyecto. Los informes usan el separador de la plataforma. |
+| Permisos del `.env` | Se pide modo solo-propietario (0600) y el plugin **vuelve a inspeccionar el archivo después del `chmod`**: en un sistema de archivos que no puede expresar los bits de modo (Windows, FAT/exFAT, algunos montajes) informa "modo solo-propietario solicitado" y agrega una nota, en vez de fingir que el archivo es privado. En un sistema POSIX real, un modo abierto que no se puede corregir sigue rechazándose (fail-closed). |
+| Escrituras atómicas | Los archivos de estado se escriben en un temporal hermano y se renombran en su lugar, reintentando `EPERM`/`EACCES`/`EBUSY` con espera acotada: el caso en que Windows rechaza el renombrado porque un editor, indexador o antivirus mantiene un handle abierto. |
+| Raíz del proyecto | Se resuelve en cada llamada desde la **carpeta de la sesión**; una raíz absoluta nunca cae al directorio de trabajo del proceso salvo que no se sepa nada más, y esa caída se informa como `LAST RESORT`. |
+| Symlinks | Un checkpoint nunca sigue un symlink fuera del árbol, y el smoke test omite sus aserciones de symlink donde el sistema operativo o los privilegios del usuario no permiten crearlos: informa el omitido en lugar de pasar en silencio. |
+
+### Dónde viven los specs
+
+La raíz del proyecto es la carpeta abierta en la sesión actual, así que no es una
+configuración global del plugin. Los documentos de spec la siguen:
+
+- **disposición en el proyecto** (por defecto): `<raíz del proyecto>/<specsDir>/<specId>`
+  — los specs viajan con el código.
+- **disposición central** (Ajustes → Odoo SDD → Specs): los specs de todos los
+  proyectos se reúnen en una carpeta como `<specsRoot>/<projectSlug>/<specId>`,
+  cada proyecto en su propia subcarpeta con un archivo `.dsh-project-root`, más
+  un sufijo hash cuando dos proyectos comparten el nombre de carpeta.
+
+`.sdd/` (configuración, credenciales, permisos, auditoría, checkpoints, corrida
+activa) siempre queda en el proyecto. `odoo_config mode=read` informa la raíz
+resuelta, su procedencia, la base de specs, el directorio de spec efectivo y la
+ruta del archivo de configuración; `sdd_phase status` repite esas ubicaciones.
+
 ## Usar este paquete
 
 ### 1. Configurar credenciales (una vez por proyecto)
@@ -135,9 +166,13 @@ dsh plugin --profile odoo add <ruta-o-paquete>
 dsh --profile odoo --dump-config   # inspeccionar la composición sin arrancar
 ```
 
-Configuración opcional vía la capa de parches (`cordis.patch.yml`):
-`projectRoot` (raíz del workspace) y `specsDir` (carpeta de specs, por defecto
-`specs/`).
+Configuración opcional vía la capa de parches (`cordis.patch.yml`): `specsMode`
+(`project` o `central`), `specsRoot` (la carpeta central), `specsDir` (carpeta en
+la disposición por proyecto, por defecto `specs/`) y `projectRoot` — un valor de
+**reserva** que solo se usa cuando la sesión no informa ninguna carpeta
+(headless/CI). El resto de los campos (allowlist de ejecución, repositorios,
+autonomía, licencia, las guardas de política, la compuerta de documentación) se
+configuran con la tool `odoo_config` o en **Ajustes → Odoo SDD**.
 
 Los bundles cuyo `dsh.bundle.patch` apunta a `cordis.patch.yml` insertan su
 propia fila, así que no hace falta agregarla a mano una vez instalado el paquete.
@@ -161,8 +196,8 @@ Son exactamente los pasos que corre el
 reproduce el pipeline.
 
 El resto de campos (allowlist de ejecución, repositorios, autonomía,
-licenciamiento, guards de política) se ajustan con la tool `odoo_config` o en
-**Settings → Odoo SDD**.
+licenciamiento, guards de política, compuerta de documentación) se ajustan con la
+tool `odoo_config` o en **Ajustes → Odoo SDD**.
 
 ### 3. Tools registradas (model-facing)
 
@@ -172,10 +207,10 @@ licenciamiento, guards de política) se ajustan con la tool `odoo_config` o en
 | `odoo_setup` | Onboarding: `check` (cascada + gitignore + modo de delegación), `interactive` (scaffold chmod 600 sin secreto), **`authorize`** (pide al DESARROLLADOR, vía aprobación nativa, un grant de conexión atado al url/db/usuario actual), **`revoke`** (elimina los grants), **`purge`** (primero muestra el plan y, con `confirm_destructive=true` + aprobación humana, borra solo el estado propio del plugin bajo `.sdd/`), `later`, `skip`, `reset`, `autonomy` (supervised \| autonomous, aprobado por un humano). Los secretos nunca se aceptan como parámetros. |
 | `odoo_module` | `info` / `install` / `upgrade` sobre `ir.module.module` (`button_immediate_*`). Devuelve la salida o el traceback del servidor, redactado — el bucle de feedback cerrado. |
 | `odoo_execute` | CRUD/RPC genérico (`execute_kw`) con allowlist fail-closed. Los métodos se clasifican explícitamente y uno sin clasificar se rechaza: lecturas (`search_read`, `read`, `search_count`, `read_group`, `fields_get`) permitidas; mutaciones (`create`/`write`/`unlink`) exigen `confirm_destructive=true` Y el modelo en `executeAllowlist`, y se journalizan para que el undo de datos pueda replicarlas. `context` se reenvía tal cual — usalo para `allowed_company_ids`/`company_id` en instancias multi-company — y el servidor sigue aplicando su propia ACL. No requiere instancia para evaluar denegaciones. |
-| `odoo_validate` | Validación LOCAL del módulo sin instancia: `__manifest__.py` + depends, los XML declarados existen, `security/ir.model.access.csv` cuando hay modelos. Devuelve findings file:line. |
+| `odoo_validate` | Validación LOCAL del módulo sin instancia: `__manifest__.py` + depends, los XML declarados existen, `security/ir.model.access.csv` cuando hay modelos. Devuelve findings file:line, más el `module_dir` y la raíz del proyecto que resolvió (una ruta relativa se resuelve contra la carpeta de la sesión, nunca contra el cwd del proceso). |
 | `odoo_errors` | Lee errores recientes del servidor (`ir.logging`) — el equivalente remoto de obtener los logs del entorno. |
 | `odoo_session` | Mintea una sesión web sin contraseña (patrón `connect_as_user`) guardada en `.sdd/session.json` (chmod 600) para pruebas UI con Playwright. La cookie nunca se devuelve. |
-| `sdd_phase` | Máquina de fases: `init`, `status` (incluye resumen del logbook), `mark_spec_loaded`, `advance` (gates fail-closed + provenance `approval_source`), `fail` (escalera de fallos + veredicto FAILED), `succeed` (veredicto PASSED), `rollback` (restaura un checkpoint y vuelve a WRITE_CODE). |
+| `sdd_phase` | Máquina de fases: `init`, `status` (incluye resumen del logbook, el directorio del spec y la ubicación de los specs), `mark_spec_loaded`, `advance` (gates fail-closed + provenance `approval_source`), `fail` (escalera de fallos + veredicto FAILED), `succeed` (veredicto PASSED), `rollback` (restaura un checkpoint y vuelve a WRITE_CODE). |
 | `sdd_checkpoint` | La superficie de rollback: `create` (snapshot del workspace, queda activo), `list`, `restore` (archivos y, con `restore_data=true` + `confirm_destructive=true`, las mutaciones de datos registradas; **siempre reporta** los archivos creados después del checkpoint y los borra solo con `remove_created=true`), `drop`, `journal`. |
 | `odoo_docs` | Documentación de un módulo, usable **por sí sola** (sin spec, fase, checkpoint ni instancia), así que un módulo existente se puede documentar sin más: `check` (fragmentos OCA mapeados a Diátaxis, esquema de versión, changelog, `index.html`, docstrings, comentarios xpath, directiva OWL → ERROR/WARN con `file:line`), `plan`, `scaffold` (esqueletos create-only, nunca sobrescribe) y `report` (persiste `docs-report.md`; APPROVED solo si nada quedó en esqueleto). La entrada de changelog es obligatoria para cualquier cambio a un módulo ya publicado. |
 | `odoo_security_scan` | Revisión de seguridad estática local (sin instancia): SQL concatenado, `eval`/`exec`/`pickle`, secretos hardcodeados, `sudo()` sin justificar, `auth="none"`, CSRF desactivado, `t-raw` en QWeb. Hallazgos con `file:line` + sugerencia; cualquier ERROR bloquea `DONE`. |
@@ -209,7 +244,7 @@ por proyecto con `odoo_setup mode=autonomy decision=...`:
 | **audit** | `.sdd/audit.jsonl` — log de actividad append-only sanitizado, escrito por un listener global `tools/result` (no solo por las tools de Odoo) |
 | **rollback** | `.sdd/checkpoints/<id>/` — manifest + snapshot de archivos + journal de datos, restaurable por spec |
 | **security** | reglas de `odoo_security_scan` + la persona `security-reviewer` + la entrevista de seguridad obligatoria en CLARIFY |
-| **test** | `tests/smoke.mjs` — suite de invariantes sin instancia |
+| **test** | `tests/smoke.mjs` — suite de invariantes sin instancia (máquina de estados, seguridad, guard de política, formas RPC, raíz/disposición de specs, contrato de host con cordis real) + `tests/client.mjs` — contrato del bundle de navegador y render del panel de ajustes |
 
 ### 3d. Seguridad, rollback y trazabilidad
 
@@ -264,7 +299,10 @@ camino de mutación tiene vuelta atrás y forma de probar qué pasó.
   en vez de dejar pasar la llamada.
 - **Rollback de archivos.** `sdd_checkpoint restore` devuelve los archivos del
   snapshot tal cual eran; `sdd_phase rollback` retorna la spec a `WRITE_CODE`
-  con el fallo registrado, para reiniciar desde un estado conocido.
+  con el fallo registrado, para reiniciar desde un estado conocido. Un checkpoint
+  captura el árbol del proyecto, así que con la disposición **central** de specs
+  los documentos de spec (que viven fuera del proyecto) no forman parte de él a
+  propósito: la spec es la fuente de verdad inmutable, no código a revertir.
 - **Rollback de datos (best effort).** Cada `create`/`write`/`unlink` vía
   `odoo_execute` guarda su pre-imagen en el journal del checkpoint; `restore
   restore_data=true confirm_destructive=true` la reaplica en orden inverso.

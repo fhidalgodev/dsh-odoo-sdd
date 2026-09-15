@@ -18,6 +18,13 @@ function check(label, cond) {
 	else { console.log(`  FAIL  ${label}`); failures++; }
 }
 
+/**
+ * POSIX mode bits are a real, assertable property only on non-Windows hosts.
+ * Guarding on the platform (instead of wrapping the assertion in a try/catch
+ * that never fires) keeps the suite honest on Windows and strict on Linux/macOS.
+ */
+const POSIX_MODES = process.platform !== "win32";
+
 const dir = mkdtempSync(join(tmpdir(), "sdd-smoke-"));
 // Isolate EVERY test from the developer's real user-scope credentials from the
 // start (the previous placement inside the onboarding section leaked the real
@@ -240,17 +247,34 @@ check("incomplete .env lists missing vars", partial.ok === false && partial.reas
 const badUrl = (() => { writeFileSync(envFile, "ODOO_URL=ftp://bad\nODOO_DB=dev\nODOO_USERNAME=admin\nODOO_PASSWORD=x\n", { mode: 0o644 }); return creds.loadCredentials(dir); })();
 check("invalid URL rejected", badUrl.ok === false && badUrl.reason === "invalid_url");
 
-const insecureEnv = join(dir, "insecure", ".env");
-writeFileSync(join(dir, "insecure"), "", { flag: "a" }); // ensure dir
-try {
-	writeFileSync(insecureEnv, "ODOO_URL=http://localhost:8069\nODOO_DB=dev\nODOO_USERNAME=admin\nODOO_PASSWORD=x\n", { mode: 0o644 });
-	chmodSync(insecureEnv, 0o640);
-	const r2 = creds.loadCredentials(join(dir, "insecure"));
+const insecureDir = join(dir, "insecure");
+mkdirSync(insecureDir, { recursive: true });
+const insecureEnv = join(insecureDir, ".env");
+writeFileSync(insecureEnv, "ODOO_URL=http://localhost:8069\nODOO_DB=dev\nODOO_USERNAME=admin\nODOO_PASSWORD=x\n", { mode: 0o644 });
+chmodSync(insecureEnv, 0o640);
+const r2 = creds.loadCredentials(insecureDir);
+if (POSIX_MODES) {
 	const modeAfter = statSync(insecureEnv).mode & 0o777;
-	check("group-readable .env tightened or refused", r2.ok === true ? modeAfter === 0o600 : r2.reason === "env_file_insecure");
-} catch {
-	// tmp on systems without chmod semantics: not a plugin failure
-	console.log("  SKIP  permission check (fs semantics)");
+	check("group-readable .env is tightened to 0600 before use", r2.ok === true && modeAfter === 0o600);
+	check("POSIX check reports enforcement (no false note)", r2.ok === true && r2.permissionNote === undefined);
+} else {
+	check(
+		"non-POSIX filesystem reports the unenforceable-permission note instead of faking success",
+		r2.ok === true ? typeof r2.permissionNote === "string" && r2.permissionNote.length > 40 : r2.reason === "env_file_insecure",
+	);
+}
+{
+	// The permission verdict is structured and honest on every platform.
+	const verdict = creds.ensureSecurePermissions(insecureEnv);
+	check(
+		"ensureSecurePermissions returns {enforced, problem, note?}",
+		typeof verdict.enforced === "boolean" &&
+			(verdict.enforced
+				? verdict.problem === null
+				: verdict.problem !== null || typeof verdict.note === "string"),
+	);
+	const missing = creds.ensureSecurePermissions(join(insecureDir, "does-not-exist.env"));
+	check("missing .env is not reported as insecure", missing.enforced === true && missing.problem === null);
 }
 
 console.log("== Q3 host guard ==");
@@ -375,9 +399,12 @@ const scaffoldPath = join(projA, ".sdd", ".env");
 check("scaffold written at project .sdd/.env", rs.status === "needs-secret" && existsSync(scaffoldPath));
 const content = readFileSync(scaffoldPath, "utf8");
 check("scaffold has empty password, no secret inside", content.includes("ODOO_PASSWORD=\n") && !content.includes("s3cret"));
-try {
+if (POSIX_MODES) {
 	check("scaffold is chmod 600", (statSync(scaffoldPath).mode & 0o777) === 0o600);
-} catch { console.log("  SKIP  chmod semantics"); }
+	check("scaffold reports verified permissions", rs.permissionsEnforced === true);
+} else {
+	check("scaffold reports unverified permissions honestly", rs.permissionsEnforced === false && rs.detail.includes("owner-only mode requested"));
+}
 rs = await connect.execute({});
 check("connect reports NEEDS_SECRET", rs.connected === false && rs.detail.includes("NEEDS_SECRET"));
 
@@ -806,6 +833,17 @@ check("create without dirs defaults to whole project", cpR.ok === true);
 	check("missing file reads as missing (not corrupt)", ro.status === "missing" && ro.value === null);
 	const rw = atomicMod.readJsonWithRecovery(join(projDur, "kb.json"));
 	check("valid file reads as ok", rw.status === "ok" || rw.status === "missing");
+
+	// writeFileAtomic must replace an EXISTING file (the path that needs a
+	// retry where Windows refuses a rename over an open handle), then leave no
+	// temp debris and win the last write when called repeatedly.
+	const target = join(projDur, "retry.txt");
+	atomicMod.writeFileAtomic(target, "first\n");
+	atomicMod.writeFileAtomic(target, "second\n");
+	check("atomic write replaces an existing file", readFileSync(target, "utf8") === "second\n");
+	for (let i = 0; i < 25; i += 1) atomicMod.writeFileAtomic(target, `burst-${i}\n`);
+	check("burst of atomic writes lands on the final value", readFileSync(target, "utf8") === "burst-24\n");
+	check("no temp debris after a burst of atomic writes", !readdirSync(projDur).some((f) => f.startsWith("retry.txt.tmp-")));
 }
 
 
@@ -1454,6 +1492,265 @@ console.log("== odoo_docs (fragments, Diátaxis, changelog, scaffold) ==");
 		{ mode: 0o600 },
 	);
 	check("a real decision satisfies the documentation gate", sdd.documentationGaps(archDir).length === 0);
+}
+
+// ---- per-session project root + central specs (lote 7) ---------------------
+// The root changes with every folder the developer opens, so it must come from
+// the SESSION, not from a plugin-wide setting. These tests pin the order
+// (argument → session cwd → declared config → process cwd), the reported
+// provenance, and the two specs layouts.
+console.log("== per-session root and specs layout ==");
+{
+	const specLoc = await import(new URL("specs-location.js", libDir).href);
+
+	// --- pure resolution order ------------------------------------------------
+	const sessionStore = { get: (id) => (id === "s1" ? { header: { cwd: join(dir, "session-project") } } : undefined) };
+	const asSession = specLoc.resolveRoot({ sessions: sessionStore, sessionId: "s1", configured: join(dir, "configured"), cwd: dir });
+	check("a session cwd wins over the configured root", asSession.root === join(dir, "session-project") && asSession.source === "session");
+	check("the deciding session id is reported", asSession.sessionId === "s1");
+	const asArgument = specLoc.resolveRoot({ explicit: join(dir, "explicit"), sessions: sessionStore, sessionId: "s1", configured: dir, cwd: dir });
+	check("an explicit argument wins over the session", asArgument.root === join(dir, "explicit") && asArgument.source === "argument");
+	const asConfigured = specLoc.resolveRoot({ sessions: sessionStore, sessionId: "unknown-session", configured: join(dir, "configured"), cwd: dir });
+	check("an unknown session falls back to the configured root", asConfigured.root === join(dir, "configured") && asConfigured.source === "config");
+	const asCwd = specLoc.resolveRoot({ cwd: dir });
+	check("with nothing configured the process cwd is the LAST resort", asCwd.root === dir && asCwd.source === "cwd");
+	check("a broken session store never throws", specLoc.sessionCwdOf({ get: () => { throw new Error("boom"); } }, "s1") === null);
+	check("a missing session store is not an error", specLoc.sessionCwdOf(undefined, "s1") === null);
+
+	// --- layout: project vs central ------------------------------------------
+	const projLayout = { projectRoot: join(dir, "p1"), specsMode: "project", specsDir: "specs", specsRoot: "" };
+	check("project layout keeps specs beside the code", specLoc.specDirFor(projLayout, "001-a") === join(dir, "p1", "specs", "001-a"));
+	check("an absolute specsDir is not nested under the root", specLoc.specDirFor({ ...projLayout, specsDir: join(dir, "abs-specs") }, "001-a") === join(dir, "abs-specs", "001-a"));
+	check("a traversal spec id maps to a neutral directory", specLoc.specDirFor(projLayout, "../../etc") === join(dir, "p1", "specs", "__invalid__"));
+
+	const centralRoot = join(dir, "central");
+	const centralLayout = { projectRoot: join(dir, "p1"), specsMode: "central", specsDir: "specs", specsRoot: centralRoot };
+	const slug = specLoc.projectSlug(join(dir, "p1"));
+	const centralDir = specLoc.centralProjectDir(centralRoot, join(dir, "p1"), { create: true });
+	check("central layout groups each project under its own folder", centralDir === join(centralRoot, slug));
+	check("the central project folder records its owner", readFileSync(join(centralDir, ".dsh-project-root"), "utf8").trim() === join(dir, "p1"));
+	check("the same project resolves to the same central folder", specLoc.centralProjectDir(centralRoot, join(dir, "p1")) === centralDir);
+	check("central spec dir lives under the project folder", specLoc.specDirFor(centralLayout, "001-c") === join(centralDir, "001-c"));
+
+	// Two DIFFERENT projects with the same directory name must not share specs.
+	const twinA = join(dir, "twin-a", "odoo");
+	const twinB = join(dir, "twin-b", "odoo");
+	mkdirSync(twinA, { recursive: true });
+	mkdirSync(twinB, { recursive: true });
+	const dirA = specLoc.centralProjectDir(centralRoot, twinA, { create: true });
+	const dirB = specLoc.centralProjectDir(centralRoot, twinB, { create: true });
+	check("a slug collision does not reuse the other project's folder", dirA !== dirB);
+	check("the colliding project gets a hash suffix", dirB === join(centralRoot, `odoo-${specLoc.shortHash(twinB)}`));
+	check("each colliding folder keeps its own owner marker", readFileSync(join(dirA, ".dsh-project-root"), "utf8").trim() === twinA && readFileSync(join(dirB, ".dsh-project-root"), "utf8").trim() === twinB);
+
+	// A non-empty folder with the same name but no marker is FOREIGN: never adopt it.
+	const foreignRoot = join(dir, "central-foreign");
+	const foreignDir = join(foreignRoot, "p1");
+	mkdirSync(foreignDir, { recursive: true });
+	writeFileSync(join(foreignDir, "someone-elses-spec.md"), "# not mine\n", { mode: 0o600 });
+	check("a foreign non-empty same-name folder is not adopted", specLoc.centralProjectDir(foreignRoot, join(dir, "p1"), { create: true }) !== foreignDir);
+	check("the foreign folder is left untouched", existsSync(join(foreignDir, "someone-elses-spec.md")) && !existsSync(join(foreignDir, ".dsh-project-root")));
+
+	// --- through the TOOL surface, with a cordis-shaped context --------------
+	// This ctx mimics the real host: `ctx.sessions`/`ctx.approval` THROW (cordis
+	// refuses a service that was not declared in `inject`), while `get(name,
+	// false)` returns it. A naive property read would silently disable both the
+	// session root and the native approval seam.
+	const sessionProject = join(dir, "session-project");
+	mkdirSync(join(sessionProject, ".sdd"), { recursive: true });
+	// Credentials must exist for `mode=authorize` to reach the approval seam.
+	writeFileSync(
+		join(sessionProject, ".sdd", ".env"),
+		"ODOO_URL=http://localhost:8069\nODOO_DB=dev\nODOO_USERNAME=admin\nODOO_PASSWORD=x\n",
+		{ mode: 0o600 },
+	);
+	const cordisLike = {
+		tools: { register: (t) => registered.set(t.name, t), guard: (g) => { capturedGuards.push(g); return () => {}; } },
+		on: () => () => {},
+		get: (name) => {
+			if (name === "sessions") return sessionStore;
+			if (name === "approval") return { request: async (req) => { approvalRequests.push(req); return "allowed-once"; } };
+			return undefined;
+		},
+	};
+	Object.defineProperty(cordisLike, "sessions", { get() { throw new Error('cannot get property "sessions" without inject'); } });
+	Object.defineProperty(cordisLike, "approval", { get() { throw new Error('cannot get property "approval" without inject'); } });
+
+	const configuredElsewhere = join(dir, "configured-elsewhere");
+	plugin.apply(cordisLike, { projectRoot: configuredElsewhere });
+	const phaseS = registered.get("sdd_phase");
+	const cfgS = registered.get("odoo_config");
+	const setupS = registered.get("odoo_setup");
+	const execS = { agent: { id: "s1" }, callId: "call-session" };
+
+	const initS = await phaseS.execute({ operation: "init", spec_id: "001-session" }, execS);
+	check("the session root beats the configured root", existsSync(join(sessionProject, "specs", "001-session", "state.json")));
+	check("nothing is written to the configured root", !existsSync(join(configuredElsewhere, "specs")));
+	check("the tool reports the root it used and its provenance", initS.detail.includes(sessionProject) && /session cwd/.test(initS.detail));
+
+	const readS = await cfgS.execute({ mode: "read" }, execS);
+	check("odoo_config read reports the resolved root", readS.ok === true && readS.resolved.projectRoot === sessionProject && readS.resolved.rootSource === "session");
+	check("odoo_config read reports the effective spec directory", readS.resolved.specDir.startsWith(join(sessionProject, "specs")));
+	check("odoo_config read reports the config file it used", readS.resolved.configFile === join(sessionProject, ".sdd", "config.json"));
+	check("odoo_config read names the specs location", /Specs location:/.test(readS.detail));
+
+	// No config BLEED: another folder's .sdd/config.json must not apply to the
+	// session's project just because the process happens to run from there.
+	const foreignCwd = join(dir, "foreign-cwd");
+	mkdirSync(join(foreignCwd, ".sdd"), { recursive: true });
+	writeFileSync(
+		join(foreignCwd, ".sdd", "config.json"),
+		JSON.stringify({ projectRoot: join(dir, "some-other-project"), autonomy: "autonomous", executeAllowlist: ["res.partner"] }, null, 2),
+		{ mode: 0o600 },
+	);
+	const previousCwd = process.cwd();
+	try {
+		process.chdir(foreignCwd);
+		const readBleed = await cfgS.execute({ mode: "read" }, execS);
+		check("another folder's config does not bleed into the session project", readBleed.config.autonomy === "supervised" && readBleed.resolved.projectRoot === sessionProject);
+		check("the foreign config is not reported as the session's config file", readBleed.resolved.configFile === join(sessionProject, ".sdd", "config.json"));
+	} finally {
+		process.chdir(previousCwd);
+	}
+
+	// The native approval seam must be reachable through the optional read.
+	approvalRequests.length = 0;
+	const authS = await setupS.execute({ mode: "authorize" }, execS);
+	check("native approval is reachable on a cordis-shaped context", approvalRequests.length === 1 && authS.status === "authorized");
+
+	// --- central mode, configured THROUGH the tool and surviving a restart ---
+	const centralProject = join(dir, "central-project");
+	mkdirSync(centralProject, { recursive: true });
+	const centralSpecsRoot = join(dir, "central-specs");
+	const projectFolder = join(centralSpecsRoot, specLoc.projectSlug(centralProject));
+	plugin.apply(fakeCtx, { projectRoot: centralProject });
+	const cfgC = registered.get("odoo_config");
+	const setC = await cfgC.execute({ mode: "set", specsMode: "central", specsRoot: centralSpecsRoot }, { callId: "call-set" });
+	check("mode=set persists the central layout", setC.ok === true && setC.config.specsMode === "central" && setC.config.specsRoot === centralSpecsRoot);
+	const cfgFile = join(centralProject, ".sdd", "config.json");
+	check("the central layout is written to the project's config file", existsSync(cfgFile));
+	const readBeforeInit = await cfgC.execute({ mode: "read" });
+	check("a read-only operation does not create the central project folder", !existsSync(projectFolder));
+	check("odoo_config read resolves the central spec dir", readBeforeInit.resolved.specDir.startsWith(projectFolder));
+
+	// Re-apply as a RESTART would: the layout must now come from the FILE alone.
+	plugin.apply(fakeCtx, { projectRoot: centralProject });
+	const phaseC = registered.get("sdd_phase");
+	const centralExpected = join(projectFolder, "001-central");
+	const initC = await phaseC.execute({ operation: "init", spec_id: "001-central" });
+	check("central mode (restored from the file) writes the spec centrally", existsSync(join(centralExpected, "state.json")));
+	check("central mode leaves the project's specs folder empty", !existsSync(join(centralProject, "specs", "001-central")));
+	check("central mode keeps .sdd (state, credentials, audit) with the PROJECT", existsSync(join(centralProject, ".sdd")) && !existsSync(join(centralExpected, ".sdd")));
+	check("central mode reports where the spec went", initC.detail.includes(centralExpected) && /central/.test(initC.detail));
+	const readC = await cfgC.execute({ mode: "read" });
+	check("odoo_config read reports the EFFECTIVE central layout", readC.config.specsMode === "central" && readC.config.specsRoot === centralSpecsRoot);
+	check("the same spec id resolves identically on re-read", readC.resolved.specDir === centralExpected);
+
+	// Switching back to project mode must place the next spec inside the project.
+	const backProject = await cfgC.execute({ mode: "set", specsMode: "project" }, { callId: "call-back" });
+	check("mode=set can switch back to project layout", backProject.ok === true && backProject.config.specsMode === "project");
+	const initBack = await phaseC.execute({ operation: "init", spec_id: "002-back" });
+	check("project layout is restored on the next call", initBack.detail.includes(join(centralProject, "specs", "002-back")));
+}
+
+// ---- real cordis host: services are only readable via the optional API -----
+// The unit tests above use plain-object contexts. This section mounts the
+// plugin in a REAL cordis Context with real Service subclasses, because that is
+// where `ctx.<service>` THROWS for anything not declared in `inject` — the exact
+// trap that silently disabled the session root (and the native approval seam)
+// before `optionalService` was introduced.
+console.log("== real cordis host: optional services ==");
+{
+	let cordis = null;
+	try {
+		cordis = await import("@deepseek-ai/cordis");
+	} catch {
+		cordis = null;
+	}
+	if (cordis === null) {
+		console.log("  SKIP  @deepseek-ai/cordis is not installed (run npm run host:deps)");
+	} else {
+		const { Context, Service } = cordis;
+		const hostRoot = join(dir, "cordis-host-project");
+		mkdirSync(join(hostRoot, ".sdd"), { recursive: true });
+		const tools = new Map();
+		const guards = [];
+		const approvalAsks = [];
+
+		class ToolsService extends Service {
+			constructor(ctx) {
+				super(ctx, "tools");
+				this.registry = tools;
+				this.guards = guards;
+			}
+			register(tool) { this.registry.set(tool.name, tool); }
+			guard(fn) { this.guards.push(fn); return () => {}; }
+		}
+		class SkillsService extends Service {
+			constructor(ctx) { super(ctx, "skills"); this.registered = []; }
+			register(skill) { this.registered.push(skill); }
+		}
+		class SessionsService extends Service {
+			constructor(ctx) {
+				super(ctx, "sessions");
+				this.entries = new Map([["s-real", { header: { cwd: hostRoot } }]]);
+			}
+			get(id) { return this.entries.get(id); }
+		}
+		class ApprovalService extends Service {
+			constructor(ctx) { super(ctx, "approval"); }
+			async request(req) { approvalAsks.push(req); return "allowed-once"; }
+		}
+
+		const ctx = new Context();
+		ctx.plugin(ToolsService);
+		ctx.plugin(SkillsService);
+		ctx.plugin(SessionsService);
+		ctx.plugin(ApprovalService);
+		// `ctx.plugin` returns a thenable fiber: the plugin only APPLIES once it
+		// is awaited (or the fiber is otherwise activated).
+		await ctx.plugin({ name: plugin.name, inject: plugin.inject, apply: (c, cfg) => plugin.apply(c, cfg) }, { projectRoot: hostRoot });
+
+		check("the plugin mounts on a real cordis host", tools.size === 13);
+
+		// The premise: inside a plugin that did NOT inject the service, the
+		// property read throws (this is what silently disabled the session root).
+		let premise = null;
+		await ctx.plugin({
+			name: "premise-probe",
+			inject: ["tools"],
+			apply(c) {
+				try { void c.sessions; } catch (err) { premise = String(err && err.message); }
+			},
+		});
+		check("premise holds: ctx.<service> throws without inject", /without inject/.test(String(premise)));
+
+		const execReal = { agent: { id: "s-real" }, callId: "call-real" };
+		const readReal = await tools.get("odoo_config").execute({ mode: "read" }, execReal);
+		check("the session cwd is read through the optional service API", readReal.resolved.rootSource === "session" && readReal.resolved.projectRoot === hostRoot);
+
+		const initReal = await tools.get("sdd_phase").execute({ operation: "init", spec_id: "001-real" }, execReal);
+		check("a real-cordis run writes into the session project", existsSync(join(hostRoot, "specs", "001-real", "state.json")));
+		check("the real-cordis run reports the root and provenance", initReal.detail.includes(hostRoot) && /session cwd/.test(initReal.detail));
+
+		writeFileSync(
+			join(hostRoot, ".sdd", ".env"),
+			"ODOO_URL=http://localhost:8069\nODOO_DB=dev\nODOO_USERNAME=admin\nODOO_PASSWORD=x\n",
+			{ mode: 0o600 },
+		);
+		const authReal = await tools.get("odoo_setup").execute({ mode: "authorize" }, execReal);
+		check("the native approval seam is reachable on a real cordis host", approvalAsks.length === 1 && authReal.status === "authorized");
+
+		// A host WITHOUT a session store must still work, on the configured root.
+		const bareRoot = join(dir, "cordis-bare-project");
+		mkdirSync(bareRoot, { recursive: true });
+		const bareCtx = new Context();
+		bareCtx.plugin(ToolsService);
+		bareCtx.plugin(SkillsService);
+		await bareCtx.plugin({ name: plugin.name, inject: plugin.inject, apply: (c, cfg) => plugin.apply(c, cfg) }, { projectRoot: bareRoot });
+		const bareRead = await tools.get("odoo_config").execute({ mode: "read" }, { agent: { id: "ghost" } });
+		check("a host with no session store falls back and says so", bareRead.resolved.rootSource === "config" && bareRead.resolved.projectRoot === bareRoot);
+	}
 }
 
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);

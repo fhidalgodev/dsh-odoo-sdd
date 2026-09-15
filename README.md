@@ -62,6 +62,37 @@ chat, or an auto-committer.
   the `tools` service the plugin refuses to mount with an explicit error
   instead of booting broken (fail-closed, like the market itself).
 
+## Platform support
+
+The plugin runs wherever DSH does and claims **Linux, macOS and Windows** — a
+claim the CI matrix tests rather than asserts (`ubuntu-latest` **and**
+`windows-latest`, on Node 20 and 22).
+
+| Concern | Behaviour |
+| --- | --- |
+| Paths | `module_dir` and an explicit root accept POSIX (`/opt/odoo`) and Windows (`C:\odoo`, UNC) spellings; an absolute path is never concatenated under the project root. Reports use the platform separator. |
+| `.env` permissions | The file is requested as owner-only (0600) and the plugin **re-stats after `chmod`**: on a filesystem that cannot express mode bits (Windows, FAT/exFAT, some mounts) it says "owner-only mode requested" and adds a note instead of pretending the file is private. On a real POSIX filesystem, a loose mode that cannot be tightened is still refused (fail-closed). |
+| Atomic writes | State files are written to a sibling temp file and renamed into place, retrying `EPERM`/`EACCES`/`EBUSY` with a bounded backoff — the case where Windows refuses the rename because an editor, indexer or antivirus holds an open handle. |
+| Project root | Resolved per call from the **session's folder**; an absolute root never falls back to the process cwd unless nothing else is known, and that fallback is reported as `LAST RESORT`. |
+| Symlinks | A checkpoint never follows a symlink out of the tree, and the smoke test skips its symlink assertions where the OS or the user privileges forbid creating one — it reports the skip instead of passing silently. |
+
+### Where specs live
+
+The project root is the folder open in the current session, so it is not a
+plugin-wide setting. Spec documents follow it:
+
+- **project layout** (default): `<projectRoot>/<specsDir>/<specId>` — specs
+  travel with the code.
+- **central layout** (Settings → Odoo SDD → Specs): every project's specs are
+  collected under one folder as `<specsRoot>/<projectSlug>/<specId>`, each
+  project's subfolder carrying a `.dsh-project-root` marker, plus a hash suffix
+  when two projects share a directory name.
+
+`.sdd/` (config, credentials, grants, audit, checkpoints, active run) always
+stays with the project. `odoo_config mode=read` reports the resolved root, its
+provenance, the specs base, the effective spec directory and the config file
+path, and `sdd_phase status` echoes the same locations.
+
 ## Use this package
 
 ### 1. Configure credentials (once per project)
@@ -145,10 +176,12 @@ dsh plugin --profile odoo add .
 These are exactly the steps [CI](.github/workflows/ci.yml) runs, so a local
 `npm run typecheck && npm test` reproduces the pipeline.
 
-Optional configuration via the patch layer (`cordis.patch.yml`): `projectRoot`
-(workspace root) and `specsDir` (specs folder, default `specs/`). The remaining
-fields (execution allowlist, repositories, autonomy, licensing, the policy
-guards) can be set with the `odoo_config` tool or in
+Optional configuration via the patch layer (`cordis.patch.yml`): `specsMode`
+(`project` or `central`), `specsRoot` (the central folder), `specsDir` (project
+layout folder, default `specs/`) and `projectRoot` — a **fallback** used only
+when the calling session reports no folder (headless/CI). The remaining fields
+(execution allowlist, repositories, autonomy, licensing, the policy guards, the
+documentation gate) can be set with the `odoo_config` tool or in
 **Settings → Odoo SDD**.
 
 ### 3. Registered tools (model-facing)
@@ -159,10 +192,10 @@ guards) can be set with the `odoo_config` tool or in
 | `odoo_setup` | Onboarding: `check` (cascade + gitignore + delegation mode), `interactive` (secret-free chmod-600 scaffold), **`authorize`** (ask the DEVELOPER, through native approval, for a connection grant bound to the current url/db/user), **`revoke`** (drop the grants), **`purge`** (plan first, then — with `confirm_destructive=true` plus human approval — remove only the plugin's own state under `.sdd/`), `later`, `skip`, `reset`, `autonomy` (supervised \| autonomous, human-approved). Secrets are never accepted as parameters. |
 | `odoo_module` | `info` / `install` / `upgrade` on `ir.module.module` (`button_immediate_*`). Returns the server's own output or traceback, redacted — the closed feedback loop. |
 | `odoo_execute` | Generic CRUD/RPC (`execute_kw`) with a fail-closed allowlist. Methods are classified explicitly and an unclassified one is refused: reads (`search_read`, `read`, `search_count`, `read_group`, `fields_get`) are allowed, mutations (`create`/`write`/`unlink`) require `confirm_destructive=true` AND the model in `executeAllowlist`, and are journaled so the data undo can replay them. `context` is forwarded verbatim — use `allowed_company_ids`/`company_id` on multi-company instances — and the server still applies its own ACL. No instance needed to evaluate denials. |
-| `odoo_validate` | LOCAL, instance-free module structure check: `__manifest__.py` present + depends, declared data XML files exist, `security/ir.model.access.csv` when models declared. Returns file:line findings. |
+| `odoo_validate` | LOCAL, instance-free module structure check: `__manifest__.py` present + depends, declared data XML files exist, `security/ir.model.access.csv` when models declared. Returns file:line findings plus the `module_dir` and project root it resolved (a relative path is resolved against the session's folder, never the process cwd). |
 | `odoo_errors` | Reads recent `ir.logging` server errors — the remote equivalent of fetching environment logs. |
 | `odoo_session` | Mints a passwordless web session (the `connect_as_user` pattern) stored in `.sdd/session.json` (chmod 600) for Playwright UI tests. The cookie itself is never returned. |
-| `sdd_phase` | The phase state machine: `init`, `status` (includes logbook summary), `mark_spec_loaded`, `advance` (fail-closed gates + `approval_source` provenance), `fail` (failure ladder + FAILED verdict), `succeed` (PASSED verdict), `rollback` (restore a checkpoint and return to WRITE_CODE). |
+| `sdd_phase` | The phase state machine: `init`, `status` (includes logbook summary, the spec directory and the specs location), `mark_spec_loaded`, `advance` (fail-closed gates + `approval_source` provenance), `fail` (failure ladder + FAILED verdict), `succeed` (PASSED verdict), `rollback` (restore a checkpoint and return to WRITE_CODE). |
 | `sdd_checkpoint` | The rollback surface: `create` (snapshots the workspace, becomes the active checkpoint), `list`, `restore` (files, plus — with `restore_data=true` and `confirm_destructive=true` — the journaled data mutations; it always REPORTS files created after the checkpoint and deletes them only with `remove_created=true`), `drop`, `journal`. |
 | `odoo_docs` | Documentation for a module, usable **on its own** (no spec, phase, checkpoint or instance), so an existing module can simply be documented: `check` (OCA fragments mapped to Diátaxis, version scheme, changelog, `index.html`, docstrings, xpath comments, OWL directive → ERROR/WARN with `file:line`), `plan`, `scaffold` (create-only skeletons, never overwrites) and `report` (persists `docs-report.md`; APPROVED only when nothing is still a scaffold). The changelog entry is mandatory for any change to a released module. |
 | `odoo_security_scan` | Local static security review (no instance needed): raw SQL by concatenation, `eval`/`exec`/`pickle`, hardcoded secrets, unjustified `sudo()`, `auth="none"`, disabled CSRF, QWeb `t-raw`. Findings carry `file:line` + a fix hint; any ERROR blocks `DONE`. |
@@ -195,7 +228,7 @@ once per project via `odoo_setup mode=autonomy decision=...`:
 | **audit** | `.sdd/audit.jsonl` — sanitized append-only tool-activity log, written by a global `tools/result` listener (not just the Odoo tools) |
 | **rollback** | `.sdd/checkpoints/<id>/` — manifest + file snapshot + data journal, restorable per spec |
 | **security** | `odoo_security_scan` rules + the `security-reviewer` persona + the mandatory security interview in CLARIFY |
-| **test** | `tests/smoke.mjs` — instance-free invariant suite |
+| **test** | `tests/smoke.mjs` — instance-free invariant suite (state machine, security, policy guard, RPC shapes, root/specs layout, real-cordis host contract) + `tests/client.mjs` — browser bundle contract and settings-panel render |
 
 ### 3d. Safety, rollback and traceability
 
@@ -223,7 +256,10 @@ has a way back and a way to prove what happened.
   instead of allowing the call through.
 - **File rollback.** `sdd_checkpoint restore` puts the snapshotted files back
   byte-for-byte; `sdd_phase rollback` returns the spec to `WRITE_CODE` with the
-  failure recorded, so the loop restarts from a known state.
+  failure recorded, so the loop restarts from a known state. A checkpoint
+  snapshots the project tree, so with the **central** specs layout the spec
+  documents (which live outside the project) are deliberately not part of it:
+  the spec is the immutable source of truth, not code to roll back.
 - **Data rollback (best effort).** Every `create`/`write`/`unlink` through
   `odoo_execute` records its pre-image in the checkpoint journal, stamped with
   the database it was applied to; `restore restore_data=true
@@ -317,7 +353,9 @@ and `apply(ctx, config)`, registering each tool with `defineTool` from
 | `src/audit.ts` | Sanitized append-only audit log (`.sdd/audit.jsonl`) and the `withAudit` wrapper |
 | `src/setup-state.ts` | Onboarding decision + delegation mode persistence (`.sdd/setup-state.json`) |
 | `src/grants.ts` | Human authorization receipts (`.sdd/grants.json`), fingerprint-bound and fail-closed |
-| `src/atomic.ts` | Atomic writes and corruption quarantine + recovery reporting |
+| `src/atomic.ts` | Atomic writes (rename with a bounded retry on `EPERM`/`EACCES`/`EBUSY`) and corruption quarantine + recovery reporting |
+| `src/paths.ts` | Cross-platform `module_dir` resolution (absolute on any OS, otherwise relative to the project root) |
+| `src/specs-location.ts` | Where specs live: project vs central layout, session-root resolution with provenance, slug/marker/collision handling |
 | `src/lifecycle.ts` | Ownership inventory and the `purge` primitive (own state only; never `.env`/`stop.md`/`specs/`) |
 | `src/docs-scan.ts` | Documentation rules: OCA fragments + Diátaxis, version scheme, changelog, index.html, docstrings, xpath, OWL |
 | `src/docs-tool.ts` | The `odoo_docs` tool (check/plan/scaffold/report), usable without the pipeline |

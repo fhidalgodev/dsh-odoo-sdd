@@ -10,11 +10,17 @@
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
+import { resolveModuleDir } from "./paths.js";
 
 /** Live dependencies provided by the registrant. */
 export interface RuntimeDeps {
-	/** Resolve and cache an OdooClient instance, or null when unconfigured. */
-	client(): {
+	/**
+	 * Resolve and cache an OdooClient instance, or null when unconfigured.
+	 * Receives the calling execution so the client — and therefore the
+	 * credentials, the connection grant and the audit trail — belong to the
+	 * SESSION's project rather than to a plugin-wide setting.
+	 */
+	client(exec?: unknown): {
 		client: {
 			executeKw<T>(
 				model: string,
@@ -29,19 +35,22 @@ export interface RuntimeDeps {
 	};
 	/** Effective onboarding status, used in remediation text. */
 	status(projectRoot: string): { detail: string };
-	/** Deployment config resolution. */
-	projectRoot: string;
+	/** Project root the call acts on, resolved from the calling session. */
+	projectRoot(exec?: unknown): string;
 	/** Models allowed for MUTATING calls, resolved AT CALL TIME (live config). */
-	allowlist(): string[];
+	allowlist(exec?: unknown): string[];
 	/** Journal one applied mutation for the checkpoint rollback (best-effort). */
-	recordDataOp?(op: {
-		model: string;
-		method: "create" | "write" | "unlink";
-		ids: number[];
-		preImage: Array<Record<string, unknown>>;
-		createdIds: number[];
-		context?: Record<string, unknown>;
-	}): void;
+	recordDataOp?(
+		op: {
+			model: string;
+			method: "create" | "write" | "unlink";
+			ids: number[];
+			preImage: Array<Record<string, unknown>>;
+			createdIds: number[];
+			context?: Record<string, unknown>;
+		},
+		exec?: unknown,
+	): void;
 	/** Path/display masking helper. */
 	display(pathValue: string): string;
 	/**
@@ -49,7 +58,10 @@ export interface RuntimeDeps {
 	 * The host's own result listener only sees transport success, so without
 	 * this a server error would be audited as `ok`.
 	 */
-	auditFailure?(info: { tool: string; op: string; callId?: string; reason: string }): void;
+	auditFailure?(
+		info: { tool: string; op: string; callId?: string; reason: string },
+		exec?: unknown,
+	): void;
 }
 
 /**
@@ -140,7 +152,7 @@ export function registerRuntimeTools(
 				return [{ type: "text", text: detail === "" ? v.reason : `${v.reason}\n\n${detail}` }];
 			},
 		},
-		async execute(args: unknown, exec?: { callId?: unknown; signal?: unknown }) {
+		async execute(args: unknown, exec?: { callId?: unknown; signal?: unknown; agent?: unknown }) {
 			const a = args as {
 				model: string;
 				method: string;
@@ -187,7 +199,7 @@ export function registerRuntimeTools(
 				if (a.confirm_destructive !== true) {
 					return { denied: true, reason: "Mutating call requires confirm_destructive=true.", result: "" };
 				}
-				if (!deps.allowlist().includes(model)) {
+				if (!deps.allowlist(exec).includes(model)) {
 					return {
 						denied: true,
 						reason: `Model "${model}" is not allowlisted for mutations — add it via odoo_config mode=set executeAllowlist=[...] or run read-only.`,
@@ -249,7 +261,7 @@ export function registerRuntimeTools(
 			}
 
 			if (callContext !== undefined) callKwargs["context"] = callContext;
-			const { client, report } = deps.client();
+			const { client, report } = deps.client(exec);
 			if (client === null) {
 				// `report` carries the real reason: NOT CONFIGURED (missing
 				// credentials) or NOT AUTHORIZED (no live human grant).
@@ -282,7 +294,7 @@ export function registerRuntimeTools(
 					op: `${model}.${method}`,
 					...(typeof exec?.callId === "string" ? { callId: exec.callId } : {}),
 					reason: `SERVER ERROR: ${String(rpc.error).slice(0, 500)}`,
-				});
+				}, exec);
 				return { denied: false, reason: "SERVER ERROR — RPC call failed", result: rpc.error };
 			}
 
@@ -297,7 +309,7 @@ export function registerRuntimeTools(
 					preImage,
 					createdIds,
 					...(callContext !== undefined ? { context: callContext } : {}),
-				});
+				}, exec);
 			}
 
 			return { denied: false, reason: `${model}.${method} OK`, result: JSON.stringify(rpc.value).slice(0, 4000) };
@@ -325,6 +337,8 @@ export function registerRuntimeTools(
 					valid: { type: "boolean", required: true },
 					findings: { type: "array", required: true, items: { type: "object", additionalProperties: true } },
 					detail: { type: "string", required: true },
+					moduleDir: { type: "string", required: true },
+					projectRoot: { type: "string", required: true },
 				},
 			},
 			render: (_args: unknown, value: unknown) => {
@@ -332,14 +346,25 @@ export function registerRuntimeTools(
 				return [{ type: "text", text: v.detail }];
 			},
 		},
-		async execute(args: { module_dir: string }) {
-			const moduleDir = args.module_dir.trim();
+		async execute(args: { module_dir: string }, exec?: unknown) {
+			// Absolute (POSIX or Windows) as given; relative against the project
+			// root OF THE CALLING SESSION, never against the process cwd.
+			const projectRoot = deps.projectRoot(exec);
+			const moduleDir = resolveModuleDir(args.module_dir, projectRoot);
 			const moduleName = basename(moduleDir);
 			const manifestPath = join(moduleDir, "__manifest__.py");
 			const findings: Array<{ severity: string; file: string; message: string }> = [];
 			if (!existsSync(manifestPath)) {
 				findings.push({ severity: "ERROR", file: manifestPath, message: "__manifest__.py not found." });
-				return { valid: false, findings, detail: "No __manifest__.py — invalid module." };
+				return {
+					valid: false,
+					findings,
+					detail:
+						"No __manifest__.py — invalid module.\n" +
+						`Resolved module_dir: ${deps.display(moduleDir)} (project root: ${deps.display(projectRoot)})`,
+					moduleDir,
+					projectRoot,
+				};
 			}
 			const manifestText = readFileSync(manifestPath, "utf8");
 			if (!/'depends'\s*:/.test(manifestText)) {
@@ -465,10 +490,12 @@ export function registerRuntimeTools(
 			}
 
 			const errors = findings.filter((f) => f.severity === "ERROR").length;
-			const detail = findings.length === 0
+			const resolved = `Resolved module_dir: ${deps.display(moduleDir)} (project root: ${deps.display(projectRoot)})`;
+			const detail = (findings.length === 0
 				? `Module structure and security model OK (${newModels.length} new model(s), ACL present=${aclExists}).`
-				: `${errors} ERROR(s), ${findings.length - errors} WARNING(s) — ${newModels.length} new model(s). Review findings.`;
-			return { valid: errors === 0, findings, detail };
+				: `${errors} ERROR(s), ${findings.length - errors} WARNING(s) — ${newModels.length} new model(s). Review findings.`) +
+				`\n${resolved}`;
+			return { valid: errors === 0, findings, detail, moduleDir, projectRoot };
 		},
 	}));
 }

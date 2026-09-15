@@ -7,6 +7,10 @@
 # The profile's own cordis.patch.yml may override `config` by row id
 # (`odoo-sdd`) — e.g. to set a concrete projectRoot or allowlist.
 #
+# projectRoot is only a FALLBACK: the effective root of a call is the cwd of
+# the session that makes it (the folder the developer opened in DSH). The
+# deployment value applies to hosts/contexts with no session (headless, CI).
+#
 # Security: executeAllowlist defaults to EMPTY, so odoo_execute mutations
 # (create/write/unlink) are denied until the deployment lists models.
 
@@ -15,6 +19,11 @@
       name: 'dsh-odoo-sdd'
       config:
         projectRoot: ''
+        # Where specs live: 'project' = <projectRoot>/<specsDir>, one set of
+        # specs per repository; 'central' = every project's specs collected
+        # under specsRoot, each project in its own subfolder.
+        specsMode: 'project'
+        specsRoot: ''
         specsDir: 'specs'
         executeAllowlist: []
         # Odoo source repositories: URL or local OS path (empty path = use URL).

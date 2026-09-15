@@ -6,11 +6,19 @@ on:
   pull_request:
 
 jobs:
-  # Main matrix: the contract with the CURRENT host, on both supported Node lines.
+  # Main matrix: the contract with the CURRENT host, on both supported Node lines
+  # and both supported operating systems. The plugin claims cross-platform
+  # support, so the claim is TESTED rather than asserted in a README: Windows
+  # differs in POSIX mode bits (chmod is only a read-only flag), in rename
+  # semantics (an open handle makes MoveFileEx fail with EPERM/EBUSY, which the
+  # atomic writer retries) and in path separators.
   build-test:
-    runs-on: ubuntu-latest
+    name: build-test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         node: [20, 22]
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +49,7 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Smoke tests (state machine + security invariants)
+      - name: Tests (server invariants + real-cordis host contract + client bundle)
         run: npm test
 
       # Guards the class of bug that only shows up AFTER installation: a file
@@ -80,5 +88,5 @@ jobs:
       - name: Build against the floor
         run: npm run build
 
-      - name: Smoke tests against the floor
+      - name: Tests against the floor
         run: npm test

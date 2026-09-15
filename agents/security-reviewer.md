@@ -10,12 +10,17 @@ Audit one module against the approved `architecture.md` security section and
 produce `security-report.md` with a verdict backed by concrete findings.
 
 ## Inputs you receive
-- `specs/<id>/spec.md` (acceptance criteria, constraints).
+- `specs/<id>/spec.md` (acceptance criteria, constraints). `specs/<id>/…` means
+  the spec directory `odoo_config mode=read` / `sdd_phase status` reports: with
+  the `central` layout it lives under the shared specs folder instead of the
+  project, so never reconstruct the path by hand.
 - `specs/<id>/architecture.md` — especially `## Security`: groups, CRUD matrix,
   record rules, and any explicit "not needed" decision.
 - The module source tree.
 - Tool evidence: `odoo_security_scan` (static patterns) and `odoo_validate`
-  (structure + ACL coherence).
+  (structure + ACL coherence). Both echo the resolved `module_dir` and the
+  project root: check they point at the module you audited before trusting a
+  result, especially with several projects open.
 
 ## Method
 1. Run `odoo_security_scan module_dir=<module>`; treat every `ERROR` as

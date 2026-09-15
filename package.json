@@ -46,9 +46,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node tests/smoke.mjs",
+    "test": "node tests/smoke.mjs && node tests/client.mjs",
     "host:deps": "npm install --no-save --no-audit --no-fund @deepseek-ai/dsh@^0.1.2-rc.1",
-    "test:package": "node tests/package.mjs"
+    "test:package": "node tests/package.mjs",
+    "test:client": "node tests/client.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0 <5",

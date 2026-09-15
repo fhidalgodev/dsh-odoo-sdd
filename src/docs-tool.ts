@@ -21,6 +21,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { resolveModuleDir } from "./paths.js";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import {
 	README_FRAGMENTS,
@@ -38,8 +39,16 @@ import { resolveDocsLanguage, type ResolvedLanguage } from "./project-convention
 
 /** Live dependencies provided by the registrant. */
 export interface DocsToolDeps {
-	/** Workspace root, used to read the project's own documentation rules. */
-	projectRoot(): string;
+	/**
+	 * Project root of the CALLING SESSION, used to resolve a relative
+	 * `module_dir` and to read the project's own documentation rules.
+	 */
+	projectRoot(exec?: unknown): string;
+	/**
+	 * Absolute spec directory for an id, honouring the configured layout
+	 * (inside the project, or inside the central specs folder).
+	 */
+	specDir(specId: string, exec?: unknown): string;
 	/** Documentation language from the plugin configuration (may be empty). */
 	configuredLanguage(): string;
 	/** Path masking helper for display. */
@@ -153,13 +162,14 @@ export function registerDocsTool(
 			mode?: ChangeMode;
 			language?: string;
 			spec_id?: string;
-		}) {
-			const moduleDir = args.module_dir.trim();
+		}, exec?: unknown) {
+			const projectRoot = deps.projectRoot(exec);
+			const moduleDir = resolveModuleDir(args.module_dir, projectRoot);
 			const moduleName = basename(moduleDir);
 			const mode: ChangeMode = args.mode === "bug" ? "bug" : "create";
 			const resolved: ResolvedLanguage = resolveDocsLanguage({
 				explicit: args.language,
-				projectRoot: deps.projectRoot(),
+				projectRoot,
 				configured: deps.configuredLanguage(),
 			});
 			const language = resolved.language === "" ? DEFAULT_LANGUAGE : resolved.language;
@@ -174,6 +184,10 @@ export function registerDocsTool(
 							? "from the plugin configuration"
 							: "default (English until something says otherwise)";
 
+			// Reporting the resolved paths is what keeps the model from guessing
+			// which project (and which folder) the run actually touched.
+			const location = `Resolved module_dir: ${deps.display(moduleDir)}\nProject root: ${deps.display(projectRoot)}`;
+
 			// ---- check -------------------------------------------------------
 			if (args.operation === "check") {
 				const scan = scanDocs(moduleDir, { mode, language });
@@ -183,7 +197,9 @@ export function registerDocsTool(
 					findings: jsonFindings(scan.findings),
 					summary: summarizeDocs(scan),
 					artifacts,
-					detail: formatFindings(scan, `Documentation check — ${moduleName} (mode=${mode}, language=${language} ${provenance})`, deps),
+					detail:
+						formatFindings(scan, `Documentation check — ${moduleName} (mode=${mode}, language=${language} ${provenance})`, deps) +
+						`\n\n${location}`,
 				};
 			}
 
@@ -193,6 +209,7 @@ export function registerDocsTool(
 				const lines: string[] = [];
 				lines.push(`Documentation plan — ${moduleName}`);
 				lines.push(`Language: ${language} (${provenance}). Mode: ${mode}.`);
+				lines.push(location.replace("\n", " — "));
 				lines.push("");
 				lines.push("Diátaxis coverage (OCA readme fragments):");
 				for (const fragment of README_FRAGMENTS) {
@@ -230,7 +247,7 @@ export function registerDocsTool(
 						findings: [],
 						summary: "not a module directory",
 						artifacts,
-						detail: `${moduleDir} has no __manifest__.py — refusing to write documentation into a non-module directory.`,
+						detail: `${moduleDir} has no __manifest__.py — refusing to write documentation into a non-module directory.\n\n${location}`,
 					};
 				}
 				const created: string[] = [];
@@ -277,7 +294,8 @@ export function registerDocsTool(
 						"\n\nEvery generated fragment carries a scaffold marker: it is a STARTING POINT, not documentation. " +
 						"Replace the content and remove the marker. Write each changelog entry yourself " +
 						`(${NEWSFRAGMENTS_DIR}/<issue>.<type>) — only you know what changed and for whom.\n\n` +
-						summarizeDocs(scan),
+						summarizeDocs(scan) +
+						`\n\n${location}`,
 				};
 			}
 
@@ -294,6 +312,8 @@ export function registerDocsTool(
 			body.push("");
 			body.push(`- Language: ${language} (${provenance})`);
 			body.push(`- Change mode: ${mode}`);
+			body.push(`- Module directory: ${moduleDir}`);
+			body.push(`- Project root: ${projectRoot}`);
 			body.push(`- Manifest version: ${manifestVersion(readManifest(moduleDir) ?? "") ?? "(none)"}`);
 			body.push(`- Fragments present: ${scan.present.length}/${README_FRAGMENTS.length}${scan.scaffolded.length > 0 ? ` (${scan.scaffolded.length} still scaffolded)` : ""}`);
 			body.push(`- Changelog entry required: ${scan.changelogRequired ? "yes" : "no"}`);
@@ -321,7 +341,7 @@ export function registerDocsTool(
 					detail: `${text}\n\nNo spec_id given: the report was returned but NOT written. Pass spec_id to persist it at specs/<id>/docs-report.md.`,
 				};
 			}
-			const specDir = join(deps.projectRoot(), "specs", args.spec_id.trim());
+			const specDir = deps.specDir(args.spec_id.trim(), exec);
 			if (!existsSync(specDir)) {
 				return {
 					ok: false,

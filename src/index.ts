@@ -36,6 +36,7 @@ import {
 	credentialCandidates,
 	targetEnvPath,
 	parseInstanceUrl,
+	ensureSecurePermissions,
 	type OdooCredentials,
 } from "./credentials.js";
 import {
@@ -48,6 +49,18 @@ import {
 	type SetupStatus,
 } from "./setup-state.js";
 import { writeFileAtomic } from "./atomic.js";
+import { resolveModuleDir } from "./paths.js";
+import {
+	asSpecsMode,
+	describeSpecsLocation,
+	resolveRoot,
+	sessionCwdOf,
+	specDirFor,
+	specsBaseFor,
+	type ResolvedRoot,
+	type RootSource,
+	type SpecsLayout,
+} from "./specs-location.js";
 import { purgeOwnedState, purgePlan, PRESERVED } from "./lifecycle.js";
 import { withAudit } from "./audit.js";
 import { registerRuntimeTools } from "./tools-runtime.js";
@@ -91,7 +104,7 @@ import {
 	type Phase,
 	PHASES,
 } from "./sdd-state.js";
-import { join, resolve, dirname, isAbsolute } from "node:path";
+import { join, resolve, dirname, isAbsolute, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 
@@ -105,6 +118,8 @@ export const inject = ["tools", "skills"];
  * Schemastery convention: a property WITHOUT `.required()` is optional. */
 export const Config = z.object({
 	projectRoot: z.string(),
+	specsMode: z.string(),
+	specsRoot: z.string(),
 	specsDir: z.string(),
 	executeAllowlist: z.array(z.string()),
 	communityRepoUrl: z.string(),
@@ -124,7 +139,18 @@ export const Config = z.object({
 
 /** Effective deployment configuration after validation. */
 interface OdooSddConfig {
+	/**
+	 * Fallback project root: used ONLY when the calling session has no cwd
+	 * (headless/CI) or when a tool call names one explicitly. The primary
+	 * answer is always the session's own folder, which is why the Settings
+	 * panel no longer exposes this as an editable field.
+	 */
 	projectRoot?: string;
+	/** Where specs live: "project" (default) or "central". */
+	specsMode?: string;
+	/** Absolute folder collecting every project's specs in central mode. */
+	specsRoot?: string;
+	/** Folder name inside the project root in project mode (default "specs"). */
 	specsDir?: string;
 	/** Models permitted for MUTATING calls (create/write/unlink) on odoo_execute. Empty = denied. */
 	executeAllowlist?: string[];
@@ -187,20 +213,27 @@ function baseRoot(config: OdooSddConfig): string {
 }
 
 /**
- * Resolve a spec directory, given the EFFECTIVE project root and specs dir.
- * Taking them as arguments (instead of re-deriving from the deployment config)
- * is what keeps specs next to the project rather than next to the process cwd.
+ * Resolve a spec directory, given the EFFECTIVE project root and layout.
+ * Kept as a thin wrapper so every call site reads from the same validated
+ * layout object (project vs central) instead of re-deriving paths by hand.
  */
-function specDirOf(projectRoot: string, specsDir: string | undefined, specId: string): string {
-	// An unvalidated spec id could escape the specs root (traversal). Reject it
-	// fail-closed: map to a neutral dir so nothing real is created/read.
-	const safe = isSafeSegment(specId) ? specId : "__invalid__";
-	// An absolute specsDir must not be concatenated under the root: `join(root,
-	// '/abs')` yields `<root>/abs`, which is how specs ended up in a bogus
-	// /tmp/home/... tree.
-	const dir = specsDir ?? "specs";
-	const base = isAbsolute(dir) ? dir : join(projectRoot, dir);
-	return join(base, safe);
+function specDirOf(
+	projectRoot: string,
+	specsDir: string | undefined,
+	specId: string,
+	layout?: { specsMode?: string; specsRoot?: string },
+	opts?: { create?: boolean },
+): string {
+	return specDirFor(
+		{
+			projectRoot,
+			specsMode: asSpecsMode(layout?.specsMode),
+			specsDir: specsDir ?? "specs",
+			specsRoot: layout?.specsRoot ?? "",
+		},
+		specId,
+		opts,
+	);
 }
 
 /** Outcome of a host approval request (mirrors @deepseek-ai/dsh-user-approval). */
@@ -224,6 +257,40 @@ function callIdOf(exec: unknown): string | undefined {
 }
 
 /**
+ * Read an OPTIONAL host service, whether or not it was declared in `inject`.
+ *
+ * Verified against cordis: `ctx.<name>` THROWS `cannot get property "<name>"
+ * without inject` for any service the plugin did not declare, so a naive
+ * property read silently degrades (or breaks the call). Declaring the service
+ * in `inject` is not an option either: it would make the whole plugin refuse to
+ * mount on a host that does not provide it. `ctx.get(name, false)` is cordis's
+ * documented non-throwing read; plain objects (test doubles, minimal hosts) get
+ * the property read as a second chance. Either way this never throws.
+ * @param ctx - plugin context.
+ * @param name - service name (e.g. "sessions", "approval").
+ * @returns the service, or undefined when the host does not provide it.
+ */
+function optionalService(ctx: unknown, name: string): unknown {
+	if (ctx === null || typeof ctx !== "object") return undefined;
+	try {
+		const api = (ctx as { get?: (n: string, strict?: boolean) => unknown }).get;
+		if (typeof api === "function") {
+			const value = api.call(ctx, name, false);
+			if (value !== undefined && value !== null) return value;
+		}
+	} catch {
+		// fall through to the property read
+	}
+	try {
+		const value = (ctx as Record<string, unknown>)[name];
+		return value === null ? undefined : value;
+	} catch {
+		// cordis throws here for a service that was not injected
+		return undefined;
+	}
+}
+
+/**
  * Ask the host's native approval seam for a one-shot human decision.
  *
  * Fail-CLOSED: no `ctx.approval` service, a thrown error, or any outcome other
@@ -243,7 +310,7 @@ async function requestNativeApproval(
 	reason: string,
 ): Promise<ApprovalOutcome> {
 	try {
-		const api = (ctx as { approval?: ApprovalApi }).approval;
+		const api = optionalService(ctx, "approval") as ApprovalApi | undefined;
 		if (api === null || api === undefined || typeof api.request !== "function") return "unavailable";
 		const e = (exec ?? {}) as { agent?: unknown; signal?: unknown };
 		const outcome = await api.request({
@@ -290,7 +357,9 @@ function clientFor(projectRoot: string): {
 	}
 	return {
 		client: new OdooClient(creds),
-		report: describeCredentials(creds),
+		report:
+			describeCredentials(creds) +
+			(loaded.permissionNote === undefined ? "" : ` — NOTE: ${loaded.permissionNote}`),
 		credentials: creds,
 	};
 }
@@ -300,13 +369,35 @@ function moduleRecord(m: { id: number; name: string; state: string; latest_versi
 	return { id: m.id, name: m.name, state: m.state, latest_version: m.latest_version };
 }
 
+/**
+ * One line naming the project root every tool call acted on and WHERE that
+ * root came from. Reported on every tool result so "which project am I in?" is
+ * never inferred: with several folders open, a silent wrong root is the most
+ * expensive failure mode this plugin can have.
+ * @param root - the resolved root plus its provenance.
+ * @returns the human-readable note.
+ */
+function rootNote(root: ResolvedRoot): string {
+	const why =
+		root.source === "session"
+			? `session cwd${root.sessionId === undefined ? "" : ` (${root.sessionId})`}`
+			: root.source === "argument"
+				? "explicit argument"
+				: root.source === "config"
+					? "configured fallback — no session cwd available"
+					: "process cwd — LAST RESORT, no session cwd and no configured root";
+	return `Project root: ${displayPath(root.root)} [${why}]`;
+}
+
 /** Effective onboarding status combining the decision marker with credential resolution. */
 function setupStatusFor(projectRoot: string): { status: EffectiveSetupStatus; detail: string } {
 	const loaded = loadCredentials(projectRoot);
 	if (loaded.ok) {
 		return {
 			status: "configured",
-			detail: `Credentials OK (${loaded.credentials.source}): ${describeCredentials(loaded.credentials)}`,
+			detail:
+				`Credentials OK (${loaded.credentials.source}): ${describeCredentials(loaded.credentials)}` +
+				(loaded.permissionNote === undefined ? "" : ` — NOTE: ${loaded.permissionNote}`),
 		};
 	}
 	const marker = readSetupState(projectRoot);
@@ -479,7 +570,13 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		};
 	};
 	const sddsDefaultConfig = {
+		// Kept in the schema for headless/CI hosts, but NOT offered as an
+		// editable field: the project root is resolved per session (the folder
+		// the developer opened), so a plugin-wide value would be wrong for every
+		// project but one.
 		projectRoot: config.projectRoot ?? "",
+		specsMode: config.specsMode ?? "project",
+		specsRoot: config.specsRoot ?? "",
 		specsDir: config.specsDir ?? "specs",
 		executeAllowlist: config.executeAllowlist ?? [],
 		communityRepoUrl: config.communityRepoUrl ?? "https://github.com/odoo/odoo",
@@ -541,13 +638,17 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					target: { type: "string", required: true },
 					serverVersion: { type: "string" },
 					uid: { type: "number" },
+					projectRoot: { type: "string" },
+					rootSource: { type: "string" },
 					detail: { type: "string", required: true },
 				},
 			},
 			render: (_args: unknown, value: unknown) => [text((value as { detail: string }).detail)],
 		},
-		async execute() {
-			const projectRoot = effectiveConfig().projectRoot;
+		async execute(_args: unknown, exec?: unknown) {
+			const root = rootFor(exec);
+			const projectRoot = root.root;
+			const where = { projectRoot, rootSource: root.source as string };
 			const { client, report, credentials } = clientFor(projectRoot);
 			if (client === null) {
 				// Two different situations share a null client:
@@ -555,12 +656,24 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				//    (report says exactly that);
 				//  - no usable credentials => surface the onboarding state
 				//    (NEEDS_SECRET / DEFERRED / SKIPPED / needs-setup).
-				if (credentials !== null) return { connected: false, target: "", detail: report };
-				return { connected: false, target: "", detail: setupStatusFor(projectRoot).detail };
+				if (credentials !== null) {
+					return { connected: false, target: "", detail: `${report}\n${rootNote(root)}`, ...where };
+				}
+				return {
+					connected: false,
+					target: "",
+					detail: `${setupStatusFor(projectRoot).detail}\n${rootNote(root)}`,
+					...where,
+				};
 			}
 			const version = await client.version();
 			if (!version.ok) {
-				return { connected: false, target: client.target, detail: `Instance unreachable: ${version.error}` };
+				return {
+					connected: false,
+					target: client.target,
+					detail: `Instance unreachable: ${version.error}\n${rootNote(root)}`,
+					...where,
+				};
 			}
 			const auth = await client.authenticate();
 			if (!auth.ok) {
@@ -568,7 +681,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					connected: false,
 					target: client.target,
 					serverVersion: version.value.server_version,
-					detail: `Version OK (${version.value.server_version}) but authentication failed: ${auth.error}`,
+					detail: `Version OK (${version.value.server_version}) but authentication failed: ${auth.error}\n${rootNote(root)}`,
+					...where,
 				};
 			}
 			return {
@@ -576,7 +690,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				target: report,
 				serverVersion: version.value.server_version,
 				uid: auth.value.uid,
-				detail: `Connected to ${version.value.server_version} as uid=${auth.value.uid}. Target: ${report}`,
+				detail: `Connected to ${version.value.server_version} as uid=${auth.value.uid}. Target: ${report}\n${rootNote(root)}`,
+				...where,
 			};
 		},
 	}));
@@ -632,6 +747,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					status: { type: "string", required: true },
 					envFile: { type: "string" },
 					gitignoreCovered: { type: "boolean" },
+					permissionsEnforced: { type: "boolean" },
+					projectRoot: { type: "string" },
+					rootSource: { type: "string" },
 					detail: { type: "string", required: true },
 				},
 			},
@@ -646,7 +764,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			decision?: "supervised" | "autonomous";
 			confirm_destructive?: boolean;
 		}, exec?: unknown) {
-			const projectRoot = effectiveConfig().projectRoot;
+			const root = rootFor(exec);
+			const projectRoot = root.root;
 			const autonomyMode = readAutonomy(projectRoot);
 			appendAuditLine(projectRoot, "odoo_setup/" + args.mode, args, clientFor(projectRoot).credentials);
 
@@ -806,6 +925,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					mode: "check" as string,
 					status: setup.status,
 					gitignoreCovered: coverage.covered,
+					projectRoot,
+					rootSource: root.source as string,
 					detail:
 						`Delegation: ${autonomyMode.toUpperCase()}.\n${setup.detail}` +
 						`\nCredential cascade:\n${candidates}\n${gitignoreNote}`,
@@ -919,11 +1040,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				// best effort on filesystems without chmod semantics
 			}
 			writeFileSync(target, scaffold, { mode: 0o600 });
-			try {
-				chmodSync(target, 0o600);
-			} catch {
-				// best effort
-			}
+			// Honest reporting: a chmod that "succeeds" is not proof of effect
+			// (Windows / FAT / bind mounts cannot express POSIX mode bits).
+			const permission = ensureSecurePermissions(target);
 			writeSetupState(projectRoot, {
 				status: "needs-secret",
 				decidedAt: new Date().toISOString(),
@@ -934,15 +1053,24 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const gitignoreNote = coverage.covered
 				? ""
 				: `\nWARNING: .gitignore does not cover ${coverage.missing.join(", ")} — add the entries so the credential file can never be committed.`;
+			const permissionNote =
+				permission.note === undefined ? "" : `\nWARNING: ${permission.note}`;
 			return {
 				mode: "interactive" as string,
 				status: "needs-secret",
 				envFile: displayPath(target),
 				gitignoreCovered: coverage.covered,
+				permissionsEnforced: permission.enforced,
+				projectRoot,
+				rootSource: root.source as string,
 				detail:
-					`Scaffold written at ${displayPath(target)} (chmod 600). Ask the developer to ` +
+					`Scaffold written at ${displayPath(target)} ` +
+					(permission.enforced
+						? "(owner-only mode verified). "
+						: "(owner-only mode requested). ") +
+					"Ask the developer to " +
 					"fill ODOO_PASSWORD directly in that file — never through chat. Then run " +
-					`odoo_connect to validate.${gitignoreNote}`,
+					`odoo_connect to validate.${permissionNote}${gitignoreNote}\n${rootNote(root)}`,
 			};
 		},
 	}));
@@ -984,8 +1112,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 			render: (_args: unknown, value: unknown) => [text((value as { output: string }).output)],
 		},
-		async execute(args: { operation: "info" | "install" | "upgrade"; modules: string[] }) {
-			const { client, report } = clientFor(effectiveConfig().projectRoot);
+		async execute(args: { operation: "info" | "install" | "upgrade"; modules: string[] }, exec?: unknown) {
+			const { client, report } = clientFor(rootFor(exec).root);
 			const fail = (output: string) => ({
 				operation: args.operation as string,
 				success: false,
@@ -1048,8 +1176,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 			render: (_args: unknown, value: unknown) => [text((value as { detail: string }).detail)],
 		},
-		async execute(args: { limit?: number; sinceMinutes?: number }) {
-			const { client, report } = clientFor(effectiveConfig().projectRoot);
+		async execute(args: { limit?: number; sinceMinutes?: number }, exec?: unknown) {
+			const { client, report } = clientFor(rootFor(exec).root);
 			if (client === null) return { count: 0, logs: [] as Array<Record<string, string | number | null>>, detail: report };
 			const result = await client.recentErrors(args.limit ?? 20, args.sinceMinutes ?? 30);
 			if (!result.ok) return { count: 0, logs: [] as Array<Record<string, string | number | null>>, detail: `Failed to read ir.logging: ${result.error}` };
@@ -1095,8 +1223,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 			render: (_args: unknown, value: unknown) => [text((value as { detail: string }).detail)],
 		},
-		async execute() {
-			const projectRoot = effectiveConfig().projectRoot;
+		async execute(_args: unknown, exec?: unknown) {
+			const projectRoot = rootFor(exec).root;
 			const { client, report } = clientFor(projectRoot);
 			if (client === null) return { minted: false, detail: report };
 			const result = await client.mintSession(projectRoot);
@@ -1193,27 +1321,37 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			approval_source?: "human" | "human-proxy";
 			checkpoint_id?: string;
 			detail?: string;
-		}) {
-			const cfgPhase = effectiveConfig();
-			const specDir = specDirOf(cfgPhase.projectRoot, cfgPhase.specsDir, args.spec_id);
+		}, exec?: unknown) {
+			// The root comes from the CALLING SESSION: two open projects must
+			// never read or write each other's spec state.
+			const root = rootFor(exec);
+			const cfgPhase = effectiveConfig(exec);
+			const layout = { specsMode: cfgPhase.specsMode, specsRoot: cfgPhase.specsRoot };
+			const projectRoot = root.root;
+			// `create` only for the operation that actually creates the spec dir,
+			// so a read-only status/rollback never claims a central folder.
+			const specDir = specDirOf(projectRoot, cfgPhase.specsDir, args.spec_id, layout, {
+				create: args.operation === "init",
+			});
 			// S2: agent-supplied details are scrubbed (known secret, generic
 			// credential shapes, home paths) BEFORE any KB/verdict persistence.
 			const note = sanitize(args.detail ?? "");
-			const projectRootForAudit = effectiveConfig().projectRoot;
+			const projectRootForAudit = projectRoot;
 			appendAuditLine(projectRootForAudit, "sdd_phase/" + args.operation, args, clientFor(projectRootForAudit).credentials);
 			if (args.operation === "init") {
 				initSpecDir(specDir);
 				const state = loadState(specDir);
 				saveState(state);
-				writeActiveState(effectiveConfig().projectRoot, { specId: args.spec_id, phase: state.phase });
+				writeActiveState(projectRoot, { specId: args.spec_id, phase: state.phase });
 				return {
 					operation: "init" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
 					summary: summarize(state),
-					detail: `Spec directory initialized at ${displayPath(specDir)} (spec.md, architecture.md, test-plan.md, state.json). Fill spec.md, then mark_spec_loaded.`,
+					detail:
+						`Spec directory initialized at ${displayPath(specDir)} (spec.md, architecture.md, test-plan.md, state.json). ` +
+						`Fill spec.md, then mark_spec_loaded.\nSpecs location: ${describeSpecsLocation({ projectRoot, specsMode: cfgPhase.specsMode, specsDir: cfgPhase.specsDir, specsRoot: cfgPhase.specsRoot })}\n${rootNote(root)}`,
 				};
 			}
 			if (args.operation === "rollback") {
-				const projectRoot = effectiveConfig().projectRoot;
 				const active = readActiveState(projectRoot);
 				const checkpointId = args.checkpoint_id ?? active.checkpointId ?? null;
 				if (checkpointId === null) {
@@ -1266,14 +1404,17 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const state = loadState(specDir);
 			if (args.operation === "status") {
 				const kb = kbRead(specDir);
-				const active = readActiveState(effectiveConfig().projectRoot);
-				writeActiveState(effectiveConfig().projectRoot, { specId: args.spec_id, phase: state.phase });
+				const active = readActiveState(projectRoot);
+				writeActiveState(projectRoot, { specId: args.spec_id, phase: state.phase });
 				return {
 					operation: "status" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
 					summary: summarize(state),
 					detail:
 						`KB nodes: ${kb.length}. Last: ${kb.length > 0 ? kb[kb.length - 1]!.summary : "none"}` +
-						`\nCheckpoint: ${active.checkpointId ?? "none (mutations are blocked while the policy requires one)"}`,
+						`\nCheckpoint: ${active.checkpointId ?? "none (mutations are blocked while the policy requires one)"}` +
+						`\nSpec directory: ${displayPath(specDir)}` +
+						`\nSpecs location: ${describeSpecsLocation({ projectRoot, specsMode: cfgPhase.specsMode, specsDir: cfgPhase.specsDir, specsRoot: cfgPhase.specsRoot })}` +
+						`\n${rootNote(root)}`,
 				};
 			}
 			if (args.operation === "mark_spec_loaded") {
@@ -1298,14 +1439,14 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					args.approval_marker ?? null,
 					note,
 					args.approval_source ?? "human",
-					readAutonomy(effectiveConfig().projectRoot),
+					readAutonomy(projectRoot),
 					{
-						securityReviewRequired: effectiveConfig().securityReviewRequired,
-						documentationPolicy: effectiveConfig().documentationPolicy ?? "required",
+						securityReviewRequired: cfgPhase.securityReviewRequired,
+						documentationPolicy: cfgPhase.documentationPolicy ?? "required",
 					},
 				);
 				if (result.ok) {
-					writeActiveState(effectiveConfig().projectRoot, { specId: args.spec_id, phase: result.state.phase });
+					writeActiveState(projectRoot, { specId: args.spec_id, phase: result.state.phase });
 				}
 				return {
 					operation: "advance" as string, phase: result.state.phase as string, ok: result.ok, requireDiagnosis: false,
@@ -1378,8 +1519,16 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			return "";
 		}
 	};
-	const rootCandidates = (): string[] => {
+	/**
+	 * Candidate roots for locating `.sdd/config.json`. The CALLING SESSION's
+	 * root comes first — that is the project whose config applies — followed by
+	 * the migration/bootstrap candidates (deployment, Settings, a previously
+	 * discovered root, process cwd) so a config written before this change is
+	 * still found instead of being silently shadowed by a default.
+	 */
+	const rootCandidates = (activeRoot?: string): string[] => {
 		const candidates: string[] = [];
+		if (activeRoot !== undefined && activeRoot.trim() !== "") candidates.push(resolve(activeRoot));
 		const deploy = (config.projectRoot ?? "").trim();
 		// NOTE: `'' ?? x` is `''`, so an empty deployment root must be checked
 		// explicitly; otherwise resolve('') silently becomes the process cwd.
@@ -1402,8 +1551,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			return {};
 		}
 	};
-	const loadConfigFile = (): Record<string, unknown> => {
-		for (const candidate of rootCandidates()) {
+	const loadConfigFile = (activeRoot?: string): Record<string, unknown> => {
+		for (const candidate of rootCandidates(activeRoot)) {
 			const data = readConfigAt(candidate);
 			if (Object.keys(data).length === 0) continue;
 			const declared = data["projectRoot"];
@@ -1414,10 +1563,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		}
 		return {};
 	};
-	/** Where configuration is WRITTEN: always the effective (project) root. */
-	const configFile = (): string => join(effectiveConfig().projectRoot, ".sdd", "config.json");
-	const saveConfigFile = (data: Record<string, unknown>): void => {
-		const file = configFile();
+	/** Where configuration is WRITTEN: the root this call acts on. */
+	const configFile = (activeRoot?: string): string =>
+		join(activeRoot ?? effectiveConfig().projectRoot, ".sdd", "config.json");
+	const saveConfigFile = (data: Record<string, unknown>, activeRoot?: string): void => {
+		const file = configFile(activeRoot);
 		mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
 		writeFileAtomic(file, JSON.stringify(data, null, 2));
 		try {
@@ -1431,10 +1581,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		name: "odoo_config",
 		description:
 			"Read or update the persistent plugin configuration stored in <projectRoot>/.sdd/config.json. " +
-			"mode=read returns the current values (community/enterprise repository URL + OS path, " +
-			"projectRoot, specsDir, executeAllowlist). mode=set updates them — provide only the fields to " +
-			"change. Singleton call for each repository source. Never accepts or returns secrets (those " +
-			"live in the .env).",
+			"mode=read returns the current values (community/enterprise repository URL + OS path, specs layout, " +
+			"executeAllowlist) AND the project root this call resolved — with its provenance (session cwd, " +
+			"configured fallback or process cwd) and the effective spec directory — so 'which project am I in?' " +
+			"is answered, never guessed. mode=set updates them — provide only the fields to change. Singleton " +
+			"call for each repository source. Never accepts or returns secrets (those live in the .env).",
 		parameters: {
 			mode: {
 				type: "string",
@@ -1446,8 +1597,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			communityRepoPath: { type: "string", description: "Odoo Community local OS path (overrides URL when set)." },
 			enterpriseRepoUrl: { type: "string", description: "Odoo Enterprise repository URL (e.g. https://github.com/odoo/enterprise)." },
 			enterpriseRepoPath: { type: "string", description: "Odoo Enterprise local OS path (overrides URL when set)." },
-			projectRoot: { type: "string", description: "Workspace root used by the tools." },
-			specsDir: { type: "string", description: "Specs folder (default 'specs')." },
+			specsMode: { type: "string", enum: ["project", "central"], description: "'project' keeps specs inside each project; 'central' collects every project's specs under specsRoot." },
+			specsRoot: { type: "string", description: "Absolute folder collecting every project's specs when specsMode=central." },
+			projectRoot: { type: "string", description: "Fallback project root used only when the calling session has no cwd (headless/CI)." },
+			specsDir: { type: "string", description: "Specs folder inside the project when specsMode=project (default 'specs')." },
 			executeAllowlist: { type: "array", items: { type: "string" }, description: "Models permitted for odoo_execute mutations." },
 			autonomy: { type: "string", enum: ["supervised", "autonomous"], description: "Default delegation mode." },
 			licensed: { type: "string", enum: ["community", "enterprise"], description: "Licensing strategy. OCA/community is always searched as well." },
@@ -1476,6 +1629,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							enterpriseRepoUrl: { type: "string", required: true },
 							enterpriseRepoPath: { type: "string", required: true },
 							projectRoot: { type: "string", required: true },
+							specsMode: { type: "string", required: true },
+							specsRoot: { type: "string", required: true },
 							specsDir: { type: "string", required: true },
 							executeAllowlist: { type: "array", required: true, items: { type: "string" } },
 							autonomy: { type: "string", required: true },
@@ -1487,6 +1642,24 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					documentationPolicy: { type: "string", required: true },
 					documentationLanguage: { type: "string", required: true },
 							maxCheckpoints: { type: "number", required: true },
+						},
+					},
+					/**
+					 * What THIS call resolved — the answer to "which project am I
+					 * in?", including the provenance of the root.
+					 */
+					resolved: {
+						type: "object",
+						required: true,
+						additionalProperties: false,
+						properties: {
+							projectRoot: { type: "string", required: true },
+							rootSource: { type: "string", required: true },
+							sessionId: { type: "string" },
+							specsBase: { type: "string", required: true },
+							specDir: { type: "string", required: true },
+							specDirReason: { type: "string", required: true },
+							configFile: { type: "string", required: true },
 						},
 					},
 					detail: { type: "string", required: true },
@@ -1504,6 +1677,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			enterpriseRepoUrl?: string;
 			enterpriseRepoPath?: string;
 			projectRoot?: string;
+			specsMode?: string;
+			specsRoot?: string;
 			specsDir?: string;
 			executeAllowlist?: string[];
 			autonomy?: string;
@@ -1528,6 +1703,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					enterpriseRepoUrl: asString(data["enterpriseRepoUrl"], "https://github.com/odoo/enterprise"),
 					enterpriseRepoPath: asString(data["enterpriseRepoPath"], ""),
 					projectRoot: asString(data["projectRoot"], ""),
+					specsMode: asSpecsMode(data["specsMode"]),
+					specsRoot: asString(data["specsRoot"], ""),
 					specsDir: asString(data["specsDir"], "specs"),
 					executeAllowlist: asList(data["executeAllowlist"]),
 					autonomy: asString(data["autonomy"], "supervised"),
@@ -1545,12 +1722,51 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				};
 			};
 
+			/**
+			 * What this call resolved, reported on EVERY return so the model and
+			 * the developer can always tell which project is being configured.
+			 */
+			const resolution = () => {
+				const cfg = effectiveConfig(exec);
+				const layout: SpecsLayout = {
+					projectRoot: cfg.projectRoot,
+					specsMode: cfg.specsMode,
+					specsDir: cfg.specsDir,
+					specsRoot: cfg.specsRoot,
+				};
+				const active = readActiveState(cfg.projectRoot);
+				const activeSpec = active.specId === null ? "000-unnamed" : active.specId;
+				return {
+					projectRoot: cfg.projectRoot,
+					rootSource: String(cfg.rootSource),
+					...(cfg.sessionId === undefined ? {} : { sessionId: cfg.sessionId }),
+					specsBase: specsBaseFor(layout),
+					specDir: specDirFor(layout, activeSpec),
+					specDirReason:
+						`${cfg.specsMode} layout; active spec = ${active.specId ?? "none"}` +
+						(active.specId === null ? " (showing where a new spec would go)" : ""),
+					configFile: configFile(cfg.projectRoot),
+				};
+			};
 			if (args.mode === "read") {
+				const cfgRead = effectiveConfig(exec);
 				return {
 					mode: "read" as string,
 					ok: true,
-					config: normalize(loadConfigFile()),
-					detail: `Stored at ${displayPath(configFile())}.`,
+					// The EFFECTIVE values, not just the file: a value coming from
+					// the deployment patch or Settings is in force too, and a
+					// "read" that hid it would misreport the live configuration.
+					config: normalize(cfgRead as unknown as Record<string, unknown>),
+					resolved: resolution(),
+					detail:
+						`Stored at ${displayPath(configFile(cfgRead.projectRoot))}.\n` +
+						`${rootNote(rootFor(exec))}\n` +
+						`Specs location: ${describeSpecsLocation({
+							projectRoot: cfgRead.projectRoot,
+							specsMode: cfgRead.specsMode,
+							specsDir: cfgRead.specsDir,
+							specsRoot: cfgRead.specsRoot,
+						})}`,
 				};
 			}
 			// mode=set
@@ -1568,19 +1784,23 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				return {
 					mode: "set" as string,
 					ok: false,
-					config: normalize(loadConfigFile()),
+					config: normalize(loadConfigFile(effectiveConfig(exec).projectRoot)),
+					resolved: resolution(),
 					detail:
 						`Configuration unchanged (approval outcome: ${outcome}). A human must approve ` +
 						"policy changes; ask the developer to confirm, then retry.",
 				};
 			}
-			const current = loadConfigFile();
+			const setRoot = effectiveConfig(exec).projectRoot;
+			const current = loadConfigFile(setRoot);
 			const updates: Record<string, unknown> = {};
 			if (args.communityRepoUrl !== undefined) updates["communityRepoUrl"] = args.communityRepoUrl;
 			if (args.communityRepoPath !== undefined) updates["communityRepoPath"] = args.communityRepoPath;
 			if (args.enterpriseRepoUrl !== undefined) updates["enterpriseRepoUrl"] = args.enterpriseRepoUrl;
 			if (args.enterpriseRepoPath !== undefined) updates["enterpriseRepoPath"] = args.enterpriseRepoPath;
 			if (args.projectRoot !== undefined) updates["projectRoot"] = args.projectRoot;
+			if (args.specsMode !== undefined) updates["specsMode"] = asSpecsMode(args.specsMode);
+			if (args.specsRoot !== undefined) updates["specsRoot"] = args.specsRoot;
 			if (args.specsDir !== undefined) updates["specsDir"] = args.specsDir;
 			if (args.executeAllowlist !== undefined) updates["executeAllowlist"] = args.executeAllowlist;
 			if (args.autonomy !== undefined) updates["autonomy"] = args.autonomy;
@@ -1597,16 +1817,18 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					mode: "set" as string,
 					ok: false,
 					config: normalize(current),
+					resolved: resolution(),
 					detail: "mode=set requires at least one field to update.",
 				};
 			}
 			const merged = Object.assign({}, current, updates);
-			saveConfigFile(merged);
+			saveConfigFile(merged, setRoot);
 			return {
 				mode: "set" as string,
 				ok: true,
 				config: normalize(merged),
-				detail: `Updated ${displayPath(configFile())}.`,
+				resolved: resolution(),
+				detail: `Updated ${displayPath(configFile(setRoot))}.`,
 			};
 		},
 	}));
@@ -1614,12 +1836,52 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// ---------------------------------------------------------------------
 	// Runtime tools: odoo_execute (CRUD/RPC allowlist) + odoo_validate (local)
 	// ---------------------------------------------------------------------
+	/**
+	 * Per-call project root.
+	 *
+	 * The root changes with every folder the developer opens, so it is NOT a
+	 * plugin-wide setting: the authoritative value is the cwd of the calling
+	 * session (`exec.agent.id` → `ctx.sessions`, whose header cwd is by
+	 * definition the workspace path). Then the configured root, then the process
+	 * cwd — and the provenance is always reported so neither the model nor the
+	 * developer has to guess.
+	 *
+	 * `resolveRoot` also accepts an explicit override (highest priority). No
+	 * tool exposes it: a caller that wants another project must open that
+	 * project's folder, so the model cannot silently redirect a run.
+	 */
+	const rootFor = (exec?: unknown, explicit?: string): ResolvedRoot => {
+		const e = (exec ?? {}) as { agent?: { id?: unknown } };
+		// Optional read: a host without a session store still works, it just
+		// falls back to the configured root (reported as such).
+		const sessions = optionalService(ctx, "sessions");
+		const sessionId = e.agent?.id;
+		let configured = settingsRoot();
+		if (configured === "") configured = config.projectRoot ?? "";
+		if (sessionCwdOf(sessions, sessionId) === null) {
+			// Bootstrap for hosts/contexts with no session (headless, CI, tests):
+			// a root DECLARED in `.sdd/config.json` must still win over the
+			// process cwd, which is how a root configured in the UI keeps
+			// working. `loadConfigFile()` is what discovers the declared value.
+			loadConfigFile();
+			if (resolvedRoot.value !== null) configured = resolvedRoot.value;
+		}
+		return resolveRoot({ ...(explicit === undefined ? {} : { explicit }), sessions, sessionId, configured, cwd: process.cwd() });
+	};
+
 	// Effective configuration: the persisted <projectRoot>/.sdd/config.json
 	// (written by odoo_config) takes precedence over the deployment config
 	// (cordis.patch.yml), which takes precedence over built-in defaults. It is
-	// resolved on every call so live edits apply without a restart.
-	const effectiveConfig = () => {
-		const data = loadConfigFile();
+	// resolved on every call so live edits apply without a restart — and the
+	// root is resolved from the CALLING SESSION, so two open projects never
+	// read or write each other's state.
+	const effectiveConfig = (exec?: unknown, explicitRoot?: string) => {
+		const resolved = rootFor(exec, explicitRoot);
+		// With a SESSION root the project is known, so only THAT project's
+		// `.sdd/config.json` may apply: the candidate scan exists to bootstrap a
+		// declared root when no session says which project this is, and using it
+		// here would let another folder's config leak into this run.
+		const data = resolved.source === "session" ? readConfigAt(resolved.root) : loadConfigFile(resolved.root);
 		// Layer order (highest last): deployment config → Settings (human) →
 		// .sdd/config.json (written by odoo_config, itself human-approved).
 		// `undefined` values are dropped so a sparse settings payload cannot
@@ -1643,7 +1905,13 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		const asBool = (v: unknown, fallback: boolean): boolean => (typeof v === "boolean" ? v : fallback);
 		const asNum = (v: unknown, fallback: number): number => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
 		return {
-			projectRoot: asString(merged["projectRoot"], baseRoot(config)),
+			// The RESOLVED root always wins: `projectRoot` in a config file can
+			// only ever be a fallback for hosts without a session.
+			projectRoot: resolved.root,
+			rootSource: resolved.source as RootSource,
+			sessionId: resolved.sessionId,
+			specsMode: asSpecsMode(merged["specsMode"] ?? config.specsMode),
+			specsRoot: asString(merged["specsRoot"], config.specsRoot ?? ""),
 			specsDir: asString(merged["specsDir"], config.specsDir ?? "specs"),
 			executeAllowlist: Array.isArray(merged["executeAllowlist"]) ? asList(merged["executeAllowlist"]) : (config.executeAllowlist ?? []),
 			communityRepoUrl: asString(merged["communityRepoUrl"], config.communityRepoUrl ?? "https://github.com/odoo/odoo"),
@@ -1798,8 +2066,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			restore_data?: boolean;
 			remove_created?: boolean;
 			confirm_destructive?: boolean;
-		}) {
-			const cfg = effectiveConfig();
+		}, exec?: unknown) {
+			const root = rootFor(exec);
+			const cfg = effectiveConfig(exec);
 			const projectRoot = cfg.projectRoot;
 			const active = readActiveState(projectRoot);
 
@@ -1809,7 +2078,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				return {
 					ok: true, operation: "list" as string, activeCheckpoint: active.checkpointId ?? undefined,
 					restored: [] as string[],
-					detail: `Active: ${active.checkpointId ?? "none"}\nCheckpoints (${all.length}):\n${lines.join("\n") || "(none)"}`,
+					detail: `Active: ${active.checkpointId ?? "none"}\nCheckpoints (${all.length}):\n${lines.join("\n") || "(none)"}\n${rootNote(root)}`,
 				};
 			}
 
@@ -1860,7 +2129,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					detail:
 						`Checkpoint ${manifest.id} created at ${displayPath(join(projectRoot, ".sdd", "checkpoints", manifest.id))} ` +
 						`(${manifest.files.length} file(s)${manifest.truncated ? ", TRUNCATED by size budget" : ""}).` +
-						(purged > 0 ? ` Purged ${purged} old checkpoint(s) (maxCheckpoints=${cfg.maxCheckpoints}).` : ""),
+						(purged > 0 ? ` Purged ${purged} old checkpoint(s) (maxCheckpoints=${cfg.maxCheckpoints}).` : "") +
+						`\n${rootNote(root)}`,
 				};
 			}
 
@@ -1905,7 +2175,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					(files.missing.length > 0 ? `; ${files.missing.length} failed: ${files.missing.slice(0, 5).join(", ")}` : "") +
 					`. Data undo: ${dataNote}` +
 					(restoredData.length > 0 ? ` (${restoredData.length} record op(s))` : "") +
-					drift,
+					drift +
+					`\n${rootNote(root)}`,
 			};
 		},
 	}));
@@ -1937,9 +2208,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 			render: (_args: unknown, value: unknown) => [text((value as { detail: string }).detail)],
 		},
-		async execute(args: { module_dir: string }) {
-			const cfg = effectiveConfig();
-			const moduleDir = args.module_dir.startsWith("/") ? args.module_dir : join(cfg.projectRoot, args.module_dir);
+		async execute(args: { module_dir: string }, exec?: unknown) {
+			const root = rootFor(exec);
+			const cfg = effectiveConfig(exec);
+			// `isAbsolute` (via the shared helper) instead of a POSIX-only
+			// startsWith("/"): a Windows drive or UNC path is absolute too.
+			const moduleDir = resolveModuleDir(args.module_dir, cfg.projectRoot);
 			const result = scanModule(moduleDir);
 			const lines = result.findings.map((f) => `${f.severity} ${f.rule} ${f.file}:${f.line} — ${f.message}\n    hint: ${f.hint}`);
 			return {
@@ -1950,7 +2224,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				detail:
 					`Scanned ${result.scannedFiles} file(s) under ${displayPath(moduleDir)}${result.truncated ? " (truncated)" : ""}. ` +
 					`${result.findings.length} finding(s); clean=${result.clean}.\n` +
-					(lines.join("\n") || "No findings."),
+					(lines.join("\n") || "No findings.") +
+					`\n${rootNote(root)}`,
 			};
 		},
 	}));
@@ -1981,9 +2256,13 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 			render: (_args: unknown, value: unknown) => [text((value as { detail: string }).detail)],
 		},
-		async execute(args: { spec_id: string; summary?: string }) {
-			const cfg = effectiveConfig();
-			const specDir = specDirOf(cfg.projectRoot, cfg.specsDir, args.spec_id);
+		async execute(args: { spec_id: string; summary?: string }, exec?: unknown) {
+			const root = rootFor(exec);
+			const cfg = effectiveConfig(exec);
+			const specDir = specDirOf(cfg.projectRoot, cfg.specsDir, args.spec_id, {
+				specsMode: cfg.specsMode,
+				specsRoot: cfg.specsRoot,
+			});
 			const state = loadState(specDir);
 			const verdict = readVerdict(specDir);
 			const kb = kbRead(specDir);
@@ -2004,6 +2283,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			lines.push(`- Security report: ${existsSync(securityReport) ? "present" : "MISSING"}`);
 			lines.push("");
 			lines.push("## Configuration in effect");
+			lines.push(`- projectRoot=${cfg.projectRoot} (source: ${cfg.rootSource})`);
+			lines.push(`- specs: ${describeSpecsLocation({ projectRoot: cfg.projectRoot, specsMode: cfg.specsMode, specsDir: cfg.specsDir, specsRoot: cfg.specsRoot })}`);
 			lines.push(`- autonomy=${cfg.autonomy} licensed=${cfg.licensed}`);
 			lines.push(`- allowlist=${JSON.stringify(cfg.executeAllowlist)}`);
 			lines.push(`- communityRepo=${cfg.communityRepoPath || cfg.communityRepoUrl}`);
@@ -2039,7 +2320,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			return {
 				ok: true,
 				file: displayPath(join(specDir, "handoff.md")),
-				detail: `Handoff written to ${displayPath(join(specDir, "handoff.md"))} (phase ${state.phase}, verdict ${verdict === null ? "none" : verdict.passed ? "PASSED" : "FAILED"}).`,
+				detail: `Handoff written to ${displayPath(join(specDir, "handoff.md"))} (phase ${state.phase}, verdict ${verdict === null ? "none" : verdict.passed ? "PASSED" : "FAILED"}).\n${rootNote(root)}`,
 			};
 		},
 	}));
@@ -2069,9 +2350,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		return false;
 	};
 
-	const denyWithAudit = (name: string, args: Record<string, unknown>, reason: string): string => {
+	const denyWithAudit = (name: string, args: Record<string, unknown>, reason: string, exec?: unknown): string => {
 		try {
-			const cfg = effectiveConfig();
+			const cfg = effectiveConfig(exec);
 			const active = readActiveState(cfg.projectRoot);
 			recordAudit(
 				cfg.projectRoot,
@@ -2104,17 +2385,24 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					// Fall back to `args` only for older/host-compat, never rely on it.
 					const rawArgs = call.arguments ?? (call as { args?: unknown }).args ?? {};
 					const args = (rawArgs && typeof rawArgs === "object" ? rawArgs : {}) as Record<string, unknown>;
-					const cfg = effectiveConfig();
+					// The guard runs for the SESSION's project: a guard that read a
+					// plugin-wide root would arm the wrong project's policy.
+					const cfg = effectiveConfig(execution);
 					const active = readActiveState(cfg.projectRoot);
 
 					// 1) Emergency stop halts every tool.
 					const stopCandidates = [join(cfg.projectRoot, ".sdd", "stop.md")];
 					if (active.specId !== null) {
-						stopCandidates.push(join(cfg.projectRoot, cfg.specsDir, active.specId, "stop.md"));
+						stopCandidates.push(
+							specDirOf(cfg.projectRoot, cfg.specsDir, active.specId, {
+								specsMode: cfg.specsMode,
+								specsRoot: cfg.specsRoot,
+							}, { create: false }) + sep + "stop.md",
+						);
 					}
 					for (const candidate of stopCandidates) {
 						if (existsSync(candidate)) {
-							return denyWithAudit(name, args, `stop.md present at ${displayPath(candidate)} — every tool is halted until it is removed.`);
+							return denyWithAudit(name, args, `stop.md present at ${displayPath(candidate)} — every tool is halted until it is removed.`, execution);
 						}
 					}
 
@@ -2126,6 +2414,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 								args,
 								"Mutation blocked by policy: no checkpoint exists. Run `sdd_checkpoint` with operation=create first " +
 									"(requireCheckpointBeforeMutation=true), or disable that policy with odoo_config.",
+								execution,
 							);
 						}
 						const allowedPhases = ["WRITE_CODE", "VERIFY", "FIX_LOOP"];
@@ -2135,6 +2424,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 								args,
 								`Mutation blocked: the active spec is in phase ${active.phase}. Approve the spec/architecture first ` +
 									"so the pipeline reaches WRITE_CODE.",
+								execution,
 							);
 						}
 					}
@@ -2173,9 +2463,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			});
 			ctx.on("tools/result", (...eventArgs: unknown[]) => {
 				try {
-					const cfg = effectiveConfig();
-					if (!cfg.auditAllTools) return;
 					const execution = (eventArgs[0] ?? {}) as { name?: unknown; arguments?: unknown; callId?: unknown };
+					const cfg = effectiveConfig(execution);
+					if (!cfg.auditAllTools) return;
 					const result = (eventArgs[1] ?? {}) as { isError?: unknown; error?: unknown };
 					const active = readActiveState(cfg.projectRoot);
 					const failed = Boolean(result.isError) || result.error !== undefined;
@@ -2208,19 +2498,28 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	}
 
 	registerDocsTool(ctx, {
-		projectRoot: () => effectiveConfig().projectRoot,
+		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
+		// Documenting a spec honours the configured layout (project or central)
+		// instead of assuming `<root>/specs`.
+		specDir: (specId, exec) => {
+			const cfg = effectiveConfig(exec);
+			return specDirOf(cfg.projectRoot, cfg.specsDir, specId, {
+				specsMode: cfg.specsMode,
+				specsRoot: cfg.specsRoot,
+			});
+		},
 		configuredLanguage: () => effectiveConfig().documentationLanguage,
 		display: (v) => displayPath(v),
 	});
 
 	registerRuntimeTools(ctx, {
-		client: () => clientFor(effectiveConfig().projectRoot),
+		client: (exec) => clientFor(effectiveConfig(exec).projectRoot),
 		status: (pr) => setupStatusFor(pr),
-		projectRoot: effectiveConfig().projectRoot,
-		allowlist: () => effectiveConfig().executeAllowlist,
-		recordDataOp: (op) => {
+		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
+		allowlist: (exec) => effectiveConfig(exec).executeAllowlist,
+		recordDataOp: (op, exec) => {
 			try {
-				const cfg = effectiveConfig();
+				const cfg = effectiveConfig(exec);
 				// Stamp the database so a replay against a DIFFERENT database can
 				// be detected instead of silently mutating another instance.
 				const db = clientFor(cfg.projectRoot).credentials?.db;
@@ -2234,9 +2533,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			}
 		},
 		display: (v) => displayPath(v),
-		auditFailure: (info) => {
+		auditFailure: (info, exec) => {
 			try {
-				const cfg = effectiveConfig();
+				const cfg = effectiveConfig(exec);
 				const active = readActiveState(cfg.projectRoot);
 				recordAudit(
 					cfg.projectRoot,

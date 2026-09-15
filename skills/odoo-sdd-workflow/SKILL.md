@@ -14,6 +14,37 @@ Nothing starts (implementation, or even spec drafting) until **CLARIFY** has
 resolved the intent — unless the pipeline is in AUTONOMOUS mode, where the
 intent is detected from the request.
 
+## Where files live (never assume — it is reported)
+
+The **project root is the folder open in the current session** (the session
+cwd), not a plugin-wide setting: open another folder and the tools act there.
+Every tool result ends with a `Project root: <path> [<provenance>]` line; read
+it instead of guessing. The fallback order is: session cwd → root declared in
+`.sdd/config.json` (or the deployment/Settings value) → process cwd, and the last
+one is reported as `LAST RESORT`, meaning the session cwd was unavailable. No
+tool takes a "work on that other folder" argument: to work on another project,
+open that project's folder in a session.
+
+Two spec layouts exist, chosen by the developer (Settings → Specs, or
+`odoo_config mode=set specsMode=...`):
+
+- `project` (default): `<projectRoot>/<specsDir>/<specId>` — specs travel with
+  the code.
+- `central`: `<specsRoot>/<projectSlug>/<specId>` — every project's specs are
+  collected in one folder, each project in its own subfolder carrying a
+  `.dsh-project-root` marker. `<projectSlug>` may carry a hash suffix when two
+  projects share a directory name.
+
+`.sdd/` (config, credentials, grants, audit, checkpoints, active run) ALWAYS
+stays with the project, in both layouts. A `sdd_checkpoint create` snapshots the
+PROJECT tree, so with the central layout the spec documents are not part of that
+snapshot — deliberate: the spec is the immutable source of truth and is never
+rolled back. Ask `odoo_config mode=read` (it returns
+`resolved.projectRoot`, `resolved.rootSource`, `resolved.specsBase`,
+`resolved.specDir` and the config file path) or `sdd_phase status` (it echoes
+the spec directory and the specs location) when you need concrete paths. In this
+document `specs/<id>/...` means "the reported spec directory".
+
 ## Global rules (non-negotiable)
 
 1. **Credentials**: live only in the gitignored `.env` (chmod 600). NEVER ask

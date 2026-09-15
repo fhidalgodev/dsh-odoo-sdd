@@ -1314,6 +1314,28 @@ console.log("== root resolution (effective root vs process cwd) ==");
 		check("an absolute specsDir is respected, not nested under the root", existsSync(join(realProject, "specs", "002-abs", "state.json")));
 		check("no bogus nested tree is created", !existsSync(join(fakeCwd, "home")) && !existsSync(join(realProject, "home")));
 		check("init with an absolute specsDir reports that path", absRes.detail.includes(join(realProject, "specs", "002-abs")));
+
+		// The durable route: a root declared in Settings must win over the cwd,
+		// otherwise configuring it in the UI would not actually take effect.
+		const uiRegistry = new Map();
+		let uiHooks = null;
+		const uiCtx = {
+			tools: { register: (t) => uiRegistry.set(t.name, t), guard: () => () => {} },
+			on: () => () => {},
+			inject: (_deps, cb) => cb({ settings: { installSection: (_o, _n, _s, _e, h) => { uiHooks = h; } } }),
+			approval: { request: async () => "allowed-once" },
+		};
+		plugin.apply(uiCtx, {});
+		check("the Settings hooks are available for the root test", uiHooks !== null);
+		uiHooks.setSource(() => ({ projectRoot: realProject }));
+		uiHooks.onChange();
+		const uiRes = await uiRegistry.get("sdd_phase").execute({ operation: "init", spec_id: "003-settings" });
+		check(
+			"a projectRoot set in Settings wins over the cwd",
+			existsSync(join(realProject, "specs", "003-settings", "state.json")) &&
+				!existsSync(join(fakeCwd, "specs", "003-settings", "state.json")),
+		);
+		check("init reports the Settings-provided path", uiRes.detail.includes(join(realProject, "specs", "003-settings")));
 	} finally {
 		process.chdir(savedCwd);
 	}

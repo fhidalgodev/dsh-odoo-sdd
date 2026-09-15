@@ -23,6 +23,9 @@ import { sanitizeForPersist, type OdooCredentials } from "./credentials.js";
 /** Where an entry came from: a tool call, internal bookkeeping, or the guard. */
 export type AuditSource = "tool" | "internal" | "policy";
 
+/** What an entry records: a tool invocation, an RPC attempt, or a decision. */
+export type AuditKind = "tool" | "rpc" | "policy";
+
 /** One sanitized audit entry. */
 export interface AuditEntry {
 	ts: string;
@@ -33,6 +36,10 @@ export interface AuditEntry {
 	ms: number;
 	/** Origin of the entry. */
 	source: AuditSource;
+	/** What the entry records. Keeps a transport success distinct from a domain one. */
+	kind: AuditKind;
+	/** Host tool-call id, so an entry correlates with the session transcript. */
+	callId?: string;
 	/** SDD phase active when the entry was written, when known. */
 	phase?: string;
 	/** Spec directory id when known. */
@@ -49,6 +56,8 @@ export interface AuditInput {
 	outcome?: "ok" | "error" | "denied";
 	ms?: number;
 	source?: AuditSource;
+	kind?: AuditKind;
+	callId?: string;
 	phase?: string;
 	specId?: string;
 	reason?: string;
@@ -87,7 +96,9 @@ export function recordAudit(
 		outcome: input.outcome ?? "ok",
 		ms: input.ms ?? 0,
 		source: input.source ?? "internal",
+		kind: input.kind ?? (input.source === "policy" ? "policy" : "tool"),
 	};
+	if (input.callId !== undefined) entry.callId = input.callId;
 	if (input.phase !== undefined) entry.phase = input.phase;
 	if (input.specId !== undefined) entry.specId = input.specId;
 	if (input.reason !== undefined) entry.reason = sanitizeForPersist(input.reason.slice(0, 500), credentials);

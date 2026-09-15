@@ -254,6 +254,7 @@ export function transition(
 	note: string,
 	approvalSource?: "human" | "human-proxy",
 	mode?: "supervised" | "autonomous",
+	policy?: { securityReviewRequired?: boolean },
 ): TransitionResult {
 	const stop = stopRequested(state.specDir);
 	if (stop !== null) {
@@ -384,12 +385,39 @@ export function transition(
 				state,
 			};
 		}
+		// Security review is a declared policy, so it must be a real gate: with
+		// `securityReviewRequired` armed a PASSED verdict alone is not enough.
+		if (policy?.securityReviewRequired === true) {
+			const gaps = securityReviewGaps(state.specDir);
+			if (gaps.length > 0) {
+				return {
+					ok: false,
+					reason:
+						"Cannot reach DONE: securityReviewRequired is armed but the security review is " +
+						"missing or rejected. " + gaps.join(" "),
+					state,
+				};
+			}
+		}
 	}
 
 	// Iteration ceiling: EVERY entry into the verify/fix cycle counts, no
 	// matter the source phase — a stuck VERIFY→VERIFY loop cannot evade the
 	// ceiling (caught by the smoke test).
 	if (next === "VERIFY" || next === "FIX_LOOP") {
+		// Failure ladder: retrying while a diagnosis is OWED is the "blind
+		// retry" the ladder exists to prevent, so the transition is refused
+		// until the diagnosis is recorded.
+		if (diagnosisPending(state)) {
+			return {
+				ok: false,
+				reason:
+					`Retry refused: ${state.failureCount} consecutive failures reached the diagnosis threshold. ` +
+					"Record a root-cause analysis first (sdd_phase operation=diagnose with the consultant's " +
+					"findings) — blind retries are not allowed.",
+				state,
+			};
+		}
 		state.iterationsUsed += 1;
 		if (state.iterationsUsed > state.maxIterations) {
 			state.phase = "BLOCKED";
@@ -420,10 +448,22 @@ export function transition(
 }
 
 /**
+ * Whether the failure ladder is waiting for a real diagnosis. Derived from the
+ * failure streak and the recorded-diagnosis flag, so it can never be satisfied
+ * by merely ASKING for the diagnosis.
+ * @param state - current spec state.
+ * @returns true while a recorded diagnosis is still owed.
+ */
+export function diagnosisPending(state: SddState): boolean {
+	return state.failureCount >= state.maxFailuresBeforeDiagnosis && !state.diagnosisDone;
+}
+
+/**
  * Record one failed verification inside the fix loop. Implements the failure
  * ladder: after `maxFailuresBeforeDiagnosis` consecutive failures the caller
  * MUST run a deep-diagnosis step (root-cause analysis by a consultant role)
- * before any further blind retry.
+ * before any further blind retry. The ladder demanding a diagnosis does NOT
+ * satisfy it — only {@link recordDiagnosis} does.
  * @returns guidance for the orchestrating agent.
  */
 export function recordFailure(state: SddState, errorSummary: string): {
@@ -433,27 +473,55 @@ export function recordFailure(state: SddState, errorSummary: string): {
 	state.failureCount += 1;
 	state.lastVerdictPassed = false;
 	kbAppend(state, "blocker", `Verification failure #${state.failureCount}: ${errorSummary.slice(0, 2000)}`);
-	let requireDiagnosis = false;
-	if (state.failureCount >= state.maxFailuresBeforeDiagnosis && !state.diagnosisDone) {
-		requireDiagnosis = true;
-		state.diagnosisDone = true;
+	// NOTE: deliberately does NOT set `diagnosisDone` and does NOT write a
+	// "diagnosis" node — this only records that one is OWED.
+	const requireDiagnosis = diagnosisPending(state);
+	if (requireDiagnosis) {
 		kbAppend(
 			state,
-			"diagnosis",
-			"Failure ladder triggered: deep root-cause diagnosis required before the next retry.",
+			"blocker",
+			"Failure ladder triggered: a deep root-cause diagnosis must be RECORDED (sdd_phase operation=diagnose) before the next retry.",
 		);
 	}
 	saveState(state);
 	return { requireDiagnosis, state };
 }
 
-/** Record one passed verification (persists the honest verdict). */
-export function recordSuccess(state: SddState, detail: string): SddState {
+/**
+ * Record the deep root-cause diagnosis owed after the failure ladder trips.
+ * This is the only transition that clears {@link diagnosisPending}.
+ * @param state - current spec state.
+ * @param detail - the consultant's root-cause findings.
+ * @returns the updated state.
+ */
+export function recordDiagnosis(state: SddState, detail: string): SddState {
+	state.diagnosisDone = true;
+	kbAppend(state, "diagnosis", detail.slice(0, 4000) || "root-cause diagnosis recorded");
+	saveState(state);
+	return state;
+}
+
+/**
+ * Record one passed verification (persists the honest verdict).
+ *
+ * A PASSED verdict is an evidence claim, not a mood: every acceptance criterion
+ * in `test-plan.md` must have moved past `pending`. When any is still open the
+ * verdict is REFUSED and nothing is written, so a green verdict always maps to
+ * a tested criterion.
+ * @param state - current spec state.
+ * @param detail - human-readable evidence summary.
+ * @returns whether the verdict was persisted, the updated state, and the gaps.
+ */
+export function recordSuccess(state: SddState, detail: string): { ok: boolean; state: SddState; gaps: string[] } {
+	const gaps = evidenceGaps(state.specDir);
+	if (gaps.length > 0) {
+		return { ok: false, state, gaps };
+	}
 	state.failureCount = 0;
 	writeVerdict(state, true, detail);
 	kbAppend(state, "verdict", "Verification PASSED.");
 	saveState(state);
-	return state;
+	return { ok: true, state, gaps: [] };
 }
 
 /** Record a failed verification (persists the honest FAILED verdict). */
@@ -523,6 +591,66 @@ export function securityGaps(specDir: string): string[] {
 	if (!hasCrudMatrix) gaps.push("`## Security`: give the per-group CRUD matrix (read/create/write/unlink)");
 	if (!hasRules && !rulesWaived) gaps.push("`## Security`: define the record rules OR explicitly state that none are needed");
 	return gaps;
+}
+
+/**
+ * Evidence gate behind a PASSED verdict: every acceptance criterion in
+ * `test-plan.md` must have moved past `pending`. Returns one entry per gap so
+ * the caller can name exactly what is untested.
+ * @param specDir - spec directory holding test-plan.md.
+ * @returns the list of unmet evidence requirements (empty when complete).
+ */
+export function evidenceGaps(specDir: string): string[] {
+	const path = join(specDir, "test-plan.md");
+	if (!existsSync(path)) {
+		return ["test-plan.md is missing: a PASSED verdict needs per-AC evidence."];
+	}
+	const text = readFileSync(path, "utf8");
+	const gaps: string[] = [];
+	let rows = 0;
+	for (const line of text.split(/\r?\n/)) {
+		if (!line.trim().startsWith("|")) continue;
+		const cells = line.split("|");
+		// Drop the empty fields produced by the outer pipes.
+		const cols = cells.slice(1, cells.length - 1).map((c) => c.trim());
+		if (cols.length < 4) continue;
+		if (/^[-: ]+$/.test(cols[0])) continue; // markdown separator row
+		if (/^ac$/i.test(cols[0])) continue; // header row
+		rows += 1;
+		const status = cols[3].toLowerCase();
+		if (status === "" || status === "pending" || status === "todo" || status === "-") {
+			gaps.push(`AC "${cols[0]}" is still ${status === "" ? "unset" : status} in test-plan.md.`);
+		}
+	}
+	if (rows === 0) {
+		gaps.push("test-plan.md has no AC rows: a PASSED verdict needs per-AC evidence.");
+	}
+	return gaps;
+}
+
+/**
+ * Security-review gate for DONE when `securityReviewRequired` is armed. A
+ * REJECTED report always blocks; an absent report or one without a verdict
+ * line blocks too (fail-closed), because "no finding" is not "reviewed".
+ * @param specDir - spec directory holding security-report.md.
+ * @returns the list of unmet requirements (empty when the review is clean).
+ */
+export function securityReviewGaps(specDir: string): string[] {
+	const path = join(specDir, "security-report.md");
+	if (!existsSync(path)) {
+		return [
+			"Write specs/<id>/security-report.md from the security-reviewer persona (groups, ACLs, " +
+				"record rules, risky patterns) before claiming DONE.",
+		];
+	}
+	const text = readFileSync(path, "utf8");
+	if (/\bREJECTED\b|\bFAILED\b/i.test(text)) {
+		return ["security-report.md records a REJECTED/FAILED verdict; fix the findings and re-review."];
+	}
+	if (!/\bAPPROVED\b|\bPASSED\b/i.test(text)) {
+		return ["security-report.md carries no APPROVED/PASSED verdict line."];
+	}
+	return [];
 }
 
 const EXTRA_VIEW_TYPES =

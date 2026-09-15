@@ -15,7 +15,16 @@ import { basename, join } from "node:path";
 export interface RuntimeDeps {
 	/** Resolve and cache an OdooClient instance, or null when unconfigured. */
 	client(): {
-		client: { executeKw<T>(model: string, method: string, args: unknown[], kwargs: Record<string, unknown>): Promise<{ ok: true; value: T } | { ok: false; error: string }> } | null;
+		client: {
+			executeKw<T>(
+				model: string,
+				method: string,
+				args: unknown[],
+				kwargs: Record<string, unknown>,
+				timeoutMs?: number,
+				signal?: AbortSignal,
+			): Promise<{ ok: true; value: T } | { ok: false; error: string }>;
+		} | null;
 		report: string;
 	};
 	/** Effective onboarding status, used in remediation text. */
@@ -34,6 +43,12 @@ export interface RuntimeDeps {
 	}): void;
 	/** Path/display masking helper. */
 	display(pathValue: string): string;
+	/**
+	 * Record a domain-level failure (the RPC reached the server and failed).
+	 * The host's own result listener only sees transport success, so without
+	 * this a server error would be audited as `ok`.
+	 */
+	auditFailure?(info: { tool: string; op: string; callId?: string; reason: string }): void;
 }
 
 /** Build and register `odoo_execute` and `odoo_validate`. */
@@ -94,7 +109,7 @@ export function registerRuntimeTools(
 				return [{ type: "text", text: detail === "" ? v.reason : `${v.reason}\n\n${detail}` }];
 			},
 		},
-		async execute(args: unknown) {
+		async execute(args: unknown, exec?: { callId?: unknown; signal?: unknown }) {
 			const a = args as {
 				model: string;
 				method: string;
@@ -161,9 +176,11 @@ export function registerRuntimeTools(
 				callArgs = [a.ids];
 			}
 
-			const { client } = deps.client();
+			const { client, report } = deps.client();
 			if (client === null) {
-				return { denied: true, reason: `NOT CONFIGURED: ${deps.status(deps.projectRoot).detail}`, result: "" };
+				// `report` carries the real reason: NOT CONFIGURED (missing
+				// credentials) or NOT AUTHORIZED (no live human grant).
+				return { denied: true, reason: report, result: "" };
 			}
 
 			// ---- pre-image capture (for the rollback journal) ----------------
@@ -181,11 +198,18 @@ export function registerRuntimeTools(
 			}
 
 			// ---- execute ----------------------------------------------------
-			const rpc = await client.executeKw<unknown>(model, method, callArgs, callKwargs);
+			const rpc = await client.executeKw<unknown>(model, method, callArgs, callKwargs, undefined, exec?.signal as AbortSignal | undefined);
 			if (!rpc.ok) {
 				// Domain failure over a successful transport: keep `denied:false`
 				// (this is NOT a policy denial) but mark it unmistakably so the
-				// model, the renderer and any text consumer never read it as OK.
+				// model, the renderer and any text consumer never read it as OK,
+				// and record it as an ERROR in the audit trail.
+				deps.auditFailure?.({
+					tool: "odoo_execute",
+					op: `${model}.${method}`,
+					...(typeof exec?.callId === "string" ? { callId: exec.callId } : {}),
+					reason: `SERVER ERROR: ${String(rpc.error).slice(0, 500)}`,
+				});
 				return { denied: false, reason: "SERVER ERROR — RPC call failed", result: rpc.error };
 			}
 

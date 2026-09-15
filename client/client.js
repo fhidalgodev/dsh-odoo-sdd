@@ -192,6 +192,15 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		} catch (e) { /* styling is non-fatal */ }
 	}
 
+	/** Remove the stylesheet this plugin injected (dispose/HMR hygiene). */
+	function removeCss() {
+		try {
+			if (typeof document === "undefined") return;
+			var el = document.getElementById("odoo-sdd-css");
+			if (el && el.parentNode) el.parentNode.removeChild(el);
+		} catch (e) { /* styling is non-fatal */ }
+	}
+
 	/** Current, normalized snapshot of our namespace (defensive). */
 	/**
 	 * Read the settings scope snapshot. The snapshot is NOT the section itself:
@@ -565,7 +574,9 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		try {
 			ctx.effect(function () { ctx.locale.register(NS, { zh: zh, en: en }); }, "odoo-sdd: dictionaries");
 			var t = ctx.locale.bind(NS);
-			injectCss();
+			// Registered as an effect so dispose/HMR removes the stylesheet it
+			// injected instead of leaking it into the document head forever.
+			ctx.effect(function () { injectCss(); return removeCss; }, "odoo-sdd: stylesheet");
 
 			ctx.inject(["settingsScope"], function (scoped) {
 				var scope = null;

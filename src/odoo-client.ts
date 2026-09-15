@@ -87,20 +87,35 @@ export class OdooClient {
 		return `${this.#credentials.url} db=${this.#credentials.db} user=${this.#credentials.username}`;
 	}
 
-	/** Low-level JSON-RPC POST with timeout and secret redaction. */
+	/** Low-level JSON-RPC POST with timeout, caller cancellation and redaction. */
 	async #rpc<T>(
 		path: string,
 		body: JsonRpcEnvelope | Record<string, unknown>,
 		timeoutMs = DEFAULT_TIMEOUT_MS,
+		callerSignal?: AbortSignal,
 	): Promise<RpcOutcome<T>> {
 		const controller = new AbortController();
 		const timer = setTimeout(() => controller.abort(), timeoutMs);
+		// Forward the host's cancellation: when the caller aborts (turn
+		// cancelled, disposal), the in-flight request must settle instead of
+		// running to completion. `AbortSignal.any` keeps the timeout too.
+		const signal =
+			callerSignal === undefined
+				? controller.signal
+				: typeof AbortSignal.any === "function"
+					? AbortSignal.any([controller.signal, callerSignal])
+					: controller.signal;
+		const onCallerAbort = (): void => controller.abort();
+		if (callerSignal !== undefined) {
+			if (callerSignal.aborted) controller.abort();
+			else callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+		}
 		try {
 			const response = await fetch(this.#credentials.url + path, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify(body),
-				signal: controller.signal,
+				signal,
 				// Never follow redirects, which could re-send an authenticated
 				// JSON-RPC body to an unintended host (307/308 preserve it).
 				redirect: "error",
@@ -127,6 +142,7 @@ export class OdooClient {
 			return { ok: false, error: redact(`Request failed: ${message}`, this.#credentials), headers: null };
 		} finally {
 			clearTimeout(timer);
+			if (callerSignal !== undefined) callerSignal.removeEventListener("abort", onCallerAbort);
 		}
 	}
 
@@ -189,6 +205,7 @@ export class OdooClient {
 		args: unknown[],
 		kwargs: Record<string, unknown> = {},
 		timeoutMs = DEFAULT_TIMEOUT_MS,
+		signal?: AbortSignal,
 	): Promise<RpcResult<T>> {
 		const uid = await this.#ensureUid();
 		if (!uid.ok) return uid;
@@ -201,7 +218,7 @@ export class OdooClient {
 				args: [this.#credentials.db, uid.value, this.#credentials.secret, model, method, args, kwargs],
 			},
 			id: randomUUID(),
-		}, timeoutMs);
+		}, timeoutMs, signal);
 		return res.ok ? { ok: true, value: res.value } : { ok: false, error: res.error };
 	}
 
@@ -273,8 +290,15 @@ export class OdooClient {
 	 */
 	async recentErrors(limit = 20, sinceMinutes = 30): Promise<RpcResult<LogEntry[]>> {
 		const since = new Date(Date.now() - sinceMinutes * 60_000).toISOString().replace("T", " ").slice(0, 19);
+		// `ir.logging.level` is a text column whose encoding varies by version:
+		// named severities on recent releases, numeric Python levels on older
+		// ones. Matching an explicit membership set covers both, where the old
+		// `>= "40"` performed a lexicographic comparison on text.
 		const res = await this.executeKw<Array<Record<string, unknown>>>("ir.logging", "search_read", [
-			[["level", ">=", "40"], ["create_date", ">=", since]],
+			[
+				["level", "in", ["ERROR", "CRITICAL", "error", "critical", "40", "50"]],
+				["create_date", ">=", since],
+			],
 		], {
 			fields: ["create_date", "level", "type", "name", "message", "path", "line", "func"],
 			order: "create_date desc",
@@ -305,6 +329,14 @@ export class OdooClient {
 	 * @returns the path of the session file and the authenticated uid.
 	 */
 	async mintSession(projectRoot: string): Promise<RpcResult<{ sessionFile: string; uid: number }>> {
+		// NOTE: `/web/session/authenticate` authenticates a WEB session, which
+		// expects the account password. An API key (recommended for JSON-RPC)
+		// is generally NOT accepted here, so a failure gets an explicit hint
+		// instead of an opaque error.
+		const webHint =
+			" A web session needs the account PASSWORD (or a dedicated service account); " +
+			"an API key authenticates JSON-RPC (odoo_module/odoo_execute/odoo_errors) but is " +
+			"not a web-session credential. UI tests can also run against a manually created session.";
 		const res = await this.#rpc<{ uid: number; session_id?: string }>("/web/session/authenticate", {
 			jsonrpc: "2.0",
 			method: "call",
@@ -315,9 +347,9 @@ export class OdooClient {
 			},
 			id: randomUUID(),
 		});
-		if (!res.ok) return { ok: false, error: res.error };
+		if (!res.ok) return { ok: false, error: res.error + webHint };
 		if (!res.value || typeof res.value.uid !== "number" || res.value.uid === 0) {
-			return { ok: false, error: "Session authentication rejected (uid=0). Check .env values." };
+			return { ok: false, error: "Session authentication rejected (uid=0). Check .env values." + webHint };
 		}
 		// Prefer the real session cookie from Set-Cookie; fall back to the
 		// session_id returned in the payload.

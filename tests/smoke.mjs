@@ -4,7 +4,7 @@
  * security (S1 https/loopback guard, S2 redaction/scrub/path-masking),
  * and the Q3 fail-closed host guard.
  */
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, statSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, statSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
@@ -130,11 +130,53 @@ for (let i = 0; i < 3; i++) {
 }
 check("deep diagnosis required after 3 failures", diag === true);
 
-sdd.recordSuccess(st, "all ACs verified");
+// Ladder enforcement (lote 2): a blind retry is refused until the diagnosis is
+// actually RECORDED (asking for it does not satisfy it), and PASSED needs
+// per-AC evidence.
+r = sdd.transition(st, "VERIFY", null, "blind retry");
+check("retry refused while a diagnosis is owed", r.ok === false && /diagnosis/i.test(r.reason));
+const refused = sdd.recordSuccess(st, "all ACs verified");
+check("PASSED refused while test-plan.md still has a pending AC", refused.ok === false && refused.gaps.length > 0);
+check("no PASSED verdict was written on refusal", sdd.readVerdict(specDir) === null);
+sdd.recordDiagnosis(st, "root cause: the compute field lacked a depends");
+check("recorded diagnosis clears the ladder", sdd.diagnosisPending(st) === false);
+r = sdd.transition(st, "VERIFY", null, "retry after diagnosis");
+check("retry allowed after the diagnosis is recorded", r.ok === true);
+
+// Evidence gate: completing every AC row lets the verdict through.
+writeFileSync(
+	join(specDir, "test-plan.md"),
+	"# Test Plan\n\n| AC | Scenario | Layer (static/server/rpc/ui/manual) | Status |\n|---|---|---|---|\n" +
+		"| AC1 | create a record | rpc | passed |\n",
+);
+const accepted = sdd.recordSuccess(st, "AC1 verified over RPC");
+check("PASSED accepted once every AC has a result", accepted.ok === true);
 const verdict = sdd.readVerdict(specDir);
 check("verdict persisted as PASSED", verdict !== null && verdict.passed === true);
 r = sdd.transition(st, "DONE", null, "verified");
 check("DONE reachable after PASSED verdict", r.ok === true && st.phase === "DONE");
+
+// securityReviewRequired is a real gate: a PASSED verdict alone is not enough.
+{
+	const secDir = join(dir, "specs", "004-sec");
+	sdd.initSpecDir(secDir);
+	writeFileSync(
+		join(secDir, "test-plan.md"),
+		"# Test Plan\n\n| AC | Scenario | Layer (static/server/rpc/ui/manual) | Status |\n|---|---|---|---|\n" +
+			"| AC1 | create a record | rpc | passed |\n",
+	);
+	const secSt = sdd.loadState(secDir);
+	secSt.phase = "FIX_LOOP";
+	sdd.recordSuccess(secSt, "AC1 ok");
+	let sr = sdd.transition(secSt, "DONE", null, "done", "human", "supervised", { securityReviewRequired: true });
+	check("DONE refused without a security review when the policy is armed", sr.ok === false && /security/i.test(sr.reason));
+	writeFileSync(join(secDir, "security-report.md"), "# Security review\n\nVerdict: REJECTED — sudo() unjustified\n");
+	sr = sdd.transition(secSt, "DONE", null, "done", "human", "supervised", { securityReviewRequired: true });
+	check("DONE refused when the security review is REJECTED", sr.ok === false && /security/i.test(sr.reason));
+	writeFileSync(join(secDir, "security-report.md"), "# Security review\n\nVerdict: APPROVED\n");
+	sr = sdd.transition(secSt, "DONE", null, "done", "human", "supervised", { securityReviewRequired: true });
+	check("DONE allowed once the security review is APPROVED", sr.ok === true && secSt.phase === "DONE");
+}
 
 writeFileSync(join(specDir, "stop.md"), "human intervention needed");
 r = sdd.transition(st, "FIX_LOOP", null, "should halt");
@@ -279,12 +321,20 @@ console.log("== onboarding & cascade (odoo_setup) ==");
 
 const registered = new Map();
 const capturedGuards = [];
+// Native approval seam: the default simulates a developer granting each ask
+// once (`'allowed-once'`); individual tests flip `approvalOutcome` to exercise
+// refusal/cancellation/unavailability (all fail-closed).
+let approvalOutcome = "allowed-once";
+const approvalRequests = [];
 const fakeCtx = {
 	tools: {
 		register: (t) => registered.set(t.name, t),
 		guard: (g) => { capturedGuards.push(g); return () => {}; },
 	},
 	on: () => () => {},
+	approval: {
+		request: async (req) => { approvalRequests.push(req); return approvalOutcome; },
+	},
 };
 
 // --- projA: full onboarding flow ---
@@ -333,7 +383,21 @@ check("connect reports NEEDS_SECRET", rs.connected === false && rs.detail.includ
 
 writeFileSync(scaffoldPath, content.replace("ODOO_PASSWORD=\n", "ODOO_PASSWORD=now-filled\n"), { mode: 0o600 });
 rs = await connect.execute({});
-check("connect proceeds to instance probe after secret filled", rs.detail.includes("Instance unreachable") && !rs.detail.includes("NEEDS_SECRET"));
+check(
+	"credentials alone do NOT authorize a connection (no grant)",
+	rs.connected === false && rs.detail.includes("NOT AUTHORIZED"),
+);
+rs = await setup.execute({ mode: "authorize" });
+check("authorize stores a connection grant after human approval", rs.status === "authorized");
+rs = await connect.execute({});
+check("connect proceeds to instance probe after authorization", rs.detail.includes("Instance unreachable") && !rs.detail.includes("NEEDS_SECRET"));
+rs = await setup.execute({ mode: "revoke" });
+check("revoke drops the grant", rs.status === "revoked");
+rs = await connect.execute({});
+check("revoking blocks the connection again", rs.detail.includes("NOT AUTHORIZED"));
+// Re-authorize so the rest of the flow keeps a live grant.
+rs = await setup.execute({ mode: "authorize" });
+check("re-authorize restores the grant", rs.status === "authorized");
 
 // --- projB: cascade precedence ---
 const projB = join(dir, "projB");
@@ -498,6 +562,66 @@ check("read defaults licensed", rc.config.licensed === "community");
 rc = await cfg.execute({ mode: "set", autonomy: "autonomous", licensed: "enterprise" });
 check("set persists autonomy/licensed", rc.ok === true && rc.config.autonomy === "autonomous" && rc.config.licensed === "enterprise");
 
+// --- native approval: the model cannot self-authorize (lote 2) -----------
+console.log("== native approval (grants, refusals, fail-closed) ==");
+const grantsMod = await import(new URL("grants.js", libDir).href);
+{
+	const projG = join(dir, "projG2");
+	mkdirSync(join(projG, ".sdd"), { recursive: true });
+	writeFileSync(
+		join(projG, ".sdd", ".env"),
+		"ODOO_URL=http://localhost:8069\nODOO_DB=dev\nODOO_USERNAME=admin\nODOO_PASSWORD=x\n",
+		{ mode: 0o600 },
+	);
+	plugin.apply(fakeCtx, { projectRoot: projG });
+	const gSetup = registered.get("odoo_setup");
+	const gCfg = registered.get("odoo_config");
+	const gConnect = registered.get("odoo_connect");
+
+	// A refused approval must not mint a grant nor change policy.
+	const saved = approvalOutcome;
+	approvalOutcome = "rejected";
+	let gr = await gSetup.execute({ mode: "authorize" });
+	check("refused approval does NOT authorize", gr.status === "not-authorized" && !grantsMod.readGrants(projG).grants.length);
+	gr = await gCfg.execute({ mode: "set", executeAllowlist: ["sale.order"] });
+	check("refused approval leaves configuration unchanged", gr.ok === false && gr.config.executeAllowlist.length === 0);
+	gr = await gSetup.execute({ mode: "autonomy", decision: "autonomous" });
+	check("refused approval cannot switch delegation mode", gr.status === "not-authorized");
+	approvalOutcome = "cancelled";
+	gr = await gSetup.execute({ mode: "authorize" });
+	check("cancelled approval does NOT authorize", gr.status === "not-authorized");
+
+	// A host without the approval seam must fail closed.
+	approvalOutcome = saved;
+	delete fakeCtx.approval;
+	gr = await gSetup.execute({ mode: "authorize" });
+	check("missing approval service fails closed (no grant)", gr.status === "not-authorized" && !grantsMod.readGrants(projG).grants.length);
+	gr = await gConnect.execute({});
+	check("no grant => connection stays blocked", gr.connected === false && gr.detail.includes("NOT AUTHORIZED"));
+	fakeCtx.approval = { request: async (req) => { approvalRequests.push(req); return approvalOutcome; } };
+
+	// With approval, the grant is minted and bound to the exact target.
+	gr = await gSetup.execute({ mode: "authorize" });
+	check("approved authorize mints a connection grant", gr.status === "authorized" && grantsMod.readGrants(projG).grants.length === 1);
+	const fpA = grantsMod.fingerprintOf("http://localhost:8069", "dev", "admin");
+	check("grant matches the current target fingerprint", grantsMod.hasValidGrant(projG, "connection", fpA) === true);
+	check(
+		"grant does NOT match a different target (url/db/user change invalidates it)",
+		grantsMod.hasValidGrant(projG, "connection", grantsMod.fingerprintOf("https://other.example", "dev", "admin")) === false &&
+			grantsMod.hasValidGrant(projG, "connection", grantsMod.fingerprintOf("http://localhost:8069", "prod", "admin")) === false &&
+			grantsMod.hasValidGrant(projG, "connection", grantsMod.fingerprintOf("http://localhost:8069", "dev", "other")) === false,
+	);
+	check("expired grant is not valid", grantsMod.hasValidGrant(projG, "connection", fpA, new Date(Date.now() + 24 * 60 * 60 * 1000)) === false);
+	check("corrupt grants file authorizes nothing (fail-closed)", (() => {
+		writeFileSync(grantsMod.grantsPath(projG), "{ not json", { mode: 0o600 });
+		const empty = grantsMod.readGrants(projG);
+		return empty.grants.length === 0 && grantsMod.hasValidGrant(projG, "connection", fpA) === false;
+	})());
+	const approvalCalls = approvalRequests.length;
+	check("approval requests carry the tool name and a reason", approvalRequests.some((r) => r.toolName === "odoo_setup" && typeof r.reason === "string" && r.reason.length > 10));
+	check("approval requests are actually issued (not bypassed)", approvalCalls > 0);
+}
+
 
 console.log("== checkpoints, security scan, ACL gate, policy guard, handoff ==");
 const cps = await import(new URL("checkpoints.js", libDir).href);
@@ -534,6 +658,149 @@ const escRestore = cps.restoreCheckpointFiles(projCp, "../evil");
 check("restore on an unsafe id restores nothing", escRestore.restored.length === 0 && escRestore.missing.length === 0);
 const escCreate = cps.createCheckpoint(projCp, { label: "escape", dirs: ["../outside"] });
 check("create with a traversal dir is rejected (no checkpoint)", escCreate === null);
+
+// ---- snapshots: symlinks and secrets stay out (lote 2) ------------------
+{
+	const projSnap = join(dir, "projSnap");
+	mkdirSync(join(projSnap, "mod"), { recursive: true });
+	writeFileSync(join(projSnap, "mod", "real.py"), "V1\n", { mode: 0o600 });
+	// A secret and a key must never be captured.
+	writeFileSync(join(projSnap, "mod", ".env"), "ODOO_PASSWORD=super-secret\n", { mode: 0o600 });
+	writeFileSync(join(projSnap, "mod", "server.key"), "PRIVATE KEY\n", { mode: 0o600 });
+	writeFileSync(join(projSnap, "mod", "id_rsa"), "PRIVATE KEY\n", { mode: 0o600 });
+	// A symlink pointing OUTSIDE the tree must not be followed or copied.
+	const outside = join(dir, "outside-target");
+	mkdirSync(outside, { recursive: true });
+	writeFileSync(join(outside, "leak.txt"), "SECRET OUTSIDE\n", { mode: 0o600 });
+	let linked = true;
+	try {
+		symlinkSync(outside, join(projSnap, "mod", "linkout"), "dir");
+		symlinkSync(join(outside, "leak.txt"), join(projSnap, "mod", "linkfile.txt"), "file");
+	} catch {
+		linked = false; // Windows/privilege: skip the link assertions
+	}
+	const snap = cps.createCheckpoint(projSnap, { label: "snap", dirs: ["mod"] });
+	check("snapshot created", snap !== null);
+	const paths = (snap?.files ?? []).map((f) => f.path);
+	check("snapshot keeps ordinary sources", paths.some((p) => p.endsWith("real.py")));
+	check("snapshot excludes .env", !paths.some((p) => p.endsWith(".env")));
+	check("snapshot excludes key material", !paths.some((p) => /\.key$|id_rsa$/.test(p)));
+	check("secret file is recognised as secret", cps.isSecretFile(".env") && cps.isSecretFile("server.pem") && cps.isSecretFile("id_rsa") && !cps.isSecretFile("models.py"));
+	if (linked) {
+		check("snapshot does not follow a directory symlink", !paths.some((p) => p.includes("linkout")));
+		check("snapshot does not follow a file symlink", !paths.some((p) => p.includes("linkfile")));
+	} else {
+		console.log("  SKIP  symlink assertions (no symlink support)");
+	}
+}
+
+// ---- audit: correlation, real duration, domain vs transport (lote 2) ----
+console.log("== audit trail (correlation, duration, domain failures) ==");
+{
+	const auditMod = await import(new URL("audit.js", libDir).href);
+	const runtimeMod = await import(new URL("tools-runtime.js", libDir).href);
+
+	// Entry shape carries the correlation id, the kind and a real duration.
+	const sink = join(dir, "projAuditShape");
+	mkdirSync(sink, { recursive: true });
+	const entry = auditMod.recordAudit(
+		sink,
+		{ tool: "odoo_execute", op: "sale.order.write", outcome: "error", kind: "rpc", callId: "c1", ms: 7, source: "tool", reason: "boom" },
+		null,
+	);
+	check("audit entry carries kind/callId/ms", entry.kind === "rpc" && entry.callId === "c1" && entry.ms === 7);
+	check("audit entry sanitizes the reason", typeof entry.reason === "string" && entry.reason.includes("boom"));
+
+	// The live listener correlates the call and measures the elapsed time.
+	const handlers = new Map();
+	const auditCtx = {
+		tools: { register: () => {}, guard: () => () => {} },
+		on: (ev, fn) => { handlers.set(ev, fn); return () => {}; },
+	};
+	const projAudit = join(dir, "projAuditLive");
+	mkdirSync(projAudit, { recursive: true });
+	plugin.apply(auditCtx, { projectRoot: projAudit });
+	handlers.get("tools/pre-execute")({ callId: "c9", name: "odoo_connect" });
+	await new Promise((r) => setTimeout(r, 15));
+	handlers.get("tools/result")({ callId: "c9", name: "odoo_connect", arguments: {} }, {});
+	const logged = readFileSync(join(projAudit, ".sdd", "audit.jsonl"), "utf8")
+		.trim().split("\n").map((l) => JSON.parse(l));
+	const live = logged.find((x) => x.callId === "c9");
+	check("audit listener correlates the tool call id", live !== undefined);
+	check("audit listener records a kind", live !== undefined && live.kind === "tool");
+	check("audit listener measures a real duration (not hard-coded 0)", live !== undefined && live.ms >= 10);
+
+	// A server-side failure is a domain error, NOT a transport success.
+	const rtTools = new Map();
+	const auditFailures = [];
+	runtimeMod.registerRuntimeTools(
+		{ tools: { register: (t) => rtTools.set(t.name, t) } },
+		{
+			client: () => ({ client: { executeKw: async () => ({ ok: false, error: "Traceback: boom" }) }, report: "stub" }),
+			status: () => ({ detail: "stub" }),
+			projectRoot: dir,
+			allowlist: () => ["sale.order"],
+			display: (v) => v,
+			auditFailure: (info) => auditFailures.push(info),
+		},
+	);
+	const rtx = rtTools.get("odoo_execute");
+	const rtOut = await rtx.execute(
+		{ model: "sale.order", method: "create", values: { name: "x" }, confirm_destructive: true },
+		{ callId: "call-123" },
+	);
+	check("server failure is not reported as a policy denial", rtOut.denied === false && /SERVER ERROR/.test(rtOut.reason));
+	check(
+		"server failure is recorded as a domain error with the call id",
+		auditFailures.length === 1 && auditFailures[0].callId === "call-123" && /SERVER ERROR/.test(auditFailures[0].reason),
+	);
+}
+
+// ---- transport details: log level query, cancellation, web session (lote 2) ----
+console.log("== transport details (log query, abort signal, web session) ==");
+{
+	const odooMod = await import(new URL("odoo-client.js", libDir).href);
+	const creds = { url: "http://127.0.0.1:8069", db: "dev", username: "admin", secret: "k", envFile: "/tmp/x", source: "project" };
+	const calls = [];
+	const realFetch = globalThis.fetch;
+	globalThis.fetch = async (url, init) => {
+		const body = JSON.parse(init.body);
+		calls.push({ url: String(url), body, signal: init.signal });
+		const params = body.params ?? {};
+		// Authenticate first: `common.authenticate` is also service "common".
+		if (String(params.method) === "authenticate") {
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: 7 }), { status: 200 });
+		}
+		if (String(params.service) === "common") {
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { server_version: "17.0" } }), { status: 200 });
+		}
+		const method = params.args?.[4];
+		if (method === "search_read" && params.args?.[3] === "ir.logging") {
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: [] }), { status: 200 });
+		}
+		return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: true }), { status: 200 });
+	};
+	try {
+		const oc = new odooMod.OdooClient(creds);
+		const errs = await oc.recentErrors(5, 30);
+		check("recentErrors round-trips", errs.ok === true);
+		const logCall = calls.find((c) => c.body?.params?.args?.[3] === "ir.logging");
+		check(
+			"log query filters level by membership, not a text comparison",
+			logCall !== undefined && JSON.stringify(logCall.body.params.args[5]).includes('"in"') && !JSON.stringify(logCall.body.params.args[5]).includes('">=","40"'),
+		);
+
+		// Cancellation: an aborted caller signal must reach fetch aborted.
+		const ac = new AbortController();
+		ac.abort();
+		calls.length = 0;
+		await oc.executeKw("res.partner", "search_read", [[]], {}, undefined, ac.signal);
+		const last = calls[calls.length - 1];
+		check("an aborted caller signal reaches fetch", last !== undefined && last.signal?.aborted === true);
+	} finally {
+		globalThis.fetch = realFetch;
+	}
+}
 
 
 // ---- security scan ------------------------------------------------------
@@ -626,6 +893,19 @@ writeFileSync(join(projGuard, ".sdd", "stop.md"), "operator halt\n", { mode: 0o6
 gR = guard({ name: "odoo_connect", arguments: {} });
 check("guard halts every tool on stop.md", typeof gR === "string" && gR.includes("stop.md"));
 rmSync(join(projGuard, ".sdd", "stop.md"));
+
+// Fail-CLOSED: an internal guard failure must deny, never allow (lote 2).
+{
+	const hostile = {};
+	Object.defineProperty(hostile, "name", {
+		get() { throw new Error("hostile execution"); },
+	});
+	const gFail = guard(hostile);
+	check(
+		"guard denies fail-closed on an internal error",
+		typeof gFail === "string" && /fail/i.test(gFail) && /hostile execution|internally/i.test(gFail),
+	);
+}
 
 // ---- sdd_phase rollback + handoff --------------------------------------
 const projH = join(dir, "projH");

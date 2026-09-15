@@ -64,6 +64,12 @@ import {
 	isSafeSegment,
 	type DataOp,
 } from "./checkpoints.js";
+import {
+	fingerprintOf,
+	hasValidGrant,
+	writeGrant,
+	revokeGrants,
+} from "./grants.js";
 import { scanModule } from "./security-scan.js";
 import { OdooClient } from "./odoo-client.js";
 import {
@@ -73,6 +79,7 @@ import {
 	transition,
 	recordFailure,
 	recordSuccess,
+	recordDiagnosis,
 	recordFailedVerdict,
 	summarize,
 	kbRead,
@@ -171,6 +178,66 @@ function specDirOf(config: OdooSddConfig, specId: string): string {
 	return join(root(config), config.specsDir ?? "specs", safe);
 }
 
+/** Outcome of a host approval request (mirrors @deepseek-ai/dsh-user-approval). */
+type ApprovalOutcome = "allowed-once" | "rejected" | "cancelled" | "unavailable";
+
+/** Minimal shape of the host's native approval seam. */
+interface ApprovalApi {
+	request(req: {
+		agent?: unknown;
+		toolName: string;
+		callId?: unknown;
+		reason?: string;
+		signal?: unknown;
+	}): Promise<ApprovalOutcome>;
+}
+
+/** Host tool-call id of an execution, when the host supplied one. */
+function callIdOf(exec: unknown): string | undefined {
+	const e = (exec ?? {}) as { callId?: unknown };
+	return typeof e.callId === "string" ? e.callId : undefined;
+}
+
+/**
+ * Ask the host's native approval seam for a one-shot human decision.
+ *
+ * Fail-CLOSED: no `ctx.approval` service, a thrown error, or any outcome other
+ * than `'allowed-once'` is reported as `'unavailable'`/its own refusal — never
+ * as consent. This is the only path that can mint a grant, and the model cannot
+ * fabricate its outcome.
+ * @param ctx - plugin context carrying the optional approval service.
+ * @param exec - the running execution (agent, callId, signal).
+ * @param toolName - tool the question is about (presentation and audit).
+ * @param reason - human-readable explanation of why approval is needed.
+ * @returns the approval outcome, or `'unavailable'` when it cannot be asked.
+ */
+async function requestNativeApproval(
+	ctx: unknown,
+	exec: unknown,
+	toolName: string,
+	reason: string,
+): Promise<ApprovalOutcome> {
+	try {
+		const api = (ctx as { approval?: ApprovalApi }).approval;
+		if (api === null || api === undefined || typeof api.request !== "function") return "unavailable";
+		const e = (exec ?? {}) as { agent?: unknown; signal?: unknown };
+		const outcome = await api.request({
+			agent: e.agent,
+			toolName,
+			...(callIdOf(exec) !== undefined ? { callId: callIdOf(exec) } : {}),
+			reason,
+			...(e.signal !== undefined ? { signal: e.signal } : {}),
+		});
+		return outcome === "allowed-once"
+			? "allowed-once"
+			: outcome === "rejected" || outcome === "cancelled" || outcome === "unavailable"
+				? outcome
+				: "unavailable";
+	} catch {
+		return "unavailable";
+	}
+}
+
 /** Load credentials and build a client, or a remediation report. */
 function clientFor(projectRoot: string): {
 	client: OdooClient | null;
@@ -181,10 +248,25 @@ function clientFor(projectRoot: string): {
 	if (!loaded.ok) {
 		return { client: null, report: `NOT CONFIGURED (${loaded.reason}): ${loaded.message}`, credentials: null };
 	}
+	const creds = loaded.credentials;
+	// Authorization is independent of credentials: possessing them is not
+	// consent. Without a live human grant for THIS target, no client is handed
+	// out, so no tool can open a socket. Credentials are still returned so
+	// redaction keeps working on every output path.
+	if (!hasValidGrant(projectRoot, "connection", fingerprintOf(creds.url, creds.db, creds.username))) {
+		return {
+			client: null,
+			report:
+				`NOT AUTHORIZED: no live human grant for ${creds.url} (db=${creds.db}, user=${creds.username}). ` +
+				"Run odoo_setup mode=authorize and have the developer approve the connection; " +
+				"credentials alone do not authorize access.",
+			credentials: creds,
+		};
+	}
 	return {
-		client: new OdooClient(loaded.credentials),
-		report: describeCredentials(loaded.credentials),
-		credentials: loaded.credentials,
+		client: new OdooClient(creds),
+		report: describeCredentials(creds),
+		credentials: creds,
 	};
 }
 
@@ -431,10 +513,15 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		},
 		async execute() {
 			const projectRoot = root(config);
-			const { client, report } = clientFor(projectRoot);
+			const { client, report, credentials } = clientFor(projectRoot);
 			if (client === null) {
-				const setup = setupStatusFor(projectRoot);
-				return { connected: false, target: "", detail: setup.detail };
+				// Two different situations share a null client:
+				//  - credentials loaded but no live human grant => NOT AUTHORIZED
+				//    (report says exactly that);
+				//  - no usable credentials => surface the onboarding state
+				//    (NEEDS_SECRET / DEFERRED / SKIPPED / needs-setup).
+				if (credentials !== null) return { connected: false, target: "", detail: report };
+				return { connected: false, target: "", detail: setupStatusFor(projectRoot).detail };
 			}
 			const version = await client.version();
 			if (!version.ok) {
@@ -469,14 +556,16 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			"cascade state (.sdd/.env → user config → legacy .env), the persisted setup decision, and " +
 			".gitignore coverage. mode=interactive writes a chmod-600 .env scaffold with the NON-SECRET " +
 			"fields (url, db, username) and leaves ODOO_PASSWORD empty for the developer to fill by hand " +
-			"— secrets are never accepted as tool parameters. mode=later defers setup until the VERIFY " +
-			"phase; mode=skip marks the project to run without an instance (manual verification); " +
-			"mode=reset clears the persisted decision.",
+			"— secrets are never accepted as tool parameters. mode=authorize asks the DEVELOPER (native " +
+			"approval) for a connection grant covering the current url/db/user: without it no tool may " +
+			"open a socket, because possessing credentials is not authorization. mode=revoke drops the " +
+			"stored grants. mode=later defers setup until the VERIFY phase; mode=skip marks the project " +
+			"to run without an instance (manual verification); mode=reset clears the persisted decision.",
 		parameters: {
 			mode: {
 				type: "string",
 				required: true,
-				enum: ["check", "interactive", "later", "skip", "reset", "autonomy"],
+				enum: ["check", "interactive", "later", "skip", "reset", "autonomy", "authorize", "revoke"],
 				description: "Onboarding operation.",
 			},
 			url: { type: "string", description: "Instance base URL for mode=interactive (validated with the transport guard; no embedded credentials)." },
@@ -508,19 +597,93 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			render: (_args: unknown, value: unknown) => [text((value as { detail: string }).detail)],
 		},
 		async execute(args: {
-			mode: "check" | "interactive" | "later" | "skip" | "reset" | "autonomy";
+			mode: "check" | "interactive" | "later" | "skip" | "reset" | "autonomy" | "authorize" | "revoke";
 			url?: string;
 			db?: string;
 			username?: string;
 			scope?: "user" | "project";
 			decision?: "supervised" | "autonomous";
-		}) {
+		}, exec?: unknown) {
 			const projectRoot = root(config);
 			const autonomyMode = readAutonomy(projectRoot);
 			appendAuditLine(projectRoot, "odoo_setup/" + args.mode, args, clientFor(projectRoot).credentials);
 
+			if (args.mode === "authorize") {
+				const loaded = loadCredentials(projectRoot);
+				if (!loaded.ok) {
+					return {
+						mode: "authorize" as string,
+						status: "not-authorized",
+						detail:
+							`Cannot authorize yet: credentials are not configured (${loaded.reason}). ` +
+							"Complete .env first, then run mode=authorize.",
+					};
+				}
+				const creds = loaded.credentials;
+				const fingerprint = fingerprintOf(creds.url, creds.db, creds.username);
+				const outcome = await requestNativeApproval(
+					ctx,
+					exec,
+					"odoo_setup",
+					`Authorize Odoo connection to ${creds.url} (db=${creds.db}, user=${creds.username})? ` +
+						"The grant covers this exact target and expires; any change to url/db/user requires a new one.",
+				);
+				if (outcome !== "allowed-once") {
+					return {
+						mode: "authorize" as string,
+						status: "not-authorized",
+						detail:
+							`Connection NOT authorized (approval outcome: ${outcome}). ` +
+							"No socket will be opened towards the instance. Ask the developer to approve " +
+							"mode=authorize from a session whose answerer is attached.",
+					};
+				}
+				writeGrant(projectRoot, {
+					kind: "connection",
+					fingerprint,
+					callId: callIdOf(exec),
+					reason: "odoo_setup mode=authorize",
+				});
+				return {
+					mode: "authorize" as string,
+					status: "authorized",
+					detail:
+						`Connection AUTHORIZED by the developer for ${creds.url} (db=${creds.db}, ` +
+						`user=${creds.username}). The grant is stored in .sdd/grants.json (0600, gitignored) ` +
+						"and expires; revoke it with mode=revoke or by changing the target.",
+				};
+			}
+
+			if (args.mode === "revoke") {
+				const removed = revokeGrants(projectRoot);
+				return {
+					mode: "revoke" as string,
+					status: "revoked",
+					detail:
+						`Revoked ${removed} stored grant(s). Every tool that would reach the Odoo instance ` +
+						"is blocked until a new human authorization (mode=authorize).",
+				};
+			}
+
 			if (args.mode === "autonomy") {
 				const decision: AutonomyMode = args.decision === "autonomous" ? "autonomous" : "supervised";
+				// Delegation mode decides WHO answers every later gate, so the model
+				// may not change it on its own authority: a human must approve.
+				const outcome = await requestNativeApproval(
+					ctx,
+					exec,
+					"odoo_setup",
+					`Switch the delegation mode to ${decision.toUpperCase()}? This decides who answers every later phase gate.`,
+				);
+				if (outcome !== "allowed-once") {
+					return {
+						mode: "autonomy" as string,
+						status: "not-authorized",
+						detail:
+							`Delegation mode unchanged (approval outcome: ${outcome}). A human must approve ` +
+							"the switch; the model cannot relax the pipeline's own gates.",
+					};
+				}
 				const existing = readSetupState(projectRoot);
 				writeSetupState(projectRoot, {
 					...(existing ?? { status: "?" as SetupStatus }),
@@ -533,9 +696,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					mode: "autonomy" as string,
 					status: decision,
 					detail:
-						`Delegation mode set to ${decision.toUpperCase()}. ` +
+						`Delegation mode set to ${decision.toUpperCase()} (approved by the developer). ` +
 						(decision === "autonomous"
-							? "A human-proxy agent will answer the phase gates with only APP (line-start APPROVED) accepted, fail-closed. stop.md and iteration ceilings remain armed; BLOCKED escalates to a human."
+							? "A human-proxy agent will answer the phase gates with only a line-start APPROVED accepted, fail-closed. stop.md and iteration ceilings remain armed; BLOCKED escalates to a human. Connection grants do NOT cover this: a human still authorizes the instance once (mode=authorize)."
 							: "A human will answer each phase gate (ask_user_question). You may still switch to autonomous with mode=autonomy decision=autonomous."),
 				};
 			}
@@ -871,7 +1034,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			operation: {
 				type: "string",
 				required: true,
-				enum: ["init", "clarify", "status", "mark_spec_loaded", "advance", "fail", "succeed", "rollback"],
+				enum: ["init", "clarify", "status", "mark_spec_loaded", "advance", "fail", "succeed", "rollback", "diagnose"],
 				description: "State-machine operation to perform.",
 			},
 			spec_id: {
@@ -931,7 +1094,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 		},
 		async execute(args: {
-			operation: "init" | "clarify" | "status" | "mark_spec_loaded" | "advance" | "fail" | "succeed" | "rollback";
+			operation: "init" | "clarify" | "status" | "mark_spec_loaded" | "advance" | "fail" | "succeed" | "rollback" | "diagnose";
 			spec_id: string;
 			mode?: "create" | "bug";
 			licensed?: "community" | "enterprise";
@@ -1045,6 +1208,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					note,
 					args.approval_source ?? "human",
 					readAutonomy(root(config)),
+					{ securityReviewRequired: effectiveConfig().securityReviewRequired },
 				);
 				if (result.ok) {
 					writeActiveState(root(config), { specId: args.spec_id, phase: result.state.phase });
@@ -1066,11 +1230,33 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						: "Failure recorded (honest FAILED verdict persisted). Fix the code and re-verify.",
 				};
 			}
+			if (args.operation === "diagnose") {
+				// The ladder owes a diagnosis; this is what actually clears it.
+				const updatedD = recordDiagnosis(state, note || "root-cause diagnosis recorded");
+				return {
+					operation: "diagnose" as string, phase: updatedD.phase as string, ok: true, requireDiagnosis: false,
+					summary: summarize(updatedD),
+					detail:
+						"Root-cause diagnosis recorded in the KB. The fix loop may resume — the retry gate is " +
+						"open until the failure streak trips the ladder again.",
+				};
+			}
 			// succeed
-			const updated = recordSuccess(state, note || "verification passed");
+			const outcome = recordSuccess(state, note || "verification passed");
+			if (!outcome.ok) {
+				return {
+					operation: "succeed" as string, phase: state.phase as string, ok: false, requireDiagnosis: false,
+					summary: summarize(state),
+					detail:
+						"PASSED verdict REFUSED: the evidence is incomplete. " +
+						outcome.gaps.join(" ") +
+						" Record the real result of each acceptance criterion in test-plan.md, then retry. " +
+						"A green verdict must map to a tested criterion.",
+				};
+			}
 			return {
-				operation: "succeed" as string, phase: updated.phase as string, ok: true, requireDiagnosis: false,
-				summary: summarize(updated),
+				operation: "succeed" as string, phase: outcome.state.phase as string, ok: true, requireDiagnosis: false,
+				summary: summarize(outcome.state),
 				detail: "PASSED verdict persisted to verify-verdict.txt. The pipeline may now advance to DONE.",
 			};
 		},
@@ -1185,7 +1371,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			securityInterviewRequired?: boolean;
 			auditAllTools?: boolean;
 			maxCheckpoints?: number;
-		}) {
+		}, exec?: unknown) {
 			/** Project the stored JSON onto the known, typed configuration shape. */
 			const normalize = (data: Record<string, unknown>) => {
 				const asString = (v: unknown, fallback: string): string => (typeof v === "string" ? v : fallback);
@@ -1219,6 +1405,26 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				};
 			}
 			// mode=set
+			// Deployment policy is the model's to PROPOSE, not to grant. Changing
+			// the allowlist or switching a fail-closed guard off requires a human
+			// decision through the native approval seam.
+			const outcome = await requestNativeApproval(
+				ctx,
+				exec,
+				"odoo_config",
+				"Apply plugin configuration changes (allowlist / policy guards / repositories)? " +
+					"This alters which RPC mutations are permitted and which safety guards stay armed.",
+			);
+			if (outcome !== "allowed-once") {
+				return {
+					mode: "set" as string,
+					ok: false,
+					config: normalize(loadConfigFile()),
+					detail:
+						`Configuration unchanged (approval outcome: ${outcome}). A human must approve ` +
+						"policy changes; ask the developer to confirm, then retry.",
+				};
+			}
 			const current = loadConfigFile();
 			const updates: Record<string, unknown> = {};
 			if (args.communityRepoUrl !== undefined) updates["communityRepoUrl"] = args.communityRepoUrl;
@@ -1734,22 +1940,42 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						}
 					}
 					return undefined;
-				} catch {
-					// A guard failure must never brick the surface: allow and move on.
-					return undefined;
+				} catch (err) {
+					// Fail-CLOSED: an internal guard failure must deny, never allow.
+					// Allowing here would turn any bug (unreadable state, unexpected
+					// shape) into a silent policy bypass.
+					const detail = err instanceof Error ? err.message : String(err);
+					return (
+						"Mutation blocked: the policy guard failed internally " +
+						`(${detail.slice(0, 200)}). Denying fail-closed — inspect .sdd/ and remove stop.md if it is stale.`
+					);
 				}
 			});
 		}
 
 		if (typeof ctx.on === "function") {
+			// Stamp the start of every call so the result entry carries a real
+			// duration instead of the previous hard-coded 0.
+			const startedAt = new Map<string, number>();
+			ctx.on("tools/pre-execute", (...eventArgs: unknown[]) => {
+				try {
+					const exec = (eventArgs[0] ?? {}) as { callId?: unknown };
+					if (typeof exec.callId === "string") startedAt.set(exec.callId, Date.now());
+				} catch {
+					// best-effort timing
+				}
+			});
 			ctx.on("tools/result", (...eventArgs: unknown[]) => {
 				try {
 					const cfg = effectiveConfig();
 					if (!cfg.auditAllTools) return;
-					const execution = (eventArgs[0] ?? {}) as { name?: unknown; arguments?: unknown };
+					const execution = (eventArgs[0] ?? {}) as { name?: unknown; arguments?: unknown; callId?: unknown };
 					const result = (eventArgs[1] ?? {}) as { isError?: unknown; error?: unknown };
 					const active = readActiveState(cfg.projectRoot);
 					const failed = Boolean(result.isError) || result.error !== undefined;
+					const callId = typeof execution.callId === "string" ? execution.callId : undefined;
+					const began = callId !== undefined ? startedAt.get(callId) : undefined;
+					if (callId !== undefined) startedAt.delete(callId);
 					recordAudit(
 						cfg.projectRoot,
 						{
@@ -1757,7 +1983,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							// `arguments` is the host contract; `args` is legacy.
 							args: execution.arguments ?? (execution as { args?: unknown }).args,
 							outcome: failed ? "error" : "ok",
+							ms: began === undefined ? 0 : Math.max(0, Date.now() - began),
 							source: "tool",
+							kind: "tool",
+							...(callId !== undefined ? { callId } : {}),
 							phase: active.phase ?? undefined,
 							specId: active.specId ?? undefined,
 						},
@@ -1785,5 +2014,28 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			}
 		},
 		display: (v) => displayPath(v),
+		auditFailure: (info) => {
+			try {
+				const cfg = effectiveConfig();
+				const active = readActiveState(cfg.projectRoot);
+				recordAudit(
+					cfg.projectRoot,
+					{
+						tool: info.tool,
+						op: info.op,
+						outcome: "error",
+						source: "tool",
+						kind: "rpc",
+						...(info.callId !== undefined ? { callId: info.callId } : {}),
+						reason: info.reason,
+						phase: active.phase ?? undefined,
+						specId: active.specId ?? undefined,
+					},
+					clientFor(cfg.projectRoot).credentials,
+				);
+			} catch {
+				// auditing is best-effort
+			}
+		},
 	});
 }

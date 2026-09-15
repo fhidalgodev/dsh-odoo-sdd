@@ -83,14 +83,29 @@ function visibleLines(lines) {
 }
 
 /**
+ * Normalize line endings to `\n`.
+ *
+ * Windows git checks text files out with CRLF, so splitting the RAW content on
+ * `"\n"` leaves a trailing `\r` on every line: `lines[0] === "# …"` then fails
+ * with a message that looks identical, because the `\r` is invisible. Every
+ * reader in this file normalizes, so the assertions are about the document and
+ * not about the platform's checkout.
+ * @param text - raw file content.
+ * @returns the content with `\r\n` and lone `\r` folded to `\n`.
+ */
+function normalize(text) {
+	return text.replace(/\r\n?/g, "\n");
+}
+
+/**
  * Extract the first-cell names of the table that follows the heading matching
  * `matcher`, stopping at the next same-or-higher heading.
- * @param text - full README text.
+ * @param rawText - full README text (any line ending).
  * @param matcher - predicate over the heading line.
  * @returns the first-cell identifiers found.
  */
-function tableAfter(text, matcher) {
-	const lines = text.split("\n");
+function tableAfter(rawText, matcher) {
+	const lines = normalize(rawText).split("\n");
 	const visible = visibleLines(lines);
 	let at = -1;
 	for (let k = 0; k < visible.length; k += 1) {
@@ -110,19 +125,32 @@ function tableAfter(text, matcher) {
 	return out;
 }
 
+/** First line of a document, whatever its line endings are. */
+function firstLine(rawText) {
+	return normalize(rawText).split("\n")[0];
+}
+
+/** Heading level tokens (`#`, `##`, `###`) in document order, fences skipped. */
+function headingLevels(rawText) {
+	const lines = normalize(rawText).split("\n");
+	return visibleLines(lines)
+		.map((i) => lines[i])
+		.filter((l) => /^#{1,3} /.test(l))
+		.map((l) => l.split(" ")[0]);
+}
+
 const docs = FILES.map((entry) => {
-	const text = readFileSync(join(root, entry.file), "utf8");
+	const raw = readFileSync(join(root, entry.file), "utf8");
+	const text = normalize(raw);
 	const lines = text.split("\n");
 	const visible = visibleLines(lines);
 	return {
 		...entry,
+		raw,
 		text,
 		lines,
-		tools: tableAfter(text, (h) => /tools/i.test(h)),
-		headings: visible
-			.map((i) => lines[i])
-			.filter((l) => /^#{1,3} /.test(l))
-			.map((l) => l.split(" ")[0]),
+		tools: tableAfter(raw, (h) => /tools/i.test(h)),
+		headings: headingLevels(raw),
 	};
 });
 
@@ -130,6 +158,23 @@ for (const doc of docs) {
 	check(`${doc.file}: exists and is not empty`, doc.text.length > 2000, `${doc.text.length} bytes`);
 	check(`${doc.file}: starts with the exact H1`, doc.lines[0] === doc.h1, doc.lines[0]);
 	check(`${doc.file}: no YAML frontmatter block`, !doc.text.startsWith("---"));
+	// Windows git checks the file out with CRLF. Pin that the contract survives
+	// it here, on Linux, instead of learning it from a red Windows CI run: the
+	// failure mode is invisible (a trailing `\r` in an otherwise equal line).
+	check(
+		`${doc.file}: the contract holds with CRLF line endings (Windows checkout)`,
+		(() => {
+			const crlf = doc.text.replace(/\n/g, "\r\n");
+			if (firstLine(crlf) !== doc.h1) return false;
+			const crlfTools = [...tableAfter(crlf, (h) => /tools/i.test(h))].sort();
+			if (crlfTools.length !== doc.tools.length || !crlfTools.every((n, i) => n === [...doc.tools].sort()[i])) return false;
+			if (headingLevels(crlf).length !== doc.headings.length) return false;
+			const crlfLines = normalize(crlf).split("\n");
+			const langIdx = crlfLines.findIndex((l) => /href="README\.(md|es\.md)"/.test(l));
+			const authorIdx = crlfLines.findIndex((l) => /<b>(Author|Autor):<\/b>/.test(l));
+			return langIdx !== -1 && authorIdx !== -1 && langIdx < authorIdx;
+		})(),
+	);
 	check(`${doc.file}: badges use the for-the-badge style`, doc.text.includes("style=for-the-badge"));
 	check(`${doc.file}: license badge points at the repo license`, doc.text.includes("img.shields.io/github/license/fhidalgodev/dsh-odoo-sdd"));
 	check(`${doc.file}: contributors image is 480 wide`, doc.text.includes('width="480"'));

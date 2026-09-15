@@ -66,6 +66,8 @@ Before phase 3, check the agent's skill catalog:
   - `agents/consultant.md` — deep root-cause analysis (failure ladder).
   - `agents/security-reviewer.md` — permission model + code-security gate
     (groups, ACL, record rules, risky patterns); produces `security-report.md`.
+  - `agents/documentation.md` — OCA readme fragments, Diátaxis audiences,
+    index.html, Google docstrings and the mandatory changelog.
   - `agents/human-proxy.md` — answers gates in AUTONOMOUS mode (fail-closed).
   A missing persona file (broken package) → degrade to an inline role prompt;
   never silently run a role without its limits.
@@ -205,6 +207,13 @@ Once clarified: `sdd_phase advance next_phase=READ_SPEC`.
      external tool), its source model/fields, and its trigger (menu/button/action
      or scheduled). If none, write exactly "no reports needed". **Never leave
      this section implied missing — always ask or state "no reports".**
+   - `## Documentation`: the documentation DECISION — the language (English
+     unless the project's own rules file says otherwise), the OCA readme
+     fragments that apply mapped to their Diátaxis audience
+     (Tutorial/How-to/Reference/Explanation), and whether `index.html`, Web
+     Tours and migration scripts apply. Write "no extra fragments" explicitly
+     when none are needed: the gate refuses a heading with only template
+     comments, and only the security model gate is evaluated before it.
    - Security: groups, `ir.model.access.csv`, record rules.
    - Directory layout and exact `__manifest__.py` depends.
    - Localization: if extending a country localization, use the
@@ -241,15 +250,32 @@ Once clarified: `sdd_phase advance next_phase=READ_SPEC`.
    if unsure, verify against the official source (phase 2 links) or
    `https://www.odoo.com/documentation/<V>.0/` — never guess deprecated
    syntax (e.g. `<tree>` vs `<list>`, `attrs` vs direct expressions).
-3. **Module documentation**: generate `README.rst` and `index.html` following
-   the OCA format, written in the project's documentation language (or the
-   language the developer requests). Take author/maintainer data from the
-   project's own conventions (`.pylintrc`, `__manifest__.py` maintainers,
-   LICENSE, or the developer's instruction) — never hardcode any specific
-   person.
+3. **Module documentation** — load `agents/documentation.md` and follow the
+   decision recorded in `## Documentation`:
+   - `odoo_docs operation=scaffold module_dir=<module>` creates the missing OCA
+     fragments and the `static/description/index.html` skeleton (create-only).
+     A scaffold is a STARTING POINT, not documentation: replace the content and
+     remove the marker, or `report` will never approve it.
+   - Fragments: `DESCRIPTION.md` (Reference, mandatory), `CONTRIBUTORS.md`
+     (Reference, mandatory), `CONTEXT.md` (Explanation, with a Mermaid ERD when
+     new models are declared), `CONFIGURE.md` / `USAGE.md` / `INSTALL.md`
+     (How-to), `ROADMAP.md` (Explanation).
+   - **Changelog is mandatory for any change to a released module**, including a
+     bug fix: one Towncrier fragment in `readme/newsfragments/<issue>.<type>`
+     (`feature`/`bugfix`/`doc`/`removal`/`misc`/`security`/`breaking`). Write it
+     yourself — only you know what changed and for whom.
+   - Take author/maintainer/contributors from the project's own conventions
+     (`.pylintrc`, `__manifest__.py`, `AGENTS.md`, LICENSE) and never hardcode a
+     person. Language: the project's rules file wins over the plugin default.
+   - This plugin cannot run `gen-odoo-readme`, `towncrier`, Ruff or pylint (no
+     shell): the fragments are the source of truth and compiling `README.rst` is
+     the developer's step.
 4. Static gates BEFORE touching the instance (fast, cheap):
    - `odoo_validate module_dir=<module>` — local structural check (manifest,
      declared XML, ACL csv) with no server required
+   - `odoo_docs operation=check module_dir=<module> mode=<create|bug>` — local
+     documentation check (fragments, Diátaxis, version scheme, changelog,
+     index.html, docstrings, xpath comments, OWL directive)
    - `pre-commit run -a` if the repo has the OCA template configured
    - `pylint --rcfile=.pylintrc-mandatory <module>/` when the file exists
    - `ruff check <module>/` on Odoo 18+ projects using it
@@ -280,6 +306,14 @@ Verification pyramid, ALWAYS in ascending order:
 
 1. **Layer 1 (static)**: already passed in phase 3 (`odoo_validate` + lints).
    If it fails, do not continue.
+   - **Documentation layer**: run
+     `odoo_docs operation=check module_dir=<module> mode=<create|bug>`. Every
+     ERROR blocks; every WARN needs a written resolution. A module changed
+     without its changelog fragment is an ERROR, not a detail.
+   - Close it with `odoo_docs operation=report module_dir=<module> spec_id=<id>`,
+     which writes `specs/<id>/docs-report.md` with the verdict the DONE gate
+     reads (`documentationPolicy=required` by default). A report is APPROVED
+     only when there is no ERROR and no fragment is still a scaffold.
 2. **Layer 2 (server)**: `odoo_module operation=install` (or `upgrade`).
    - Success ⇒ confirm state `installed` via `operation=info`.
    - Traceback ⇒ `odoo_errors` for the full server log ⇒ `sdd_phase fail`

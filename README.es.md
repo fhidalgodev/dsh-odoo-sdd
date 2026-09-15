@@ -177,6 +177,7 @@ licenciamiento, guards de política) se ajustan con la tool `odoo_config` o en
 | `odoo_session` | Mintea una sesión web sin contraseña (patrón `connect_as_user`) guardada en `.sdd/session.json` (chmod 600) para pruebas UI con Playwright. La cookie nunca se devuelve. |
 | `sdd_phase` | Máquina de fases: `init`, `status` (incluye resumen del logbook), `mark_spec_loaded`, `advance` (gates fail-closed + provenance `approval_source`), `fail` (escalera de fallos + veredicto FAILED), `succeed` (veredicto PASSED), `rollback` (restaura un checkpoint y vuelve a WRITE_CODE). |
 | `sdd_checkpoint` | La superficie de rollback: `create` (snapshot del workspace, queda activo), `list`, `restore` (archivos y, con `restore_data=true` + `confirm_destructive=true`, las mutaciones de datos registradas; **siempre reporta** los archivos creados después del checkpoint y los borra solo con `remove_created=true`), `drop`, `journal`. |
+| `odoo_docs` | Documentación de un módulo, usable **por sí sola** (sin spec, fase, checkpoint ni instancia), así que un módulo existente se puede documentar sin más: `check` (fragmentos OCA mapeados a Diátaxis, esquema de versión, changelog, `index.html`, docstrings, comentarios xpath, directiva OWL → ERROR/WARN con `file:line`), `plan`, `scaffold` (esqueletos create-only, nunca sobrescribe) y `report` (persiste `docs-report.md`; APPROVED solo si nada quedó en esqueleto). La entrada de changelog es obligatoria para cualquier cambio a un módulo ya publicado. |
 | `odoo_security_scan` | Revisión de seguridad estática local (sin instancia): SQL concatenado, `eval`/`exec`/`pickle`, secretos hardcodeados, `sudo()` sin justificar, `auth="none"`, CSRF desactivado, `t-raw` en QWeb. Hallazgos con `file:line` + sugerencia; cualquier ERROR bloquea `DONE`. |
 | `sdd_handoff` | Escribe `specs/<id>/handoff.md` (fase final, veredicto, decisiones, blockers, checkpoints, journal, config efectiva, próximos pasos) al cerrar la ejecución. |
 
@@ -231,6 +232,17 @@ camino de mutación tiene vuelta atrás y forma de probar qué pasó.
 - **El restore reporta el drift.** `restore` siempre lista los archivos creados
   *después* del checkpoint, así que nada queda en silencio; `remove_created=true`
   los borra (solo dentro de las raíces del snapshot) para igualar el snapshot.
+- **La documentación es un tool, no una nota al pie.** `odoo_docs` documenta un
+  módulo por sí solo (sin spec, fase ni instancia) y además forma parte del
+  pipeline: ARCHITECTURE registra la decisión en `## Documentation`, WRITE_CODE
+  produce los fragmentos OCA (`readme/`) + `static/description/index.html` + la
+  entrada de changelog obligatoria, y DONE queda gateado por
+  `documentationPolicy` (`required` por defecto; `optional` y `off`
+  disponibles). El idioma es inglés salvo que el archivo de reglas del proyecto
+  (`AGENTS.md`, `.pylintrc`) diga otra cosa. Lo que el plugin no puede hacer, lo
+  dice: `gen-odoo-readme`, `towncrier`, Ruff y pylint necesitan shell, así que
+  los fragmentos son la fuente de verdad y compilar `README.rst` sigue siendo tu
+  paso.
 - **Ciclo de vida: el plugin posee su estado y puede devolverlo.** `odoo_setup
   mode=purge` imprime un plan (lo que posee y lo que deliberadamente conserva) y
   borra solo con `confirm_destructive=true` más aprobación humana nativa. Nunca
@@ -297,7 +309,7 @@ specs/<NNN>-<slug>/
 
 ## Experiencia del modelo
 
-El agente ve 12 tools con descripciones autocontenidas. El flujo típico:
+El agente ve 13 tools con descripciones autocontenidas. El flujo típico:
 `sdd_phase init` → entrevista de seguridad + `odoo_connect` → fases con gate
 mediante `APPROVED` → `sdd_checkpoint create` → código → `odoo_security_scan` →
 `odoo_module install` → si hay traceback, `odoo_errors` + `sdd_phase fail`

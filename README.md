@@ -164,6 +164,7 @@ guards) can be set with the `odoo_config` tool or in
 | `odoo_session` | Mints a passwordless web session (the `connect_as_user` pattern) stored in `.sdd/session.json` (chmod 600) for Playwright UI tests. The cookie itself is never returned. |
 | `sdd_phase` | The phase state machine: `init`, `status` (includes logbook summary), `mark_spec_loaded`, `advance` (fail-closed gates + `approval_source` provenance), `fail` (failure ladder + FAILED verdict), `succeed` (PASSED verdict), `rollback` (restore a checkpoint and return to WRITE_CODE). |
 | `sdd_checkpoint` | The rollback surface: `create` (snapshots the workspace, becomes the active checkpoint), `list`, `restore` (files, plus — with `restore_data=true` and `confirm_destructive=true` — the journaled data mutations; it always REPORTS files created after the checkpoint and deletes them only with `remove_created=true`), `drop`, `journal`. |
+| `odoo_docs` | Documentation for a module, usable **on its own** (no spec, phase, checkpoint or instance), so an existing module can simply be documented: `check` (OCA fragments mapped to Diátaxis, version scheme, changelog, `index.html`, docstrings, xpath comments, OWL directive → ERROR/WARN with `file:line`), `plan`, `scaffold` (create-only skeletons, never overwrites) and `report` (persists `docs-report.md`; APPROVED only when nothing is still a scaffold). The changelog entry is mandatory for any change to a released module. |
 | `odoo_security_scan` | Local static security review (no instance needed): raw SQL by concatenation, `eval`/`exec`/`pickle`, hardcoded secrets, unjustified `sudo()`, `auth="none"`, disabled CSRF, QWeb `t-raw`. Findings carry `file:line` + a fix hint; any ERROR blocks `DONE`. |
 | `sdd_handoff` | Writes `specs/<id>/handoff.md` (final phase, verdict, decisions, blockers, checkpoints, journal, effective config, next steps) when the run closes. |
 
@@ -233,6 +234,16 @@ has a way back and a way to prove what happened.
 - **Restore reports drift.** `restore` always lists the files created *after*
   the checkpoint, so nothing is silently left behind; `remove_created=true`
   deletes them (inside the snapshotted roots only) to match the snapshot exactly.
+- **Documentation is a tool, not a footnote.** `odoo_docs` documents a module
+  on its own (no spec, phase or instance) and is also part of the pipeline:
+  ARCHITECTURE records the decision in `## Documentation`, WRITE_CODE produces
+  the OCA fragments (`readme/`) + `static/description/index.html` + the
+  mandatory changelog entry, and DONE is gated by `documentationPolicy`
+  (`required` by default, `optional` and `off` available). The language is
+  English unless the project's own rules file (`AGENTS.md`, `.pylintrc`) says
+  otherwise. What the plugin cannot do, it says so: `gen-odoo-readme`,
+  `towncrier`, Ruff and pylint need a shell, so the fragments are the source of
+  truth and compiling `README.rst` stays your step.
 - **Lifecycle: the plugin owns its state and can give it back.** `odoo_setup
   mode=purge` prints a plan (what it owns, and what it deliberately keeps) and
   deletes only after `confirm_destructive=true` plus native human approval. It
@@ -295,7 +306,7 @@ and `apply(ctx, config)`, registering each tool with `defineTool` from
 
 | File | Role |
 |---|---|
-| `src/index.ts` | Plugin entry: registration of the 12 tools, config resolution and the policy guard |
+| `src/index.ts` | Plugin entry: registration of the 13 tools, config resolution and the policy guard |
 | `src/types.ts` | Public payload types (never contain secret material) |
 | `src/credentials.ts` | Credential cascade, `.env` load/validation, 600 permissions, `redact()`, fail-closed |
 | `src/odoo-client.ts` | JSON-RPC client: `common.version`, `authenticate`, `execute_kw`, `button_immediate_*`, `ir.logging`, `/web/session/authenticate` |
@@ -308,6 +319,9 @@ and `apply(ctx, config)`, registering each tool with `defineTool` from
 | `src/grants.ts` | Human authorization receipts (`.sdd/grants.json`), fingerprint-bound and fail-closed |
 | `src/atomic.ts` | Atomic writes and corruption quarantine + recovery reporting |
 | `src/lifecycle.ts` | Ownership inventory and the `purge` primitive (own state only; never `.env`/`stop.md`/`specs/`) |
+| `src/docs-scan.ts` | Documentation rules: OCA fragments + Diátaxis, version scheme, changelog, index.html, docstrings, xpath, OWL |
+| `src/docs-tool.ts` | The `odoo_docs` tool (check/plan/scaffold/report), usable without the pipeline |
+| `src/project-conventions.ts` | Resolves the documentation language from the project's own rules, defaulting to English |
 
 ### Security decisions
 
@@ -331,7 +345,7 @@ and `apply(ctx, config)`, registering each tool with `defineTool` from
 
 ## Model Experience
 
-The agent sees 12 tools with self-contained descriptions. Typical flow:
+The agent sees 13 tools with self-contained descriptions. Typical flow:
 `sdd_phase init` → security interview + `odoo_connect` → gated phases with
 `APPROVED` → `sdd_checkpoint create` → code → `odoo_security_scan` →
 `odoo_module install` → on traceback, `odoo_errors` + `sdd_phase fail` (which

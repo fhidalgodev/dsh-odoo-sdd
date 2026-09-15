@@ -156,7 +156,7 @@ guards) can be set with the `odoo_config` tool or in
 | Tool | Purpose |
 |---|---|
 | `odoo_connect` | Probe the instance: server version + authentication. Masked report; distinguishes `NEEDS_SETUP` / `NEEDS_SECRET` / `DEFERRED` / `SKIPPED` states (never asks for secrets in chat). |
-| `odoo_setup` | Onboarding: `check` (cascade + gitignore + delegation mode), `interactive` (secret-free chmod-600 scaffold), **`authorize`** (ask the DEVELOPER, through native approval, for a connection grant bound to the current url/db/user), **`revoke`** (drop the grants), `later`, `skip`, `reset`, `autonomy` (supervised \| autonomous, human-approved). Secrets are never accepted as parameters. |
+| `odoo_setup` | Onboarding: `check` (cascade + gitignore + delegation mode), `interactive` (secret-free chmod-600 scaffold), **`authorize`** (ask the DEVELOPER, through native approval, for a connection grant bound to the current url/db/user), **`revoke`** (drop the grants), **`purge`** (plan first, then — with `confirm_destructive=true` plus human approval — remove only the plugin's own state under `.sdd/`), `later`, `skip`, `reset`, `autonomy` (supervised \| autonomous, human-approved). Secrets are never accepted as parameters. |
 | `odoo_module` | `info` / `install` / `upgrade` on `ir.module.module` (`button_immediate_*`). Returns the server's own output or traceback, redacted — the closed feedback loop. |
 | `odoo_execute` | Generic CRUD/RPC (`execute_kw`) with a fail-closed allowlist. Methods are classified explicitly and an unclassified one is refused: reads (`search_read`, `read`, `search_count`, `read_group`, `fields_get`) are allowed, mutations (`create`/`write`/`unlink`) require `confirm_destructive=true` AND the model in `executeAllowlist`, and are journaled so the data undo can replay them. `context` is forwarded verbatim — use `allowed_company_ids`/`company_id` on multi-company instances — and the server still applies its own ACL. No instance needed to evaluate denials. |
 | `odoo_validate` | LOCAL, instance-free module structure check: `__manifest__.py` present + depends, declared data XML files exist, `security/ir.model.access.csv` when models declared. Returns file:line findings. |
@@ -233,6 +233,12 @@ has a way back and a way to prove what happened.
 - **Restore reports drift.** `restore` always lists the files created *after*
   the checkpoint, so nothing is silently left behind; `remove_created=true`
   deletes them (inside the snapshotted roots only) to match the snapshot exactly.
+- **Lifecycle: the plugin owns its state and can give it back.** `odoo_setup
+  mode=purge` prints a plan (what it owns, and what it deliberately keeps) and
+  deletes only after `confirm_destructive=true` plus native human approval. It
+  never touches `.env` (your credentials), `stop.md` (your brake) or `specs/`
+  (your documents). The purge records itself in the audit log, which is the one
+  file it recreates.
 - **Durable state.** Pipeline state, KB, verdicts, grants and the journal are
   written with an atomic replace, and a corrupt file is quarantined next to the
   original instead of being overwritten: `sdd_phase status` reports the recovery.
@@ -298,7 +304,10 @@ and `apply(ctx, config)`, registering each tool with `defineTool` from
 | `src/checkpoints.ts` | Checkpoint store: manifest, file snapshot/restore, data journal, purge budget |
 | `src/security-scan.ts` | Instance-free static security rules (`scanModule`) with `file:line` findings |
 | `src/audit.ts` | Sanitized append-only audit log (`.sdd/audit.jsonl`) and the `withAudit` wrapper |
-| `src/setup-state.ts` | Onboarding decision + delegation mode persistence (`.sdd/setup.json`) |
+| `src/setup-state.ts` | Onboarding decision + delegation mode persistence (`.sdd/setup-state.json`) |
+| `src/grants.ts` | Human authorization receipts (`.sdd/grants.json`), fingerprint-bound and fail-closed |
+| `src/atomic.ts` | Atomic writes and corruption quarantine + recovery reporting |
+| `src/lifecycle.ts` | Ownership inventory and the `purge` primitive (own state only; never `.env`/`stop.md`/`specs/`) |
 
 ### Security decisions
 

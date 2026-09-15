@@ -169,7 +169,7 @@ licenciamiento, guards de política) se ajustan con la tool `odoo_config` o en
 | Tool | Propósito |
 |---|---|
 | `odoo_connect` | Sonda la instancia: versión del servidor + autenticación. Reporte enmascarado; distingue los estados `NEEDS_SETUP` / `NEEDS_SECRET` / `DEFERRED` / `SKIPPED` (nunca pide secretos por chat). |
-| `odoo_setup` | Onboarding: `check` (cascada + gitignore + modo de delegación), `interactive` (scaffold chmod 600 sin secreto), **`authorize`** (pide al DESARROLLADOR, vía aprobación nativa, un grant de conexión atado al url/db/usuario actual), **`revoke`** (elimina los grants), `later`, `skip`, `reset`, `autonomy` (supervised \| autonomous, aprobado por un humano). Los secretos nunca se aceptan como parámetros. |
+| `odoo_setup` | Onboarding: `check` (cascada + gitignore + modo de delegación), `interactive` (scaffold chmod 600 sin secreto), **`authorize`** (pide al DESARROLLADOR, vía aprobación nativa, un grant de conexión atado al url/db/usuario actual), **`revoke`** (elimina los grants), **`purge`** (primero muestra el plan y, con `confirm_destructive=true` + aprobación humana, borra solo el estado propio del plugin bajo `.sdd/`), `later`, `skip`, `reset`, `autonomy` (supervised \| autonomous, aprobado por un humano). Los secretos nunca se aceptan como parámetros. |
 | `odoo_module` | `info` / `install` / `upgrade` sobre `ir.module.module` (`button_immediate_*`). Devuelve la salida o el traceback del servidor, redactado — el bucle de feedback cerrado. |
 | `odoo_execute` | CRUD/RPC genérico (`execute_kw`) con allowlist fail-closed. Los métodos se clasifican explícitamente y uno sin clasificar se rechaza: lecturas (`search_read`, `read`, `search_count`, `read_group`, `fields_get`) permitidas; mutaciones (`create`/`write`/`unlink`) exigen `confirm_destructive=true` Y el modelo en `executeAllowlist`, y se journalizan para que el undo de datos pueda replicarlas. `context` se reenvía tal cual — usalo para `allowed_company_ids`/`company_id` en instancias multi-company — y el servidor sigue aplicando su propia ACL. No requiere instancia para evaluar denegaciones. |
 | `odoo_validate` | Validación LOCAL del módulo sin instancia: `__manifest__.py` + depends, los XML declarados existen, `security/ir.model.access.csv` cuando hay modelos. Devuelve findings file:line. |
@@ -231,6 +231,12 @@ camino de mutación tiene vuelta atrás y forma de probar qué pasó.
 - **El restore reporta el drift.** `restore` siempre lista los archivos creados
   *después* del checkpoint, así que nada queda en silencio; `remove_created=true`
   los borra (solo dentro de las raíces del snapshot) para igualar el snapshot.
+- **Ciclo de vida: el plugin posee su estado y puede devolverlo.** `odoo_setup
+  mode=purge` imprime un plan (lo que posee y lo que deliberadamente conserva) y
+  borra solo con `confirm_destructive=true` más aprobación humana nativa. Nunca
+  toca `.env` (tus credenciales), `stop.md` (tu freno) ni `specs/` (tus
+  documentos). La purga se registra a sí misma en el log de auditoría, que es el
+  único archivo que recrea.
 - **Estado durable.** El estado del pipeline, el KB, los verdicts, los grants y
   el journal se escriben con reemplazo atómico; un archivo corrupto se pone en
   cuarentena junto al original en vez de sobrescribirse, y `sdd_phase status`

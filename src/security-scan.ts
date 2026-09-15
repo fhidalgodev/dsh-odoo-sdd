@@ -14,7 +14,7 @@
  *
  * @module dsh-odoo-sdd/security-scan
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, lstatSync } from "node:fs";
 import { extname, join } from "node:path";
 
 /** Severity of one finding; ERROR blocks `DONE`. */
@@ -147,10 +147,12 @@ function collectFiles(dir: string, rel: string, out: Array<{ abs: string; rel: s
 		const relPath = rel === "" ? name : `${rel}/${name}`;
 		let st;
 		try {
-			st = statSync(abs);
+			// lstat: never follow a symlink out of the module under review.
+			st = lstatSync(abs);
 		} catch {
 			continue;
 		}
+		if (st.isSymbolicLink()) continue;
 		if (st.isDirectory()) {
 			if (collectFiles(abs, relPath, out)) truncated = true;
 			continue;

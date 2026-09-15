@@ -24,7 +24,7 @@ import {
 	existsSync,
 	mkdirSync,
 	readdirSync,
-	statSync,
+	lstatSync,
 	copyFileSync,
 	readFileSync,
 	writeFileSync,
@@ -34,6 +34,38 @@ import { dirname, join, relative, isAbsolute, sep } from "node:path";
 
 /** Directories never worth copying into a checkpoint (`.sdd` holds the checkpoints themselves). */
 const SKIP_DIRS = new Set(["node_modules", ".git", ".sdd", "__pycache__", ".mypy_cache", ".pytest_cache"]);
+
+/**
+ * Credential/secret file names that must never be copied into a checkpoint.
+ * A snapshot is a convenience copy that may end up in a diff or an archive, so
+ * secrets are excluded by default rather than by convention.
+ */
+const SECRET_EXACT = new Set([
+	".env",
+	".env.local",
+	".env.production",
+	".env.development",
+	"credentials.json",
+	"secrets.json",
+	"session.json",
+	".netrc",
+	".pgpass",
+]);
+/** Patterns for key material whose exact names vary. */
+const SECRET_PATTERNS: RegExp[] = [
+	/^\.env\..+/i,
+	/\.pem$/i,
+	/\.key$/i,
+	/\.p12$/i,
+	/\.pfx$/i,
+	/^id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i,
+];
+
+/** True when a file name holds credentials or key material. */
+export function isSecretFile(name: string): boolean {
+	if (SECRET_EXACT.has(name)) return true;
+	return SECRET_PATTERNS.some((re) => re.test(name));
+}
 
 /** One journaled data mutation (used for best-effort undo). */
 export interface DataOp {
@@ -156,15 +188,19 @@ function copyTree(src: string, dst: string, rel: string, acc: Array<{ path: stri
 	}
 	for (const name of entries) {
 		if (SKIP_DIRS.has(name)) continue;
+		if (isSecretFile(name)) continue; // never snapshot credentials/keys
 		const abs = join(src, name);
 		const relPath = rel === "" ? name : `${rel}/${name}`;
 		let st;
 		try {
-			st = statSync(abs);
+			// lstat, NOT stat: stat follows the link, which made the symlink
+			// check below dead code and let a snapshot copy content from
+			// outside the project tree.
+			st = lstatSync(abs);
 		} catch {
 			continue;
 		}
-		if (st.isSymbolicLink && st.isSymbolicLink()) continue; // never follow links
+		if (st.isSymbolicLink()) continue; // never follow links, in or out
 		if (st.isDirectory()) {
 			mkdirSync(join(dst, relPath), { recursive: true, mode: 0o700 });
 			if (copyTree(abs, dst, relPath, acc, budget)) truncated = true;

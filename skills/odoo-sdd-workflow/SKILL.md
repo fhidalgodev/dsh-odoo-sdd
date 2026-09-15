@@ -19,7 +19,10 @@ intent is detected from the request.
 1. **Credentials**: live only in the gitignored `.env` (chmod 600). NEVER ask
    for URL/user/password through chat, never write them into specs, logs,
    commits or code. If `odoo_connect` reports "NOT CONFIGURED", tell the
-   developer to complete `.env` from `.env.example`.
+   developer to complete `.env` from `.env.example`. If it reports
+   "NOT AUTHORIZED", the credentials exist but no human has authorized the
+   target: run `odoo_setup mode=authorize` and let the developer approve.
+   **Possessing credentials is never authorization.**
 2. **Disposable database**: the connected instance is dev/staging. Before
    phase 4, confirm with the developer that the database may receive
    installs/upgrades and test data.
@@ -133,6 +136,18 @@ Once clarified: `sdd_phase advance next_phase=READ_SPEC`.
      in phase 4).
    The decision is persisted — do not re-ask on later sessions unless
    `odoo_setup mode=reset` was used.
+0a. **Connection authorization (MANDATORY, once per target)**: credentials are
+   NOT consent. Once `.env` holds the non-secret fields and the developer has
+   filled the secret, run `odoo_setup mode=authorize`. That asks the DEVELOPER
+   through the host's native approval seam and stores a receipt in
+   `.sdd/grants.json` (0600) bound to `url + db + username`. Rules:
+   - Without a live receipt, `clientFor` returns no client: every tool reports
+     `NOT AUTHORIZED` and NO socket is opened, even in autonomous mode. Do not
+     retry in a loop — report the state and ask the developer to approve.
+   - Changing url/db/user invalidates the receipt: re-run `mode=authorize`.
+   - `odoo_setup mode=revoke` drops it deliberately.
+   - `odoo_config mode=set` and `odoo_setup mode=autonomy` also require native
+     approval: the model may PROPOSE policy, never grant it.
 0b. **Delegation mode (once per project)**: ask the developer how much of the
    pipeline to delegate, and record it:
    - **Supervised** (default) → gates are answered by the HUMAN at each
@@ -289,7 +304,11 @@ Verification pyramid, ALWAYS in ascending order:
    `/web/login`, and execute the UI scenarios from test-plan.md. Capture:
    Odoo Server Error modals, console tracebacks, non-rendering elements.
 6. All green per AC by the QA persona ⇒ `sdd_phase succeed detail="<per-AC
-   summary>"` ⇒ `sdd_phase advance next_phase=DONE`.
+   summary>"` ⇒ `sdd_phase advance next_phase=DONE`. `succeed` is REFUSED while
+   any AC row in `test-plan.md` still reads `pending`: record each criterion's
+   real result first, because a green verdict must map to a tested criterion.
+   With `securityReviewRequired` armed, DONE additionally requires a
+   `security-report.md` whose verdict is not REJECTED.
 6. Any failure ⇒ `sdd_phase fail detail="<concrete error>"` ⇒ phase 5.
    (Gated advances pass `approval_source` — `human` in supervised mode, the
    human-proxy's verdict in autonomous mode.)
@@ -297,6 +316,9 @@ Verification pyramid, ALWAYS in ascending order:
 ## Phase 5 — FIX_LOOP
 
 1. Read state: `sdd_phase status`. Respect `requireDiagnosis`.
+   When the ladder trips, the retry is BLOCKED until the root-cause analysis is
+   actually recorded with `sdd_phase operation=diagnose detail="<findings>"` —
+   asking for the diagnosis does not satisfy it, and blind retries are refused.
 2. **No pending diagnosis**: analyze traceback/log against `architecture.md`,
    fix the defective fragment (NEVER the spec), re-run static gates, return to
    phase 4.

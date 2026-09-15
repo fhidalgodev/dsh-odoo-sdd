@@ -104,6 +104,17 @@ secreto en todo log/salida de tool, y **nunca** devuelve cookies de sesión al
 modelo (se guardan en `.sdd/session.json`, modo 600, referenciadas solo por
 ruta).
 
+Las credenciales solas no dan acceso: la primera llamada de red de un proyecto
+necesita una autorización humana explícita. Después de completar `.env`, corré:
+
+```text
+odoo_setup mode=authorize   # pregunta al desarrollador; guarda .sdd/grants.json al aprobar
+```
+
+Sin eso, toda tool reporta `NOT AUTHORIZED` y no abre ningún socket. Volvé a
+correrlo (o `mode=revoke` primero) cada vez que cambien la URL, la base o el
+usuario.
+
 ### 2. Componer el plugin en un perfil DSH
 
 ```jsonc
@@ -158,7 +169,7 @@ licenciamiento, guards de política) se ajustan con la tool `odoo_config` o en
 | Tool | Propósito |
 |---|---|
 | `odoo_connect` | Sonda la instancia: versión del servidor + autenticación. Reporte enmascarado; distingue los estados `NEEDS_SETUP` / `NEEDS_SECRET` / `DEFERRED` / `SKIPPED` (nunca pide secretos por chat). |
-| `odoo_setup` | Onboarding: `check` (cascada + gitignore + modo de delegación), `interactive` (scaffold chmod 600 sin secreto), `later`, `skip`, `reset`, `autonomy` (supervised | autonomous). Los secretos nunca se aceptan como parámetros. |
+| `odoo_setup` | Onboarding: `check` (cascada + gitignore + modo de delegación), `interactive` (scaffold chmod 600 sin secreto), **`authorize`** (pide al DESARROLLADOR, vía aprobación nativa, un grant de conexión atado al url/db/usuario actual), **`revoke`** (elimina los grants), `later`, `skip`, `reset`, `autonomy` (supervised \| autonomous, aprobado por un humano). Los secretos nunca se aceptan como parámetros. |
 | `odoo_module` | `info` / `install` / `upgrade` sobre `ir.module.module` (`button_immediate_*`). Devuelve la salida o el traceback del servidor, redactado — el bucle de feedback cerrado. |
 | `odoo_execute` | CRUD/RPC genérico (`execute_kw`) con allowlist fail-closed: lecturas para modelos listados; mutaciones (`create`/`write`/`unlink`) exigen `confirm_destructive=true` Y el modelo en `executeAllowlist`. No requiere instancia para evaluar denegaciones. |
 | `odoo_validate` | Validación LOCAL del módulo sin instancia: `__manifest__.py` + depends, los XML declarados existen, `security/ir.model.access.csv` cuando hay modelos. Devuelve findings file:line. |
@@ -204,10 +215,26 @@ por proyecto con `odoo_setup mode=autonomy decision=...`:
 El pipeline asume que el agente se va a equivocar en algún momento, así que cada
 camino de mutación tiene vuelta atrás y forma de probar qué pasó.
 
+- **Las credenciales no son consentimiento.** Antes de que ninguna tool abra un
+  socket hacia la instancia, un HUMANO debe haber aprobado ese destino exacto.
+  `odoo_setup mode=authorize` pregunta por el seam de aprobación nativo del host
+  (`@deepseek-ai/dsh-user-approval`) y solo el outcome `allowed-once` guarda un
+  recibo en `.sdd/grants.json` (0600, gitignored). El recibo está atado a un
+  fingerprint de `url + db + usuario`: cambiar cualquiera de los tres lo
+  invalida; `mode=revoke` lo elimina. Sin recibo vigente, `clientFor` **no
+  entrega ningún cliente**, así que un `.env` configurado no se usa en silencio.
+  En modo AUTÓNOMO no hay answerers, así que el run reporta `NOT AUTHORIZED` y se
+  detiene — que es justamente el punto: `BLOCKED` es como se cita a un humano.
+- **El modelo no puede relajar su propia política.** Cambiar la allowlist o los
+  guards (`odoo_config mode=set`) y cambiar el modo de delegación
+  (`odoo_setup mode=autonomy`) exigen aprobación nativa cada uno.
 - **Checkpoint antes de mutar.** Con `requireCheckpointBeforeMutation` activo
   (default), las mutaciones de `odoo_execute` se deniegan hasta que
   `sdd_checkpoint create` haya hecho snapshot de la spec activa — y se deniegan
-  directamente antes de `WRITE_CODE`.
+  directamente antes de `WRITE_CODE`. Los snapshots omiten symlinks (`lstat`) y
+  nunca copian `.env` ni material de claves.
+- **Guard fail-closed.** Un fallo interno del guard deniega con un motivo visible
+  en vez de dejar pasar la llamada.
 - **Rollback de archivos.** `sdd_checkpoint restore` devuelve los archivos del
   snapshot tal cual eran; `sdd_phase rollback` retorna la spec a `WRITE_CODE`
   con el fallo registrado, para reiniciar desde un estado conocido.

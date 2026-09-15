@@ -95,6 +95,16 @@ The plugin **refuses** a group/world-readable `.env`, **redacts** the secret
 in every log/tool output, and **never** returns session cookies to the model
 (they land in `.sdd/session.json`, mode 600, referenced only by path).
 
+Credentials alone do not grant access: the first network call of a project needs
+an explicit human authorization. After filling `.env`, run:
+
+```text
+odoo_setup mode=authorize   # asks the developer; stores .sdd/grants.json on approval
+```
+
+Without it every tool reports `NOT AUTHORIZED` and opens no socket. Re-run it
+(or `mode=revoke` first) whenever the URL, database or user changes.
+
 ### 2. Compose the plugin into a DSH profile
 
 ```jsonc
@@ -146,7 +156,7 @@ guards) can be set with the `odoo_config` tool or in
 | Tool | Purpose |
 |---|---|
 | `odoo_connect` | Probe the instance: server version + authentication. Masked report; distinguishes `NEEDS_SETUP` / `NEEDS_SECRET` / `DEFERRED` / `SKIPPED` states (never asks for secrets in chat). |
-| `odoo_setup` | Onboarding: `check` (cascade + gitignore + delegation mode), `interactive` (secret-free chmod-600 scaffold), `later`, `skip`, `reset`, `autonomy` (supervised | autonomous). Secrets are never accepted as parameters. |
+| `odoo_setup` | Onboarding: `check` (cascade + gitignore + delegation mode), `interactive` (secret-free chmod-600 scaffold), **`authorize`** (ask the DEVELOPER, through native approval, for a connection grant bound to the current url/db/user), **`revoke`** (drop the grants), `later`, `skip`, `reset`, `autonomy` (supervised \| autonomous, human-approved). Secrets are never accepted as parameters. |
 | `odoo_module` | `info` / `install` / `upgrade` on `ir.module.module` (`button_immediate_*`). Returns the server's own output or traceback, redacted — the closed feedback loop. |
 | `odoo_execute` | Generic CRUD/RPC (`execute_kw`) with a fail-closed allowlist: reads for allowlisted models, mutations (`create`/`write`/`unlink`) require `confirm_destructive=true` AND the model in `executeAllowlist`. No instance needed to evaluate denials. |
 | `odoo_validate` | LOCAL, instance-free module structure check: `__manifest__.py` present + depends, declared data XML files exist, `security/ir.model.access.csv` when models declared. Returns file:line findings. |
@@ -191,9 +201,25 @@ once per project via `odoo_setup mode=autonomy decision=...`:
 The pipeline assumes the agent will eventually be wrong, so every mutation path
 has a way back and a way to prove what happened.
 
+- **Credentials are not consent.** Before any tool opens a socket towards the
+  instance, a HUMAN must have approved that exact target. `odoo_setup
+  mode=authorize` asks through the host's native approval seam
+  (`@deepseek-ai/dsh-user-approval`) and only the `allowed-once` outcome stores a
+  receipt in `.sdd/grants.json` (0600, gitignored). The receipt is bound to a
+  fingerprint of `url + db + username`, so changing any of them invalidates it;
+  `mode=revoke` drops it. Without a live receipt, `clientFor` hands out **no
+  client at all**, so a configured `.env` cannot be used silently. In
+  AUTONOMOUS mode there are no answerers, so the run reports `NOT AUTHORIZED`
+  and parks — which is the point: `BLOCKED` is how a human gets paged.
+- **The model cannot relax its own policy.** Changing the allowlist or the
+  policy guards (`odoo_config mode=set`) and switching delegation mode
+  (`odoo_setup mode=autonomy`) each require a native approval.
 - **Checkpoint before mutating.** With `requireCheckpointBeforeMutation` on
   (default), `odoo_execute` mutations are denied until `sdd_checkpoint create`
   has snapshotted the active spec — and denied outright before `WRITE_CODE`.
+  Snapshots skip symlinks (`lstat`) and never copy `.env`/key material.
+- **Fail-closed guard.** An internal guard failure denies with a visible reason
+  instead of allowing the call through.
 - **File rollback.** `sdd_checkpoint restore` puts the snapshotted files back
   byte-for-byte; `sdd_phase rollback` returns the spec to `WRITE_CODE` with the
   failure recorded, so the loop restarts from a known state.

@@ -86,6 +86,29 @@ st.licensed = "community";
 r = sdd.transition(st, "READ_SPEC", null, "intent clarified");
 check("CLARIFY -> READ_SPEC allowed once intent set", r.ok === true && st.phase === "READ_SPEC");
 
+// --- phase graph: illegal transitions are refused (P1.1) ---
+{
+	const g = join(dir, "specs", "003-graph");
+	sdd.initSpecDir(g);
+	const gs = sdd.loadState(g);
+	// From CLARIFY, jumping straight to DONE/WRITE_CODE is not an edge.
+	let gr = sdd.transition(gs, "DONE", "APPROVED", "skip everything");
+	check("CLARIFY -> DONE is refused by the phase graph", gr.ok === false && /Illegal phase transition/.test(gr.reason));
+	gr = sdd.transition(gs, "WRITE_CODE", "APPROVED", "skip spec+architecture");
+	check("CLARIFY -> WRITE_CODE is refused by the phase graph", gr.ok === false && /Illegal phase transition/.test(gr.reason));
+	gs.mode = "create";
+	gs.licensed = "community";
+	gr = sdd.transition(gs, "READ_SPEC", null, "legal");
+	check("CLARIFY -> READ_SPEC is a legal edge", gr.ok === true && gs.phase === "READ_SPEC");
+	gr = sdd.transition(gs, "VERIFY", "APPROVED", "skip architecture+code");
+	check("READ_SPEC -> VERIFY is refused by the phase graph", gr.ok === false && /Illegal phase transition/.test(gr.reason));
+	// BLOCKED is reachable from anywhere.
+	gr = sdd.transition(gs, "BLOCKED", null, "give up");
+	check("BLOCKED is reachable from any phase", gr.ok === true && gs.phase === "BLOCKED");
+	gr = sdd.transition(gs, "VERIFY", null, "resurrect");
+	check("BLOCKED is terminal (no outgoing edges)", gr.ok === false && /Illegal phase transition/.test(gr.reason));
+}
+
 // Approval gates apply from READ_SPEC onward.
 r = sdd.transition(st, "ARCHITECTURE", null, "try without marker");
 check("gated advance rejected without APPROVED", r.ok === false);
@@ -151,6 +174,11 @@ const insecure = writeEnv("http://odoo.example.com:8069");
 check("S1: plain http to non-loopback REFUSED", insecure.ok === false && insecure.reason === "insecure_url");
 const goodHttps = writeEnv("https://odoo.example.com");
 check("S1: https to remote host allowed", goodHttps.ok === true);
+// P0.5: a hostname that merely starts with "127." is NOT loopback.
+const straddle = writeEnv("http://127.odoo.example.com:8069");
+check("S1: plain http to a 127.-prefixed non-IP host REFUSED", straddle.ok === false && straddle.reason === "insecure_url");
+const realLoop = writeEnv("http://127.0.0.1:8069");
+check("S1: http to a real 127.0.0.1 loopback allowed", realLoop.ok === true);
 
 check("S2: scrubGeneric hides password= shapes", !creds.scrubGeneric("reset with password=Sup3rS3cret! now").includes("Sup3rS3cret!"));
 check("S2: scrubGeneric hides Bearer tokens", !creds.scrubGeneric("Authorization: Bearer abc123.def-456").includes("abc123"));
@@ -159,6 +187,10 @@ const masked = creds.displayPath(`failed at ${homedir()}/dev/app.py`);
 check("S2: displayPath folds home to ~", masked.includes("~/dev/app.py") && !masked.includes(homedir()));
 const persisted = creds.sanitizeForPersist(`at /home/x password=abc12345678 file: ${homedir()}/.env`, loaded.ok ? loaded.credentials : null);
 check("S2: sanitizeForPersist chains all layers", !persisted.includes("abc12345678") && !persisted.includes(homedir()));
+// JSON keys with surrounding quotes (P0.4): `"password": "..."` and nested JSON.
+check("S2: scrubGeneric hides quoted JSON password", !creds.scrubGeneric('"password": "secret-value"').includes("secret-value"));
+check("S2: scrubGeneric hides quoted JSON api_key", !creds.scrubGeneric('{ "api_key": "abc123def" }').includes("abc123def"));
+check("S2: scrubGeneric keeps non-secret JSON", creds.scrubGeneric('{ "name": "odoo" }').includes("odoo"));
 
 const partial = (() => { writeFileSync(envFile, "ODOO_URL=http://localhost:8069\nODOO_DB=dev\n", { mode: 0o644 }); return creds.loadCredentials(dir); })();
 check("incomplete .env lists missing vars", partial.ok === false && partial.reason === "required_var_missing" && partial.message.includes("ODOO_USERNAME"));
@@ -222,6 +254,13 @@ check(
 check(
 	"workflow skill carries a whenToUse routing guard",
 	typeof sddSkill?.whenToUse === "string" && /Odoo/i.test(sddSkill.whenToUse),
+);
+check(
+	"workflow skill declares source (host contract) and a resource base",
+	sddSkill?.source === "runtime" &&
+		sddSkill?.resourceBase?.kind === "directory" &&
+		typeof sddSkill.resourceBase.path === "string" &&
+		/agents$/.test(sddSkill.resourceBase.path),
 );
 
 // A host WITH tools but WITHOUT a skills registry must still mount (fail-open).
@@ -407,6 +446,18 @@ check("odoo_execute denies non-allowlisted model for mutation", ex.denied === tr
 ex = await executeD.execute({ model: "res.users", method: "search_read" });
 check("odoo_execute read on non-allowlisted model rejected as unconfigured (no instance)", ex.denied === true);
 
+// --- odoo_execute contract: domain accepts scalars/operators; render shows the payload (P1.2) ---
+check(
+	"domain parameter does not constrain items to objects (Odoo terms are scalar triples)",
+	executeD.parameters.properties.domain.items === undefined,
+);
+const renderOk = executeD.output.render({}, { denied: false, reason: "sale.order.read OK", result: '[{"id":1}]' });
+check("render includes the RPC result payload", JSON.stringify(renderOk).includes('{\\"id\\":1}'));
+const renderErr = executeD.output.render({}, { denied: false, reason: "SERVER ERROR — RPC call failed", result: "Traceback: boom" });
+check("render surfaces the server traceback", JSON.stringify(renderErr).includes("Traceback: boom"));
+const renderDenied = executeD.output.render({}, { denied: true, reason: "blocked by policy", result: "" });
+check("render marks a denial explicitly", JSON.stringify(renderDenied).includes("[DENIED]"));
+
 
 console.log("== odoo_config (repos + persistent config) ==");
 const projE = join(dir, "projE");
@@ -475,6 +526,16 @@ check("checkpoint dropped", cpR.ok === true);
 cpR = await cpTool.execute({ operation: "create", label: "needs dirs" });
 check("create without dirs defaults to whole project", cpR.ok === true);
 
+// ---- path / id containment (P0.3) --------------------------------------
+check("isSafeSegment rejects traversal and separators", cps.isSafeSegment("../../etc") === false && cps.isSafeSegment("a/b") === false && cps.isSafeSegment("..") === false);
+check("isSafeSegment accepts a normal spec id", cps.isSafeSegment("001-demo") === true);
+check("dropCheckpoint on an unsafe id deletes nothing", cps.dropCheckpoint(projCp, "../evil") === false);
+const escRestore = cps.restoreCheckpointFiles(projCp, "../evil");
+check("restore on an unsafe id restores nothing", escRestore.restored.length === 0 && escRestore.missing.length === 0);
+const escCreate = cps.createCheckpoint(projCp, { label: "escape", dirs: ["../outside"] });
+check("create with a traversal dir is rejected (no checkpoint)", escCreate === null);
+
+
 // ---- security scan ------------------------------------------------------
 const vuln = join(dir, "mod_vuln");
 mkdirSync(join(vuln, "models"), { recursive: true });
@@ -498,6 +559,13 @@ mkdirSync(join(cleanMod, "models"), { recursive: true });
 writeFileSync(join(cleanMod, "__manifest__.py"), "{'name':'c','depends':['base']}", { mode: 0o600 });
 writeFileSync(join(cleanMod, "models", "m.py"), "from odoo import models\nclass C(models.Model):\n    _name = 'x.c'\n", { mode: 0o600 });
 check("clean fixture scans clean", sec.scanModule(cleanMod).clean === true);
+// A non-existent path must be an ERROR, never a silent "clean" (P1.3).
+const missingScan = sec.scanModule(join(dir, "does-not-exist-at-all"));
+check("scan of a missing directory is NOT clean", missingScan.clean === false);
+check(
+	"scan of a missing directory reports a path-not-found ERROR",
+	missingScan.findings.some((f) => f.rule === "path-not-found" && f.severity === "ERROR"),
+);
 
 // ---- odoo_validate: ACL coherence --------------------------------------
 const aclMod = join(dir, "mod_acl");
@@ -541,21 +609,21 @@ mkdirSync(projGuard, { recursive: true });
 plugin.apply(fakeCtx, { projectRoot: projGuard });
 const guard = capturedGuards[capturedGuards.length - 1];
 check("policy guard registered with the host", typeof guard === "function");
-let gR = guard({ name: "odoo_execute", args: { method: "create" } });
+let gR = guard({ name: "odoo_execute", arguments: { method: "create" } });
 check("guard denies a mutation with no checkpoint", typeof gR === "string" && gR.includes("no checkpoint"));
-check("guard allows read-only tools", guard({ name: "odoo_connect", args: {} }) === undefined);
+check("guard allows read-only tools", guard({ name: "odoo_connect", arguments: {} }) === undefined);
 const guardCp = registered.get("sdd_checkpoint");
 const gcR = await guardCp.execute({ operation: "create", label: "guard", dirs: ["."] });
 check("checkpoint tool created one for the guard", gcR.ok === true);
-gR = guard({ name: "odoo_execute", args: { method: "create" } });
+gR = guard({ name: "odoo_execute", arguments: { method: "create" } });
 check("guard allows the mutation after a checkpoint exists", gR === undefined);
 cps.writeActiveState(projGuard, { phase: "READ_SPEC" });
-gR = guard({ name: "odoo_module", args: { operation: "install" } });
+gR = guard({ name: "odoo_module", arguments: { operation: "install" } });
 check("guard denies a mutation before WRITE_CODE", typeof gR === "string" && gR.includes("READ_SPEC"));
 cps.writeActiveState(projGuard, { phase: "WRITE_CODE" });
 mkdirSync(join(projGuard, ".sdd"), { recursive: true });
 writeFileSync(join(projGuard, ".sdd", "stop.md"), "operator halt\n", { mode: 0o600 });
-gR = guard({ name: "odoo_connect", args: {} });
+gR = guard({ name: "odoo_connect", arguments: {} });
 check("guard halts every tool on stop.md", typeof gR === "string" && gR.includes("stop.md"));
 rmSync(join(projGuard, ".sdd", "stop.md"));
 

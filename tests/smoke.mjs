@@ -915,6 +915,65 @@ console.log("== audit trail (correlation, duration, domain failures) ==");
 	);
 }
 
+// ---- host event contracts: waterfall listeners MUST forward next() --------
+// Regression for a real outage: `tools/pre-execute` is declared @mode waterfall
+// and the host does `gate.kind` on the result. A listener that returned
+// undefined (no next()) left the pipeline without a decision, and EVERY tool
+// call failed with "Cannot read properties of undefined (reading 'kind')".
+// The previous mock defined `on: () => () => {}`, so it could never catch it.
+console.log("== host event contracts (waterfall vs emit) ==");
+{
+	// Keep in sync with the host's `@mode waterfall` annotations. An event listed
+	// here is asserted to forward next() and return a decision.
+	const WATERFALL_EVENTS = new Set(["tools/pre-execute"]);
+
+	const listeners = new Map();
+	const eventCtx = {
+		tools: { register: () => {}, guard: () => () => {} },
+		on: (ev, fn) => {
+			if (!listeners.has(ev)) listeners.set(ev, []);
+			listeners.get(ev).push(fn);
+			return () => {};
+		},
+		approval: { request: async () => "allowed-once" },
+	};
+	const projEv = join(dir, "projEvents");
+	mkdirSync(projEv, { recursive: true });
+	plugin.apply(eventCtx, { projectRoot: projEv });
+
+	check("the plugin subscribes to tools/pre-execute", (listeners.get("tools/pre-execute") ?? []).length >= 1);
+	check("the plugin subscribes to tools/result", (listeners.get("tools/result") ?? []).length >= 1);
+
+	let checked = 0;
+	for (const [ev, fns] of listeners) {
+		if (!WATERFALL_EVENTS.has(ev)) continue;
+		for (const fn of fns) {
+			let forwarded = 0;
+			const decision = { kind: "allow" };
+			let returned;
+			const result = fn({ callId: "evt-1", name: "bash", arguments: {} }, async () => {
+				forwarded += 1;
+				return decision;
+			});
+			returned = result instanceof Promise ? await result : result;
+			checked += 1;
+			check(`waterfall ${ev} forwards next()`, forwarded === 1);
+			check(`waterfall ${ev} returns the host decision (never undefined)`, returned !== undefined && returned.kind === "allow");
+		}
+	}
+	check("at least one waterfall listener was exercised", checked >= 1);
+
+	// An @mode emit listener (tools/result) must never throw: its return value is
+	// ignored by the host, but an exception would surface as a tool failure.
+	let emitThrew = false;
+	try {
+		for (const fn of listeners.get("tools/result") ?? []) fn({ callId: "evt-2", name: "bash" }, { isError: false });
+	} catch {
+		emitThrew = true;
+	}
+	check("the tools/result emit listener does not throw", emitThrew === false);
+}
+
 // ---- transport details: log level query, cancellation, web session (lote 2) ----
 console.log("== transport details (log query, abort signal, web session) ==");
 {

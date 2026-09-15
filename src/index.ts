@@ -2095,13 +2095,20 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			// Stamp the start of every call so the result entry carries a real
 			// duration instead of the previous hard-coded 0.
 			const startedAt = new Map<string, number>();
-			ctx.on("tools/pre-execute", (...eventArgs: unknown[]) => {
+			// `tools/pre-execute` is a WATERFALL (@mode waterfall): the listener
+			// MUST forward `next()` and return its PreToolDecision. Returning
+			// undefined leaves the pipeline without a decision, and the host then
+			// throws `Cannot read properties of undefined (reading 'kind')` for
+			// EVERY tool — the whole surface goes down.
+			ctx.on("tools/pre-execute", async (...eventArgs: unknown[]) => {
+				const next = eventArgs[eventArgs.length - 1];
 				try {
 					const exec = (eventArgs[0] ?? {}) as { callId?: unknown };
 					if (typeof exec.callId === "string") startedAt.set(exec.callId, Date.now());
 				} catch {
 					// best-effort timing
 				}
+				return typeof next === "function" ? await (next as () => Promise<unknown>)() : undefined;
 			});
 			ctx.on("tools/result", (...eventArgs: unknown[]) => {
 				try {

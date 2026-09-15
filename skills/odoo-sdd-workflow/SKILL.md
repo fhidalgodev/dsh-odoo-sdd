@@ -285,9 +285,15 @@ Verification pyramid, ALWAYS in ascending order:
    - Traceback ⇒ `odoo_errors` for the full server log ⇒ `sdd_phase fail`
      with the concrete error ⇒ go to phase 5.
 3. **Layer 3 (data/RPC)**: exercise business logic via `odoo_execute` reads
-   (search_read/read/search_count) and, only for allowlisted models with
-   `confirm_destructive=true`, the mutations the test-plan needs. Compare
-   results against each AC.
+   (search_read/read/search_count/read_group/fields_get) and, only for
+   allowlisted models with `confirm_destructive=true`, the mutations the
+   test-plan needs. Compare results against each AC.
+   - Use `fields_get` to discover the real field names/types before asserting on
+     them instead of guessing, and `read_group` for aggregations.
+   - On a multi-company instance pass `context` (e.g.
+     `{"allowed_company_ids":[1,2],"company_id":2}`); it is forwarded verbatim
+     and the server still applies its own ACL. The context used by a mutation is
+     journaled, so the data undo replays under the same company.
 4. **Layer 4 (security review, MANDATORY when `securityReviewRequired`)**:
    load `agents/security-reviewer.md` and produce
    `specs/<id>/security-report.md` from evidence:

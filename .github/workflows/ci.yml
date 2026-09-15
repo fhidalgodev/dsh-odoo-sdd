@@ -49,7 +49,7 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Tests (server invariants + real-cordis host contract + client bundle)
+      - name: Tests (server invariants + Cordis host contract + client bundle + README contract)
         run: npm test
 
       # Guards the class of bug that only shows up AFTER installation: a file

@@ -337,8 +337,13 @@ Verification pyramid, ALWAYS in ascending order:
      restores the files and returns the pipeline to `WRITE_CODE`.
    - Journaled data mutations can be undone with
      `sdd_checkpoint operation=restore checkpoint_id=<cp> restore_data=true
-     confirm_destructive=true`. LIMIT: a module install/upgrade is NOT reverted
-     at the database level — say so and let the developer decide (uninstall).
+     confirm_destructive=true`. The undo refuses if the journal was recorded
+     against a different database. LIMIT: a module install/upgrade is NOT
+     reverted at the database level — say so and let the developer decide
+     (uninstall).
+   - A restore REPORTS the files created after the checkpoint. If the tree must
+     match the snapshot exactly, re-run with `remove_created=true`; never assume
+     the workspace was reverted when new files survived it.
 6. `BLOCKED` or ceiling reached ⇒ stop and hand to the developer: KB state,
    last FAILED verdict and diagnosis.
 

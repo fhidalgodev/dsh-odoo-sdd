@@ -163,7 +163,7 @@ guards) can be set with the `odoo_config` tool or in
 | `odoo_errors` | Reads recent `ir.logging` server errors — the remote equivalent of fetching environment logs. |
 | `odoo_session` | Mints a passwordless web session (the `connect_as_user` pattern) stored in `.sdd/session.json` (chmod 600) for Playwright UI tests. The cookie itself is never returned. |
 | `sdd_phase` | The phase state machine: `init`, `status` (includes logbook summary), `mark_spec_loaded`, `advance` (fail-closed gates + `approval_source` provenance), `fail` (failure ladder + FAILED verdict), `succeed` (PASSED verdict), `rollback` (restore a checkpoint and return to WRITE_CODE). |
-| `sdd_checkpoint` | The rollback surface: `create` (snapshots the workspace, becomes the active checkpoint), `list`, `restore` (files, plus — with `restore_data=true` and `confirm_destructive=true` — the journaled data mutations), `drop`, `journal`. |
+| `sdd_checkpoint` | The rollback surface: `create` (snapshots the workspace, becomes the active checkpoint), `list`, `restore` (files, plus — with `restore_data=true` and `confirm_destructive=true` — the journaled data mutations; it always REPORTS files created after the checkpoint and deletes them only with `remove_created=true`), `drop`, `journal`. |
 | `odoo_security_scan` | Local static security review (no instance needed): raw SQL by concatenation, `eval`/`exec`/`pickle`, hardcoded secrets, unjustified `sudo()`, `auth="none"`, disabled CSRF, QWeb `t-raw`. Findings carry `file:line` + a fix hint; any ERROR blocks `DONE`. |
 | `sdd_handoff` | Writes `specs/<id>/handoff.md` (final phase, verdict, decisions, blockers, checkpoints, journal, effective config, next steps) when the run closes. |
 
@@ -224,10 +224,18 @@ has a way back and a way to prove what happened.
   byte-for-byte; `sdd_phase rollback` returns the spec to `WRITE_CODE` with the
   failure recorded, so the loop restarts from a known state.
 - **Data rollback (best effort).** Every `create`/`write`/`unlink` through
-  `odoo_execute` records its pre-image in the checkpoint journal; `restore
-  restore_data=true confirm_destructive=true` replays it in reverse. This covers
-  data written through the plugin — **not** side effects of a module
-  install/upgrade, which are not reverted at database level.
+  `odoo_execute` records its pre-image in the checkpoint journal, stamped with
+  the database it was applied to; `restore restore_data=true
+  confirm_destructive=true` replays it in reverse and refuses if the journal was
+  recorded against a different database. This covers data written through the
+  plugin — **not** side effects of a module install/upgrade, which are not
+  reverted at database level.
+- **Restore reports drift.** `restore` always lists the files created *after*
+  the checkpoint, so nothing is silently left behind; `remove_created=true`
+  deletes them (inside the snapshotted roots only) to match the snapshot exactly.
+- **Durable state.** Pipeline state, KB, verdicts, grants and the journal are
+  written with an atomic replace, and a corrupt file is quarantined next to the
+  original instead of being overwritten: `sdd_phase status` reports the recovery.
 - **Security by construction.** CLARIFY must answer the security interview
   (groups, ACLs, record rules, `sudo()` justification, public routes) before
   ARCHITECTURE can be approved; `securityGaps()` fails the gate when those

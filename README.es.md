@@ -176,7 +176,7 @@ licenciamiento, guards de política) se ajustan con la tool `odoo_config` o en
 | `odoo_errors` | Lee errores recientes del servidor (`ir.logging`) — el equivalente remoto de obtener los logs del entorno. |
 | `odoo_session` | Mintea una sesión web sin contraseña (patrón `connect_as_user`) guardada en `.sdd/session.json` (chmod 600) para pruebas UI con Playwright. La cookie nunca se devuelve. |
 | `sdd_phase` | Máquina de fases: `init`, `status` (incluye resumen del logbook), `mark_spec_loaded`, `advance` (gates fail-closed + provenance `approval_source`), `fail` (escalera de fallos + veredicto FAILED), `succeed` (veredicto PASSED), `rollback` (restaura un checkpoint y vuelve a WRITE_CODE). |
-| `sdd_checkpoint` | La superficie de rollback: `create` (snapshot del workspace, queda activo), `list`, `restore` (archivos y, con `restore_data=true` + `confirm_destructive=true`, las mutaciones de datos registradas), `drop`, `journal`. |
+| `sdd_checkpoint` | La superficie de rollback: `create` (snapshot del workspace, queda activo), `list`, `restore` (archivos y, con `restore_data=true` + `confirm_destructive=true`, las mutaciones de datos registradas; **siempre reporta** los archivos creados después del checkpoint y los borra solo con `remove_created=true`), `drop`, `journal`. |
 | `odoo_security_scan` | Revisión de seguridad estática local (sin instancia): SQL concatenado, `eval`/`exec`/`pickle`, secretos hardcodeados, `sudo()` sin justificar, `auth="none"`, CSRF desactivado, `t-raw` en QWeb. Hallazgos con `file:line` + sugerencia; cualquier ERROR bloquea `DONE`. |
 | `sdd_handoff` | Escribe `specs/<id>/handoff.md` (fase final, veredicto, decisiones, blockers, checkpoints, journal, config efectiva, próximos pasos) al cerrar la ejecución. |
 
@@ -228,6 +228,15 @@ camino de mutación tiene vuelta atrás y forma de probar qué pasó.
 - **El modelo no puede relajar su propia política.** Cambiar la allowlist o los
   guards (`odoo_config mode=set`) y cambiar el modo de delegación
   (`odoo_setup mode=autonomy`) exigen aprobación nativa cada uno.
+- **El restore reporta el drift.** `restore` siempre lista los archivos creados
+  *después* del checkpoint, así que nada queda en silencio; `remove_created=true`
+  los borra (solo dentro de las raíces del snapshot) para igualar el snapshot.
+- **Estado durable.** El estado del pipeline, el KB, los verdicts, los grants y
+  el journal se escriben con reemplazo atómico; un archivo corrupto se pone en
+  cuarentena junto al original en vez de sobrescribirse, y `sdd_phase status`
+  reporta la recuperación.
+- **El journal lleva la identidad de la BD.** Un undo contra otra base se
+  rechaza en vez de mutar la instancia equivocada.
 - **Checkpoint antes de mutar.** Con `requireCheckpointBeforeMutation` activo
   (default), las mutaciones de `odoo_execute` se deniegan hasta que
   `sdd_checkpoint create` haya hecho snapshot de la spec activa — y se deniegan

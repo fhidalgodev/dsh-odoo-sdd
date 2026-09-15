@@ -48,7 +48,61 @@ if (!existsSync(join(root, "lib", "index.js"))) {
 }
 
 // `--dry-run` keeps the working tree clean (verified: no .tgz is created).
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+//
+// HOW npm IS INVOKED (Windows matters here):
+// spawning the `npm.cmd` shim directly throws `EINVAL` from Node 20.12/21.7.0
+// onward — the CVE-2024-27980 fix refuses to launch a `.cmd` without a shell —
+// and `shell: true` would concatenate the arguments into a command line. The
+// npm CLI itself is plain JS shipped next to the running node, so execute it
+// with `process.execPath`: no shim, no shell, identical on every platform.
+/**
+ * Resolve the npm invocation for this machine.
+ *
+ * Order of preference: the CLI npm itself says it is running from
+ * (`npm_execpath`, set for every lifecycle script) → the CLI shipped beside the
+ * running node (official Windows layout, then POSIX) → the platform shim with a
+ * shell, which is the only case Windows needs one.
+ * @returns the command, its arguments, whether a shell is required, and how it was found.
+ */
+function npmInvocation() {
+	const args = (cli) => [cli, "pack", "--dry-run", "--json"];
+	const bin = dirname(process.execPath);
+	const execpath = (process.env["npm_execpath"] ?? "").trim();
+	// Only trust it when it IS npm: under pnpm/yarn the same variable points at
+	// their own CLI, whose `pack` flags and JSON shape differ.
+	const fromExecpath = /[\\/]npm[\\/]|npm-cli\.js$/i.test(execpath) && /\.(c|m)?js$/i.test(execpath) && existsSync(execpath);
+	if (fromExecpath) {
+		return { command: process.execPath, args: args(execpath), shell: false, how: `node ${execpath}`, source: "npm_execpath" };
+	}
+	const layouts = [
+		join(bin, "node_modules", "npm", "bin", "npm-cli.js"), // official Windows layout
+		join(bin, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"), // official POSIX layout
+	];
+	for (const cli of layouts) {
+		if (existsSync(cli)) {
+			return { command: process.execPath, args: args(cli), shell: false, how: `node ${cli}`, source: "node layout" };
+		}
+	}
+	// Last resort: the platform shim. A shell is required on Windows (EINVAL),
+	// and the arguments here are fixed literals, never user input.
+	const shim = process.platform === "win32" ? "npm.cmd" : "npm";
+	return { command: shim, args: ["pack", "--dry-run", "--json"], shell: process.platform === "win32", how: shim, source: "shim" };
+}
+const npm = npmInvocation();
+// The bug this pins: a `.cmd`/`.bat` launched WITHOUT a shell throws EINVAL on
+// Windows (Node >= 20.12/21.7.0). Spawning the shim with a shell is legitimate,
+// so the invariant is about the combination, not about the name.
+check(
+	"a Windows .cmd shim is never spawned without a shell (EINVAL)",
+	!(/\.(cmd|bat)$/i.test(npm.command) && npm.shell !== true),
+	npm.how,
+);
+const providedPath = (process.env["npm_execpath"] ?? "").trim();
+if (providedPath !== "" && /[\\/]npm[\\/]|npm-cli\.js$/i.test(providedPath)) {
+	check("npm's own CLI is used when npm provides its path", npm.source === "npm_execpath", `source=${npm.source}, path=${providedPath}`);
+}
+console.log(`  INFO  npm invocation: ${npm.how} [${npm.source}]${npm.shell ? " (via shell)" : ""}`);
+
 // Keep npm's cache INSIDE the project: `npm pack` otherwise writes to ~/.npm,
 // which fails on a read-only $HOME sandbox (EROFS) and makes this check depend
 // on the machine's global state instead of the package itself.
@@ -56,16 +110,17 @@ const cacheDir = join(root, "node_modules", ".cache", "npm-pack");
 mkdirSync(cacheDir, { recursive: true });
 let packed;
 try {
-	const out = execFileSync(npm, ["pack", "--dry-run", "--json"], {
+	const out = execFileSync(npm.command, npm.args, {
 		cwd: root,
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "ignore"],
 		maxBuffer: 32 * 1024 * 1024,
 		env: { ...process.env, npm_config_cache: cacheDir },
+		...(npm.shell ? { shell: true } : {}),
 	});
 	packed = JSON.parse(out);
 } catch (err) {
-	console.error(`Could not run \`npm pack --dry-run --json\`: ${err instanceof Error ? err.message : String(err)}`);
+	console.error(`Could not run \`npm pack --dry-run --json\` via ${npm.how}: ${err instanceof Error ? err.message : String(err)}`);
 	process.exit(2);
 }
 

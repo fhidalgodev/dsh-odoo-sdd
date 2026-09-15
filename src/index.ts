@@ -91,7 +91,7 @@ import {
 	type Phase,
 	PHASES,
 } from "./sdd-state.js";
-import { join, resolve, dirname } from "node:path";
+import { join, resolve, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 
@@ -175,16 +175,32 @@ function text(value: string): { type: "text"; text: string } {
 }
 
 /** Resolve the effective project root for this activation. */
-function root(config: OdooSddConfig): string {
-	return resolve(config.projectRoot ?? process.cwd());
+/**
+ * The DEPLOYMENT root: the plugin's own `projectRoot`, else the process cwd.
+ * Used only as the bootstrap/fallback for locating `.sdd/config.json` and as
+ * the last-resort default for the effective root. An empty string must be
+ * treated as "not set" — `'' ?? x` is `''`, which silently resolved to cwd.
+ */
+function baseRoot(config: OdooSddConfig): string {
+	const declared = (config.projectRoot ?? "").trim();
+	return declared === "" ? resolve(process.cwd()) : resolve(declared);
 }
 
-/** Resolve a spec directory under the configured specs dir. */
-function specDirOf(config: OdooSddConfig, specId: string): string {
+/**
+ * Resolve a spec directory, given the EFFECTIVE project root and specs dir.
+ * Taking them as arguments (instead of re-deriving from the deployment config)
+ * is what keeps specs next to the project rather than next to the process cwd.
+ */
+function specDirOf(projectRoot: string, specsDir: string | undefined, specId: string): string {
 	// An unvalidated spec id could escape the specs root (traversal). Reject it
 	// fail-closed: map to a neutral dir so nothing real is created/read.
 	const safe = isSafeSegment(specId) ? specId : "__invalid__";
-	return join(root(config), config.specsDir ?? "specs", safe);
+	// An absolute specsDir must not be concatenated under the root: `join(root,
+	// '/abs')` yields `<root>/abs`, which is how specs ended up in a bogus
+	// /tmp/home/... tree.
+	const dir = specsDir ?? "specs";
+	const base = isAbsolute(dir) ? dir : join(projectRoot, dir);
+	return join(base, safe);
 }
 
 /** Outcome of a host approval request (mirrors @deepseek-ai/dsh-user-approval). */
@@ -442,7 +458,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	registerOdooSddSkill(ctx);
 	// S2: sanitizer for any agent-supplied text the pipeline persists.
 	const sanitize = (textValue: string): string => {
-		const loaded = loadCredentials(root(config));
+		const loaded = loadCredentials(effectiveConfig().projectRoot);
 		const credentials: OdooCredentials | null = loaded.ok ? loaded.credentials : null;
 		return sanitizeForPersist(textValue, credentials);
 	};
@@ -531,7 +547,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			render: (_args: unknown, value: unknown) => [text((value as { detail: string }).detail)],
 		},
 		async execute() {
-			const projectRoot = root(config);
+			const projectRoot = effectiveConfig().projectRoot;
 			const { client, report, credentials } = clientFor(projectRoot);
 			if (client === null) {
 				// Two different situations share a null client:
@@ -630,7 +646,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			decision?: "supervised" | "autonomous";
 			confirm_destructive?: boolean;
 		}, exec?: unknown) {
-			const projectRoot = root(config);
+			const projectRoot = effectiveConfig().projectRoot;
 			const autonomyMode = readAutonomy(projectRoot);
 			appendAuditLine(projectRoot, "odoo_setup/" + args.mode, args, clientFor(projectRoot).credentials);
 
@@ -969,7 +985,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			render: (_args: unknown, value: unknown) => [text((value as { output: string }).output)],
 		},
 		async execute(args: { operation: "info" | "install" | "upgrade"; modules: string[] }) {
-			const { client, report } = clientFor(root(config));
+			const { client, report } = clientFor(effectiveConfig().projectRoot);
 			const fail = (output: string) => ({
 				operation: args.operation as string,
 				success: false,
@@ -1033,7 +1049,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			render: (_args: unknown, value: unknown) => [text((value as { detail: string }).detail)],
 		},
 		async execute(args: { limit?: number; sinceMinutes?: number }) {
-			const { client, report } = clientFor(root(config));
+			const { client, report } = clientFor(effectiveConfig().projectRoot);
 			if (client === null) return { count: 0, logs: [] as Array<Record<string, string | number | null>>, detail: report };
 			const result = await client.recentErrors(args.limit ?? 20, args.sinceMinutes ?? 30);
 			if (!result.ok) return { count: 0, logs: [] as Array<Record<string, string | number | null>>, detail: `Failed to read ir.logging: ${result.error}` };
@@ -1080,7 +1096,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			render: (_args: unknown, value: unknown) => [text((value as { detail: string }).detail)],
 		},
 		async execute() {
-			const projectRoot = root(config);
+			const projectRoot = effectiveConfig().projectRoot;
 			const { client, report } = clientFor(projectRoot);
 			if (client === null) return { minted: false, detail: report };
 			const result = await client.mintSession(projectRoot);
@@ -1178,17 +1194,18 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			checkpoint_id?: string;
 			detail?: string;
 		}) {
-			const specDir = specDirOf(config, args.spec_id);
+			const cfgPhase = effectiveConfig();
+			const specDir = specDirOf(cfgPhase.projectRoot, cfgPhase.specsDir, args.spec_id);
 			// S2: agent-supplied details are scrubbed (known secret, generic
 			// credential shapes, home paths) BEFORE any KB/verdict persistence.
 			const note = sanitize(args.detail ?? "");
-			const projectRootForAudit = root(config);
+			const projectRootForAudit = effectiveConfig().projectRoot;
 			appendAuditLine(projectRootForAudit, "sdd_phase/" + args.operation, args, clientFor(projectRootForAudit).credentials);
 			if (args.operation === "init") {
 				initSpecDir(specDir);
 				const state = loadState(specDir);
 				saveState(state);
-				writeActiveState(root(config), { specId: args.spec_id, phase: state.phase });
+				writeActiveState(effectiveConfig().projectRoot, { specId: args.spec_id, phase: state.phase });
 				return {
 					operation: "init" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
 					summary: summarize(state),
@@ -1196,7 +1213,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				};
 			}
 			if (args.operation === "rollback") {
-				const projectRoot = root(config);
+				const projectRoot = effectiveConfig().projectRoot;
 				const active = readActiveState(projectRoot);
 				const checkpointId = args.checkpoint_id ?? active.checkpointId ?? null;
 				if (checkpointId === null) {
@@ -1249,8 +1266,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const state = loadState(specDir);
 			if (args.operation === "status") {
 				const kb = kbRead(specDir);
-				const active = readActiveState(root(config));
-				writeActiveState(root(config), { specId: args.spec_id, phase: state.phase });
+				const active = readActiveState(effectiveConfig().projectRoot);
+				writeActiveState(effectiveConfig().projectRoot, { specId: args.spec_id, phase: state.phase });
 				return {
 					operation: "status" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
 					summary: summarize(state),
@@ -1281,14 +1298,14 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					args.approval_marker ?? null,
 					note,
 					args.approval_source ?? "human",
-					readAutonomy(root(config)),
+					readAutonomy(effectiveConfig().projectRoot),
 					{
 						securityReviewRequired: effectiveConfig().securityReviewRequired,
 						documentationPolicy: effectiveConfig().documentationPolicy ?? "required",
 					},
 				);
 				if (result.ok) {
-					writeActiveState(root(config), { specId: args.spec_id, phase: result.state.phase });
+					writeActiveState(effectiveConfig().projectRoot, { specId: args.spec_id, phase: result.state.phase });
 				}
 				return {
 					operation: "advance" as string, phase: result.state.phase as string, ok: result.ok, requireDiagnosis: false,
@@ -1344,17 +1361,61 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// Persists to <projectRoot>/.sdd/config.json — the same plugin-owned dir
 	// as the rest of the SDD state. No secrets here (credentials live in .env).
 	// ---------------------------------------------------------------------
-	const configFile = (): string => join(root(config), ".sdd", "config.json");
-	const loadConfigFile = (): Record<string, unknown> => {
-		const file = configFile();
+	// Two roots can be in play: the DEPLOYMENT root (the plugin's own
+	// projectRoot, else the process cwd) and the EFFECTIVE root (what the
+	// resolved configuration says, which may come from the file itself or from
+	// Settings). The file is looked up through candidates so a project whose
+	// config lives next to the workspace is still found when the process runs
+	// from somewhere else — and so a config already migrated into the project
+	// keeps winning instead of the volatile cwd copy.
+	const resolvedRoot: { value: string | null } = { value: null };
+	/** projectRoot as declared by the Settings scope, without reading the file. */
+	const settingsRoot = (): string => {
+		try {
+			const value = settingsValues?.()["projectRoot"];
+			return typeof value === "string" ? value.trim() : "";
+		} catch {
+			return "";
+		}
+	};
+	const rootCandidates = (): string[] => {
+		const candidates: string[] = [];
+		const deploy = (config.projectRoot ?? "").trim();
+		// NOTE: `'' ?? x` is `''`, so an empty deployment root must be checked
+		// explicitly; otherwise resolve('') silently becomes the process cwd.
+		if (deploy !== "") candidates.push(resolve(deploy));
+		// Settings may name the root; consulting it here breaks the
+		// chicken-and-egg (the file lives under the root the file declares).
+		const fromSettings = settingsRoot();
+		if (fromSettings !== "") candidates.push(resolve(fromSettings));
+		if (resolvedRoot.value !== null) candidates.push(resolvedRoot.value);
+		candidates.push(resolve(process.cwd()));
+		return [...new Set(candidates)];
+	};
+	const readConfigAt = (rootPath: string): Record<string, unknown> => {
+		const file = join(rootPath, ".sdd", "config.json");
 		if (!existsSync(file)) return {};
 		try {
 			const parsed = JSON.parse(readFileSync(file, "utf8"));
-			return parsed && typeof parsed === "object" ? parsed : {};
+			return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
 		} catch {
 			return {};
 		}
 	};
+	const loadConfigFile = (): Record<string, unknown> => {
+		for (const candidate of rootCandidates()) {
+			const data = readConfigAt(candidate);
+			if (Object.keys(data).length === 0) continue;
+			const declared = data["projectRoot"];
+			// Remember the declared root so later lookups and writes converge on
+			// the project instead of the process cwd.
+			if (typeof declared === "string" && declared.trim() !== "") resolvedRoot.value = resolve(declared);
+			return data;
+		}
+		return {};
+	};
+	/** Where configuration is WRITTEN: always the effective (project) root. */
+	const configFile = (): string => join(effectiveConfig().projectRoot, ".sdd", "config.json");
 	const saveConfigFile = (data: Record<string, unknown>): void => {
 		const file = configFile();
 		mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
@@ -1582,7 +1643,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		const asBool = (v: unknown, fallback: boolean): boolean => (typeof v === "boolean" ? v : fallback);
 		const asNum = (v: unknown, fallback: number): number => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
 		return {
-			projectRoot: asString(merged["projectRoot"], config.projectRoot ?? root(config)),
+			projectRoot: asString(merged["projectRoot"], baseRoot(config)),
 			specsDir: asString(merged["specsDir"], config.specsDir ?? "specs"),
 			executeAllowlist: Array.isArray(merged["executeAllowlist"]) ? asList(merged["executeAllowlist"]) : (config.executeAllowlist ?? []),
 			communityRepoUrl: asString(merged["communityRepoUrl"], config.communityRepoUrl ?? "https://github.com/odoo/odoo"),
@@ -1922,7 +1983,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		},
 		async execute(args: { spec_id: string; summary?: string }) {
 			const cfg = effectiveConfig();
-			const specDir = specDirOf(config, args.spec_id);
+			const specDir = specDirOf(cfg.projectRoot, cfg.specsDir, args.spec_id);
 			const state = loadState(specDir);
 			const verdict = readVerdict(specDir);
 			const kb = kbRead(specDir);

@@ -1272,6 +1272,53 @@ const hText = readFileSync(join(projH, "specs", "001-h", "handoff.md"), "utf8");
 check("handoff documents next steps", hText.includes("## Next steps"));
 check("handoff documents configuration", hText.includes("## Configuration in effect"));
 
+// ---- root resolution: the declared project root beats the process cwd -----
+// Regression for a real split-brain: the deployment projectRoot was empty, so
+// `resolve('' ?? cwd)` sent state (specs, config, active run, audit) to the
+// process cwd (/tmp) while the project's own tree held the real content.
+console.log("== root resolution (effective root vs process cwd) ==");
+{
+	const savedCwd = process.cwd();
+	const fakeCwd = join(dir, "fake-cwd");
+	const realProject = join(dir, "real-project");
+	mkdirSync(join(fakeCwd, ".sdd"), { recursive: true });
+	mkdirSync(join(realProject, ".sdd"), { recursive: true });
+	// The cwd holds a config that DECLARES a different project root.
+	writeFileSync(
+		join(fakeCwd, ".sdd", "config.json"),
+		JSON.stringify({ projectRoot: realProject, specsDir: "specs" }, null, 2),
+		{ mode: 0o600 },
+	);
+	try {
+		process.chdir(fakeCwd);
+		// Applied with NO deployment projectRoot: the bootstrap must read the
+		// declared root instead of falling back to cwd.
+		plugin.apply(fakeCtx, {});
+		const phaseR = registered.get("sdd_phase");
+		const rootRes = await phaseR.execute({ operation: "init", spec_id: "001-root" });
+		check("init reports the effective (declared) spec directory", rootRes.detail.includes(realProject));
+		check("the spec lands under the DECLARED project root", existsSync(join(realProject, "specs", "001-root", "state.json")));
+		check("the spec does NOT land under the process cwd", !existsSync(join(fakeCwd, "specs", "001-root", "state.json")));
+		const activeUnderProject = cps.readActiveState(realProject);
+		check("the active run state follows the declared root", activeUnderProject.specId === "001-root");
+		// An absolute specsDir must not be concatenated under the root: that is
+		// what produced a bogus /tmp/home/... tree.
+		writeFileSync(
+			join(fakeCwd, ".sdd", "config.json"),
+			JSON.stringify({ projectRoot: realProject, specsDir: join(realProject, "specs") }, null, 2),
+			{ mode: 0o600 },
+		);
+		plugin.apply(fakeCtx, {});
+		const phaseAbs = registered.get("sdd_phase");
+		const absRes = await phaseAbs.execute({ operation: "init", spec_id: "002-abs" });
+		check("an absolute specsDir is respected, not nested under the root", existsSync(join(realProject, "specs", "002-abs", "state.json")));
+		check("no bogus nested tree is created", !existsSync(join(fakeCwd, "home")) && !existsSync(join(realProject, "home")));
+		check("init with an absolute specsDir reports that path", absRes.detail.includes(join(realProject, "specs", "002-abs")));
+	} finally {
+		process.chdir(savedCwd);
+	}
+}
+
 // ---- odoo_docs: standalone documentation of an existing module (lote 6) ----
 console.log("== odoo_docs (fragments, Diátaxis, changelog, scaffold) ==");
 {

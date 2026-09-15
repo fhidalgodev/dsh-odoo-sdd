@@ -399,6 +399,62 @@ check("revoking blocks the connection again", rs.detail.includes("NOT AUTHORIZED
 rs = await setup.execute({ mode: "authorize" });
 check("re-authorize restores the grant", rs.status === "authorized");
 
+// ---- lifecycle: purge removes ONLY the plugin's own state (lote 5) -------
+console.log("== lifecycle purge (ownership boundaries) ==");
+{
+	const lifeMod = await import(new URL("lifecycle.js", libDir).href);
+	const projLife = join(dir, "projLife");
+	mkdirSync(join(projLife, ".sdd", "checkpoints"), { recursive: true });
+	mkdirSync(join(projLife, "specs", "001-x"), { recursive: true });
+	// Owned state...
+	writeFileSync(join(projLife, ".sdd", "grants.json"), "{}", { mode: 0o600 });
+	writeFileSync(join(projLife, ".sdd", "session.json"), "{}", { mode: 0o600 });
+	writeFileSync(join(projLife, ".sdd", "audit.jsonl"), "{}\n", { mode: 0o600 });
+	writeFileSync(join(projLife, ".sdd", "checkpoints", "cp1.json"), "{}", { mode: 0o600 });
+	// ...and things the plugin must NEVER remove.
+	writeFileSync(join(projLife, ".sdd", ".env"), "ODOO_URL=http://localhost:8069\n", { mode: 0o600 });
+	writeFileSync(join(projLife, ".sdd", "stop.md"), "operator halt\n", { mode: 0o600 });
+	writeFileSync(join(projLife, "specs", "001-x", "spec.md"), "# Spec\n", { mode: 0o600 });
+
+	plugin.apply(fakeCtx, { projectRoot: projLife });
+	const lifeSetup = registered.get("odoo_setup");
+
+	// 1) Default is a PLAN: it lists the owned state and deletes nothing.
+	let lr = await lifeSetup.execute({ mode: "purge" });
+	check("purge without confirmation reports a plan", lr.status === "plan" && /PURGE PLAN/.test(lr.detail));
+	check("the plan names the owned paths", /grants\.json/.test(lr.detail) && /audit\.jsonl/.test(lr.detail));
+	check("the plan states what is preserved", /\.env/.test(lr.detail) && /specs\//.test(lr.detail));
+	check("planning deletes nothing", existsSync(join(projLife, ".sdd", "grants.json")));
+
+	// 2) A refused approval deletes nothing either.
+	const savedOutcomeP = approvalOutcome;
+	approvalOutcome = "rejected";
+	lr = await lifeSetup.execute({ mode: "purge", confirm_destructive: true });
+	check("a refused approval does not purge", lr.status === "not-authorized" && existsSync(join(projLife, ".sdd", "grants.json")));
+	approvalOutcome = savedOutcomeP;
+
+	// 3) Approved purge removes owned state and preserves the human's files.
+	lr = await lifeSetup.execute({ mode: "purge", confirm_destructive: true });
+	check("approved purge runs", lr.status === "purged");
+	check("owned state is gone", !existsSync(join(projLife, ".sdd", "grants.json")) && !existsSync(join(projLife, ".sdd", "session.json")));
+	check("the checkpoints directory is gone", !existsSync(join(projLife, ".sdd", "checkpoints")));
+	// The purge itself is audited, which re-creates exactly one file: a record
+	// that the purge happened. That trace is intentional, not leftover state.
+	const purgeLog = existsSync(join(projLife, ".sdd", "audit.jsonl"))
+		? readFileSync(join(projLife, ".sdd", "audit.jsonl"), "utf8")
+		: "";
+	check("the purge leaves an audit trace of itself", /odoo_setup\/purge/.test(purgeLog));
+	check("no other owned state was resurrected", !existsSync(join(projLife, ".sdd", "grants.json")) && !existsSync(join(projLife, ".sdd", "config.json")));
+	check("credentials are preserved", existsSync(join(projLife, ".sdd", ".env")));
+	check("the emergency brake is preserved", existsSync(join(projLife, ".sdd", "stop.md")));
+	check("project documents are preserved", existsSync(join(projLife, "specs", "001-x", "spec.md")));
+
+	// 4) The inventory helper agrees with the boundary.
+	const owned = lifeMod.ownedStatePaths(projLife).filter((e) => e.exists).map((e) => e.rel);
+	check("the inventory lists no preserved path as owned", !owned.includes(".sdd/.env") && !owned.includes(".sdd/stop.md") && !owned.some((r) => r.startsWith("specs")));
+	check("PRESERVED documents the three human-owned paths", lifeMod.PRESERVED.length === 3);
+}
+
 // --- projB: cascade precedence ---
 const projB = join(dir, "projB");
 mkdirSync(join(projB, ".sdd"), { recursive: true });

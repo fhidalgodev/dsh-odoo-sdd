@@ -48,6 +48,7 @@ import {
 	type SetupStatus,
 } from "./setup-state.js";
 import { writeFileAtomic } from "./atomic.js";
+import { purgeOwnedState, purgePlan, PRESERVED } from "./lifecycle.js";
 import { withAudit } from "./audit.js";
 import { registerRuntimeTools } from "./tools-runtime.js";
 import { appendAuditLine, recordAudit } from "./audit.js";
@@ -569,12 +570,14 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			"approval) for a connection grant covering the current url/db/user: without it no tool may " +
 			"open a socket, because possessing credentials is not authorization. mode=revoke drops the " +
 			"stored grants. mode=later defers setup until the VERIFY phase; mode=skip marks the project " +
-			"to run without an instance (manual verification); mode=reset clears the persisted decision.",
+			"to run without an instance (manual verification); mode=reset clears the persisted decision. " +
+			"mode=purge reports (and, with confirm_destructive=true plus human approval, removes) only the " +
+			"plugin's own state under .sdd/ — credentials, stop.md and specs/ are always preserved.",
 		parameters: {
 			mode: {
 				type: "string",
 				required: true,
-				enum: ["check", "interactive", "later", "skip", "reset", "autonomy", "authorize", "revoke"],
+				enum: ["check", "interactive", "later", "skip", "reset", "autonomy", "authorize", "revoke", "purge"],
 				description: "Onboarding operation.",
 			},
 			url: { type: "string", description: "Instance base URL for mode=interactive (validated with the transport guard; no embedded credentials)." },
@@ -589,6 +592,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				type: "string",
 				enum: ["supervised", "autonomous"],
 				description: "Delegation mode for mode=autonomy: supervised (human answers gates) or autonomous (human-proxy agent answers).",
+			},
+			confirm_destructive: {
+				type: "boolean",
+				description: "REQUIRED true to actually run mode=purge. Without it, purge only reports its plan.",
 			},
 		},
 		output: {
@@ -606,12 +613,13 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			render: (_args: unknown, value: unknown) => [text((value as { detail: string }).detail)],
 		},
 		async execute(args: {
-			mode: "check" | "interactive" | "later" | "skip" | "reset" | "autonomy" | "authorize" | "revoke";
+			mode: "check" | "interactive" | "later" | "skip" | "reset" | "autonomy" | "authorize" | "revoke" | "purge";
 			url?: string;
 			db?: string;
 			username?: string;
 			scope?: "user" | "project";
 			decision?: "supervised" | "autonomous";
+			confirm_destructive?: boolean;
 		}, exec?: unknown) {
 			const projectRoot = root(config);
 			const autonomyMode = readAutonomy(projectRoot);
@@ -671,6 +679,54 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					detail:
 						`Revoked ${removed} stored grant(s). Every tool that would reach the Odoo instance ` +
 						"is blocked until a new human authorization (mode=authorize).",
+				};
+			}
+
+			if (args.mode === "purge") {
+				// Always show the plan first: nothing is deleted implicitly.
+				const plan = purgePlan(projectRoot);
+				if (args.confirm_destructive !== true) {
+					return {
+						mode: "purge" as string,
+						status: "plan",
+						detail:
+							"PURGE PLAN (dry run — nothing was deleted).\n" +
+							plan +
+							"\nRe-run with confirm_destructive=true to remove the owned state above. " +
+							"The plan is shown first so a purge is never a surprise.",
+					};
+				}
+				// Deleting the plugin's own state is destructive: a human approves.
+				const outcome = await requestNativeApproval(
+					ctx,
+					exec,
+					"odoo_setup",
+					`Purge the plugin's own state under ${displayPath(join(projectRoot, ".sdd"))} ` +
+						"(grants, session cookie, active run, audit log, configuration, setup marker, checkpoints)? " +
+						"Your .env, stop.md and specs/ are preserved.",
+				);
+				if (outcome !== "allowed-once") {
+					return {
+						mode: "purge" as string,
+						status: "not-authorized",
+						detail:
+							`Purge NOT performed (approval outcome: ${outcome}). Nothing was deleted.\n` + plan,
+					};
+				}
+				const result = purgeOwnedState(projectRoot);
+				appendAuditLine(projectRoot, "odoo_setup/purge", { removed: result.removed.length }, null);
+				return {
+					mode: "purge" as string,
+					status: "purged",
+					detail:
+						`Purged ${result.removed.length} owned path(s)` +
+						(result.removed.length > 0 ? `: ${result.removed.join(", ")}` : "") +
+						(result.failed.length > 0 ? `. FAILED (left in place): ${result.failed.join(", ")}` : "") +
+						(result.absent.length > 0 ? `. Absent already: ${result.absent.length}` : "") +
+						".\nPreserved: " +
+						PRESERVED.map((p) => p.rel).join(", ") +
+						". The purge itself is recorded in .sdd/audit.jsonl (the only file it recreates). " +
+						"The connection is now unauthorized: run mode=authorize again before any tool touches Odoo.",
 				};
 			}
 

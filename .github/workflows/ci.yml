@@ -6,6 +6,7 @@ on:
   pull_request:
 
 jobs:
+  # Main matrix: the contract with the CURRENT host, on both supported Node lines.
   build-test:
     runs-on: ubuntu-latest
     strategy:
@@ -21,6 +22,8 @@ jobs:
           # No npm cache: the plugin intentionally has no package-lock.json
           # (peers are optional + a host package is installed ad-hoc below).
           # `cache: npm` would fail with "lock file is not found".
+          # Consequence, stated so nobody expects it: without a lockfile there is
+          # no `npm ci` and no `npm audit` (SCA needs a lockfile to resolve).
           cache: ''
 
       - name: Install dev dependencies (peers are host-provided, optional)
@@ -39,4 +42,43 @@ jobs:
         run: npm run build
 
       - name: Smoke tests (state machine + security invariants)
+        run: npm test
+
+      # Guards the class of bug that only shows up AFTER installation: a file
+      # the runtime loads by path but `files` leaves out of the tarball.
+      - name: Packaging contract (tarball contents)
+        run: npm run test:package
+
+  # Contract floor: the oldest host this plugin CLAIMS to support. The host
+  # contract is version-sensitive (execution.arguments vs args was such a
+  # break), so the declared floor is verified rather than assumed. If this job
+  # fails, RAISE the declared floor in package.json (peerDependencies +
+  # engines.dsh) to the oldest passing version — never weaken the guard.
+  host-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: ''
+
+      - name: Install dev dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Install the declared host floor
+        run: |
+          FLOOR=$(node -p "require('./package.json').peerDependencies['@deepseek-ai/dsh-tools'].match(/\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?/)[0]")
+          echo "Declared floor: $FLOOR"
+          npm install --no-save --no-audit --no-fund "@deepseek-ai/dsh@$FLOOR"
+
+      - name: Typecheck against the floor
+        run: npm run typecheck
+
+      - name: Build against the floor
+        run: npm run build
+
+      - name: Smoke tests against the floor
         run: npm test

@@ -30,6 +30,7 @@
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
+import { readJsonWithRecovery, quarantinedSiblings, writeFileAtomic } from "./atomic.js";
 
 /** Ordered pipeline phases (the 5 SDD steps + the CLARIFY entry + terminals). */
 export const PHASES = [
@@ -149,34 +150,35 @@ export function initialState(specDir: string, overrides: Partial<SddState> = {})
 /** Load persisted state, returning fresh state when none exists. */
 export function loadState(specDir: string): SddState {
 	const file = join(specDir, STATE_FILE);
-	if (!existsSync(file)) return initialState(specDir);
-	try {
-		const parsed = JSON.parse(readFileSync(file, "utf8")) as SddState;
-		if (parsed.version !== 1) return initialState(specDir);
-		return { ...initialState(specDir), ...parsed, specDir };
-	} catch {
-		// A corrupted state file must never fake progress: start over.
-		return initialState(specDir);
-	}
+	// A corrupt state file is QUARANTINED (not overwritten) and reported through
+	// `corruptionNotes`, so a restart is never silent.
+	const read = readJsonWithRecovery<SddState>(file);
+	if (read.status === "missing" || read.value === null) return initialState(specDir);
+	if (read.value.version !== 1) return initialState(specDir);
+	return { ...initialState(specDir), ...read.value, specDir };
 }
 
-/** Persist state atomically-enough (write tmp + rename is overkill here). */
+/** Corrupt state files set aside for this spec (newest first). */
+export function corruptionNotes(specDir: string): string[] {
+	return [
+		...quarantinedSiblings(join(specDir, STATE_FILE)),
+		...quarantinedSiblings(join(specDir, KB_FILE)),
+	];
+}
+
+/** Persist state with an atomic replace (no torn file on crash). */
 export function saveState(state: SddState): void {
 	mkdirSync(state.specDir, { recursive: true });
-	writeFileSync(join(state.specDir, STATE_FILE), JSON.stringify({ ...state, updatedAt: nowIso() }, null, 2));
+	writeFileAtomic(join(state.specDir, STATE_FILE), JSON.stringify({ ...state, updatedAt: nowIso() }, null, 2));
 }
 
 /** Append a node to the KB graph (create the file when missing). */
 export function kbAppend(state: SddState, kind: KbNode["kind"], summary: string): KbNode {
 	const file = join(state.specDir, KB_FILE);
-	let nodes: KbNode[] = [];
-	if (existsSync(file)) {
-		try {
-			nodes = JSON.parse(readFileSync(file, "utf8")) as KbNode[];
-		} catch {
-			nodes = [];
-		}
-	}
+	// Recovery read: a corrupt KB is quarantined so its history stays on disk
+	// and the loss is visible in `sdd_phase status`.
+	const read = readJsonWithRecovery<KbNode[]>(file);
+	let nodes: KbNode[] = Array.isArray(read.value) ? read.value : [];
 	const node: KbNode = {
 		id: nodes.length > 0 ? Math.max(...nodes.map((n) => n.id)) + 1 : 1,
 		kind,
@@ -185,19 +187,14 @@ export function kbAppend(state: SddState, kind: KbNode["kind"], summary: string)
 		createdAt: nowIso(),
 	};
 	nodes.push(node);
-	writeFileSync(file, JSON.stringify(nodes, null, 2));
+	writeFileAtomic(file, JSON.stringify(nodes, null, 2));
 	return node;
 }
 
-/** Read the KB graph (empty when absent). */
+/** Read the KB graph (empty when absent). A corrupt file is quarantined. */
 export function kbRead(specDir: string): KbNode[] {
-	const file = join(specDir, KB_FILE);
-	if (!existsSync(file)) return [];
-	try {
-		return JSON.parse(readFileSync(file, "utf8")) as KbNode[];
-	} catch {
-		return [];
-	}
+	const read = readJsonWithRecovery<KbNode[]>(join(specDir, KB_FILE));
+	return Array.isArray(read.value) ? read.value : [];
 }
 
 /**
@@ -218,10 +215,8 @@ export function stopRequested(specDir: string): string | null {
  */
 export function writeVerdict(state: SddState, passed: boolean, detail: string): void {
 	const header = passed ? "PASSED" : "FAILED";
-	writeFileSync(
-		join(state.specDir, VERDICT_FILE),
-		`${header} at ${nowIso()}\n${detail.slice(0, 20000)}\n`,
-	);
+	// Atomic: a torn verdict file could read as neither PASSED nor FAILED.
+	writeFileAtomic(join(state.specDir, VERDICT_FILE), `${header} at ${nowIso()}\n${detail.slice(0, 20000)}\n`);
 	state.lastVerdictPassed = passed;
 }
 
@@ -750,6 +745,13 @@ export function summarize(state: SddState): string {
 	if (designWarn.length > 0) {
 		lines.push("design (guide, non-blocking):");
 		for (const w of designWarn) lines.push(`  - ${w}`);
+	}
+	// A quarantined state/KB file means progress was lost: say so instead of
+	// presenting a fresh state as if nothing happened.
+	const corrupt = corruptionNotes(state.specDir);
+	if (corrupt.length > 0) {
+		lines.push("RECOVERED FROM CORRUPTION (state was reset; originals kept):");
+		for (const c of corrupt.slice(0, 3)) lines.push(`  - ${c}`);
 	}
 	return lines.join("\n");
 }

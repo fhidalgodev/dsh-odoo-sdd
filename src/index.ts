@@ -47,6 +47,7 @@ import {
 	type AutonomyMode,
 	type SetupStatus,
 } from "./setup-state.js";
+import { writeFileAtomic } from "./atomic.js";
 import { withAudit } from "./audit.js";
 import { registerRuntimeTools } from "./tools-runtime.js";
 import { appendAuditLine, recordAudit } from "./audit.js";
@@ -469,6 +470,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		auditAllTools: config.auditAllTools ?? true,
 		maxCheckpoints: config.maxCheckpoints ?? 5,
 	};
+	// Live source of the Settings section. The host hands us a THUNK returning
+	// the currently authoritative value (the resolved user scope while attached,
+	// the composition entry otherwise). Keeping the thunk — instead of ignoring
+	// it — is what makes edits in Settings → Odoo SDD actually reach the tools.
+	let settingsValues: (() => Record<string, unknown>) | null = null;
 	ctx.inject?.<SddsSettingsProvider>(["settings"], (settingsCtx) => {
 		settingsCtx.settings.installSection(
 			ctx,
@@ -476,12 +482,15 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			Config,
 			sddsDefaultConfig,
 			{
-				setSource: () => {
-					// The user may override deployment defaults from Settings;
-					// a later step can bind this to the live tools resolver.
+				setSource: (current: () => unknown) => {
+					settingsValues = () => {
+						const value = current();
+						return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
+					};
 				},
 				onChange: () => {
-					// Bookmark for reacting to allowlist/delegation edits later.
+					// effectiveConfig() resolves live on every call, so there is no
+					// cached layer to invalidate; the next tool call sees the change.
 				},
 			},
 		);
@@ -1281,7 +1290,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	const saveConfigFile = (data: Record<string, unknown>): void => {
 		const file = configFile();
 		mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-		writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+		writeFileAtomic(file, JSON.stringify(data, null, 2));
 		try {
 			chmodSync(file, 0o600);
 		} catch {
@@ -1469,25 +1478,43 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// resolved on every call so live edits apply without a restart.
 	const effectiveConfig = () => {
 		const data = loadConfigFile();
+		// Layer order (highest last): deployment config → Settings (human) →
+		// .sdd/config.json (written by odoo_config, itself human-approved).
+		// `undefined` values are dropped so a sparse settings payload cannot
+		// erase a deployment value with nothing.
+		const settings: Record<string, unknown> = (() => {
+			try {
+				return settingsValues?.() ?? {};
+			} catch {
+				return {};
+			}
+		})();
+		const merged: Record<string, unknown> = { ...(config as Record<string, unknown>) };
+		for (const [key, value] of Object.entries(settings)) {
+			if (value !== undefined) merged[key] = value;
+		}
+		for (const [key, value] of Object.entries(data)) {
+			if (value !== undefined) merged[key] = value;
+		}
 		const asString = (v: unknown, fallback: string): string => (typeof v === "string" && v !== "" ? v : fallback);
 		const asList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
 		const asBool = (v: unknown, fallback: boolean): boolean => (typeof v === "boolean" ? v : fallback);
 		const asNum = (v: unknown, fallback: number): number => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
 		return {
-			projectRoot: asString(data["projectRoot"], config.projectRoot ?? root(config)),
-			specsDir: asString(data["specsDir"], config.specsDir ?? "specs"),
-			executeAllowlist: Array.isArray(data["executeAllowlist"]) ? asList(data["executeAllowlist"]) : (config.executeAllowlist ?? []),
-			communityRepoUrl: asString(data["communityRepoUrl"], config.communityRepoUrl ?? "https://github.com/odoo/odoo"),
-			communityRepoPath: asString(data["communityRepoPath"], config.communityRepoPath ?? ""),
-			enterpriseRepoUrl: asString(data["enterpriseRepoUrl"], config.enterpriseRepoUrl ?? "https://github.com/odoo/enterprise"),
-			enterpriseRepoPath: asString(data["enterpriseRepoPath"], config.enterpriseRepoPath ?? ""),
-			autonomy: asString(data["autonomy"], config.autonomy ?? "supervised"),
-			licensed: ((v: unknown, fb: string): string => (asString(v, fb) === "enterprise" ? "enterprise" : "community"))(data["licensed"], config.licensed ?? "community"),
-			requireCheckpointBeforeMutation: asBool(data["requireCheckpointBeforeMutation"], config.requireCheckpointBeforeMutation ?? true),
-			securityReviewRequired: asBool(data["securityReviewRequired"], config.securityReviewRequired ?? true),
-			securityInterviewRequired: asBool(data["securityInterviewRequired"], config.securityInterviewRequired ?? true),
-			auditAllTools: asBool(data["auditAllTools"], config.auditAllTools ?? true),
-			maxCheckpoints: asNum(data["maxCheckpoints"], config.maxCheckpoints ?? 5),
+			projectRoot: asString(merged["projectRoot"], config.projectRoot ?? root(config)),
+			specsDir: asString(merged["specsDir"], config.specsDir ?? "specs"),
+			executeAllowlist: Array.isArray(merged["executeAllowlist"]) ? asList(merged["executeAllowlist"]) : (config.executeAllowlist ?? []),
+			communityRepoUrl: asString(merged["communityRepoUrl"], config.communityRepoUrl ?? "https://github.com/odoo/odoo"),
+			communityRepoPath: asString(merged["communityRepoPath"], config.communityRepoPath ?? ""),
+			enterpriseRepoUrl: asString(merged["enterpriseRepoUrl"], config.enterpriseRepoUrl ?? "https://github.com/odoo/enterprise"),
+			enterpriseRepoPath: asString(merged["enterpriseRepoPath"], config.enterpriseRepoPath ?? ""),
+			autonomy: asString(merged["autonomy"], config.autonomy ?? "supervised"),
+			licensed: ((v: unknown, fb: string): string => (asString(v, fb) === "enterprise" ? "enterprise" : "community"))(merged["licensed"], config.licensed ?? "community"),
+			requireCheckpointBeforeMutation: asBool(merged["requireCheckpointBeforeMutation"], config.requireCheckpointBeforeMutation ?? true),
+			securityReviewRequired: asBool(merged["securityReviewRequired"], config.securityReviewRequired ?? true),
+			securityInterviewRequired: asBool(merged["securityInterviewRequired"], config.securityInterviewRequired ?? true),
+			auditAllTools: asBool(merged["auditAllTools"], config.auditAllTools ?? true),
+			maxCheckpoints: asNum(merged["maxCheckpoints"], config.maxCheckpoints ?? 5),
 		};
 	};
 
@@ -1514,8 +1541,21 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	const undoJournal = async (projectRoot: string, checkpointId: string): Promise<{ undone: string[]; detail: string }> => {
 		const ops = readCheckpointJournalFile(projectRoot, checkpointId);
 		if (ops.length === 0) return { undone: [], detail: "nothing journaled" };
-		const { client } = clientFor(projectRoot);
+		const { client, credentials } = clientFor(projectRoot);
 		if (client === null) return { undone: [], detail: "no instance configured — journal left intact" };
+		// Database identity: replaying a journal recorded against another database
+		// would mutate the wrong instance, so refuse instead of guessing.
+		const stamped = [...new Set(ops.map((o) => o.db).filter((d): d is string => typeof d === "string"))];
+		const current = credentials?.db;
+		if (stamped.length > 0 && current !== undefined && !stamped.includes(current)) {
+			return {
+				undone: [],
+				detail:
+					`refused: the journal was recorded against database "${stamped.join(", ")}" but the ` +
+					`current target is "${current}". Point .env at the original database (or drop the ` +
+					"journal) before undoing data.",
+			};
+		}
 		const undone: string[] = [];
 		const failed: string[] = [];
 		for (const op of [...ops].reverse()) {
@@ -1560,7 +1600,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	/** Replace one checkpoint's journal (after a clean undo). */
 	const writeJournalForCheckpoint = (projectRoot: string, checkpointId: string, ops: DataOp[]): void => {
 		try {
-			writeFileSync(join(projectRoot, ".sdd", "checkpoints", checkpointId, "journal.json"), JSON.stringify(ops, null, 2), { mode: 0o600 });
+			writeFileAtomic(join(projectRoot, ".sdd", "checkpoints", checkpointId, "journal.json"), JSON.stringify(ops, null, 2));
 		} catch {
 			// best effort
 		}
@@ -1588,6 +1628,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			spec_id: { type: "string", description: "Spec id recorded in the checkpoint metadata." },
 			checkpoint_id: { type: "string", description: "Target checkpoint for restore/drop/journal." },
 			restore_data: { type: "boolean", description: "Also undo journaled data mutations (restore only)." },
+			remove_created: { type: "boolean", description: "restore only: also delete files created AFTER the checkpoint, so the tree matches the snapshot exactly (destructive; off by default)." },
 			confirm_destructive: { type: "boolean", description: "REQUIRED true when restore_data=true." },
 		},
 		output: {
@@ -1611,6 +1652,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			spec_id?: string;
 			checkpoint_id?: string;
 			restore_data?: boolean;
+			remove_created?: boolean;
 			confirm_destructive?: boolean;
 		}) {
 			const cfg = effectiveConfig();
@@ -1682,7 +1724,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (!args.checkpoint_id) {
 				return { ok: false, operation: "restore" as string, restored: [] as string[], detail: "operation=restore requires checkpoint_id." };
 			}
-			const files = restoreCheckpointFiles(projectRoot, args.checkpoint_id);
+			const files = restoreCheckpointFiles(projectRoot, args.checkpoint_id, {
+				prune: args.remove_created === true,
+			});
 			const restoredData: string[] = [];
 			let dataNote = "data restore not requested";
 			if (args.restore_data === true) {
@@ -1696,9 +1740,19 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				restoredData.push(...undo.undone);
 				dataNote = undo.detail;
 			}
-			appendAuditLine(projectRoot, "sdd_checkpoint/restore", { checkpoint: args.checkpoint_id, restore_data: args.restore_data === true }, clientFor(projectRoot).credentials, {
+			appendAuditLine(projectRoot, "sdd_checkpoint/restore", { checkpoint: args.checkpoint_id, restore_data: args.restore_data === true, remove_created: args.remove_created === true }, clientFor(projectRoot).credentials, {
 				phase: active.phase ?? undefined, specId: active.specId ?? undefined,
 			});
+			// Drift after the checkpoint is always REPORTED; removing it is
+			// destructive and only happens when explicitly requested.
+			const drift =
+				files.created.length === 0
+					? " no files were created after this checkpoint."
+					: ` ${files.created.length} file(s) were created AFTER this checkpoint: ` +
+						`${files.created.slice(0, 5).join(", ")}${files.created.length > 5 ? ", …" : ""}. ` +
+						(files.pruned.length > 0
+							? `${files.pruned.length} removed (remove_created=true).`
+							: "Pass remove_created=true to delete them and match the snapshot exactly.");
 			return {
 				ok: true, operation: "restore" as string, activeCheckpoint: readActiveState(projectRoot).checkpointId ?? undefined,
 				restored: files.restored,
@@ -1706,7 +1760,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					`Restored ${files.restored.length} file(s) from ${args.checkpoint_id}` +
 					(files.missing.length > 0 ? `; ${files.missing.length} failed: ${files.missing.slice(0, 5).join(", ")}` : "") +
 					`. Data undo: ${dataNote}` +
-					(restoredData.length > 0 ? ` (${restoredData.length} record op(s))` : ""),
+					(restoredData.length > 0 ? ` (${restoredData.length} record op(s))` : "") +
+					drift,
 			};
 		},
 	}));
@@ -2008,7 +2063,15 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		allowlist: () => effectiveConfig().executeAllowlist,
 		recordDataOp: (op) => {
 			try {
-				appendDataOp(effectiveConfig().projectRoot, { ts: new Date().toISOString(), ...op });
+				const cfg = effectiveConfig();
+				// Stamp the database so a replay against a DIFFERENT database can
+				// be detected instead of silently mutating another instance.
+				const db = clientFor(cfg.projectRoot).credentials?.db;
+				appendDataOp(cfg.projectRoot, {
+					ts: new Date().toISOString(),
+					...(db !== undefined ? { db } : {}),
+					...op,
+				});
 			} catch {
 				// journaling is best-effort
 			}

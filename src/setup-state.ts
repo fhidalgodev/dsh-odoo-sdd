@@ -21,6 +21,7 @@
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { writeFileAtomic } from "./atomic.js";
 
 /** Decision statuses persisted by the onboarding flow. */
 export type SetupStatus = "needs-secret" | "deferred" | "skipped";
@@ -80,7 +81,7 @@ export function writeSetupState(projectRoot: string, state: SetupState): void {
 	} catch {
 		// best effort; the file mode below still applies
 	}
-	writeFileSync(file, JSON.stringify(state, null, 2), { mode: 0o600 });
+	writeFileAtomic(file, JSON.stringify(state, null, 2));
 	try {
 		chmodSync(file, 0o600);
 	} catch {

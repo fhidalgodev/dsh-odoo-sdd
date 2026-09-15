@@ -20,6 +20,7 @@
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { writeFileAtomic } from "./atomic.js";
 
 /** What a receipt authorizes. */
 export type GrantKind = "connection" | "config";
@@ -101,7 +102,7 @@ function persist(projectRoot: string, data: GrantsFile): void {
 	} catch {
 		// best effort; the file mode below still applies
 	}
-	writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+	writeFileAtomic(file, JSON.stringify(data, null, 2));
 	try {
 		chmodSync(file, 0o600);
 	} catch {

@@ -4,7 +4,7 @@
  * security (S1 https/loopback guard, S2 redaction/scrub/path-masking),
  * and the Q3 fail-closed host guard.
  */
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, statSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, statSync, mkdirSync, rmSync, symlinkSync, readdirSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
@@ -622,6 +622,50 @@ const grantsMod = await import(new URL("grants.js", libDir).href);
 	check("approval requests are actually issued (not bypassed)", approvalCalls > 0);
 }
 
+// ---- settings section must actually drive the tools (lote 3) ------------
+console.log("== settings source drives the effective configuration ==");
+{
+	let hooks = null;
+	let live = {};
+	const localRegistry = new Map();
+	const settingsCtx = {
+		tools: { register: (t) => localRegistry.set(t.name, t), guard: () => () => {} },
+		on: () => () => {},
+		// The host hands the section hooks through ctx.inject(["settings"], cb).
+		inject: (_deps, cb) => cb({ settings: { installSection: (_o, _ns, _schema, _entry, h) => { hooks = h; } } }),
+	};
+	const projSet = join(dir, "projSettings");
+	mkdirSync(projSet, { recursive: true });
+	plugin.apply(settingsCtx, { projectRoot: projSet });
+	check("settings section registers its hooks", hooks !== null && typeof hooks.setSource === "function" && typeof hooks.onChange === "function");
+
+	hooks.setSource(() => live);
+	hooks.onChange();
+	const setExec = localRegistry.get("odoo_execute");
+	// With no allowlist anywhere, a mutation is refused for that reason.
+	let sr = await setExec.execute({ model: "sale.order", method: "create", values: { name: "x" }, confirm_destructive: true });
+	check("mutation refused before the settings layer allowlists it", sr.denied === true && /allowlist/i.test(sr.reason));
+
+	// A value set through the Settings source must change tool behaviour, not
+	// merely render in the form.
+	live = { executeAllowlist: ["sale.order"] };
+	hooks.onChange();
+	sr = await setExec.execute({ model: "sale.order", method: "create", values: { name: "x" }, confirm_destructive: true });
+	check(
+		"settings-provided allowlist reaches the tool (no longer 'not allowlisted')",
+		sr.denied === true && /allowlist/i.test(sr.reason) === false,
+	);
+	// And it is the settings value that did it: a different model stays denied.
+	sr = await setExec.execute({ model: "account.move", method: "create", values: { name: "x" }, confirm_destructive: true });
+	check("settings allowlist is scoped to the listed model", sr.denied === true && /allowlist/i.test(sr.reason));
+
+	// A sparse settings payload must not erase the deployment value.
+	live = {};
+	hooks.onChange();
+	sr = await setExec.execute({ model: "sale.order", method: "create", values: { name: "x" }, confirm_destructive: true });
+	check("clearing the settings layer falls back (no crash, still evaluable)", typeof sr.reason === "string");
+}
+
 
 console.log("== checkpoints, security scan, ACL gate, policy guard, handoff ==");
 const cps = await import(new URL("checkpoints.js", libDir).href);
@@ -649,6 +693,65 @@ cpR = await cpTool.execute({ operation: "drop", checkpoint_id: cpId });
 check("checkpoint dropped", cpR.ok === true);
 cpR = await cpTool.execute({ operation: "create", label: "needs dirs" });
 check("create without dirs defaults to whole project", cpR.ok === true);
+
+// ---- rollback completeness: drift after the checkpoint (lote 3) ---------
+{
+	const projDrift = join(dir, "projDrift");
+	mkdirSync(join(projDrift, "mod"), { recursive: true });
+	writeFileSync(join(projDrift, "mod", "a.py"), "V1\n", { mode: 0o600 });
+	plugin.apply(fakeCtx, { projectRoot: projDrift });
+	const driftTool = registered.get("sdd_checkpoint");
+	const made = await driftTool.execute({ operation: "create", label: "drift", dirs: ["mod"] });
+	check("drift checkpoint records its roots", made.ok === true);
+	const driftId = made.activeCheckpoint;
+	// Mutate AND create a file the snapshot never saw.
+	writeFileSync(join(projDrift, "mod", "a.py"), "V2\n", { mode: 0o600 });
+	writeFileSync(join(projDrift, "mod", "added_later.py"), "NEW\n", { mode: 0o600 });
+	const plain = cps.restoreCheckpointFiles(projDrift, driftId);
+	check("restore reverts the modified file", readFileSync(join(projDrift, "mod", "a.py"), "utf8") === "V1\n");
+	check("restore REPORTS the file created after the checkpoint", plain.created.includes("mod/added_later.py"));
+	check("restore does not delete it unless asked", existsSync(join(projDrift, "mod", "added_later.py")));
+	const exact = cps.restoreCheckpointFiles(projDrift, driftId, { prune: true });
+	check("restore with prune removes the extra file", exact.pruned.includes("mod/added_later.py") && !existsSync(join(projDrift, "mod", "added_later.py")));
+	check("prune never touches the snapshotted files", existsSync(join(projDrift, "mod", "a.py")));
+	// A checkpoint taken BEFORE this feature has no roots recorded: prune must
+	// say it cannot, instead of deleting anything it cannot account for.
+	const legacyDir = join(cps.checkpointsDir(projDrift), driftId);
+	const manifest = JSON.parse(readFileSync(join(legacyDir, "manifest.json"), "utf8"));
+	delete manifest.dirs;
+	writeFileSync(join(legacyDir, "manifest.json"), JSON.stringify(manifest, null, 2), { mode: 0o600 });
+	const legacy = cps.restoreCheckpointFiles(projDrift, driftId, { prune: true });
+	check("a legacy manifest cannot prune (reports unsupported)", legacy.pruneUnsupported === true && legacy.pruned.length === 0);
+}
+
+// ---- durable state: atomic writes and visible corruption recovery (lote 3) ----
+{
+	const atomicMod = await import(new URL("atomic.js", libDir).href);
+	const projDur = join(dir, "specs", "005-durable");
+	sdd.initSpecDir(projDur);
+	const st5 = sdd.loadState(projDur);
+	st5.phase = "VERIFY";
+	sdd.saveState(st5);
+	check("state survives an atomic save round-trip", sdd.loadState(projDur).phase === "VERIFY");
+	check("no temp file is left behind", !readdirSync(projDur).some((f) => f.includes(".tmp-")));
+
+	// A corrupt state file is quarantined, not silently clobbered, and the
+	// recovery is reported by the status summary.
+	writeFileSync(join(projDur, "state.json"), "{ this is not json", { mode: 0o600 });
+	const recovered = sdd.loadState(projDur);
+	check("corrupt state resets to a safe phase", recovered.phase === "CLARIFY");
+	const quarantined = readdirSync(projDur).filter((f) => f.includes(".corrupt-"));
+	check("corrupt state is quarantined instead of overwritten", quarantined.length === 1);
+	check("the quarantined original is preserved", readFileSync(join(projDur, quarantined[0]), "utf8").includes("not json"));
+	check("status reports the recovery", /RECOVERED FROM CORRUPTION/.test(sdd.summarize(sdd.loadState(projDur))));
+
+	// Low-level helper contract.
+	const ro = atomicMod.readJsonWithRecovery(join(projDur, "missing.json"));
+	check("missing file reads as missing (not corrupt)", ro.status === "missing" && ro.value === null);
+	const rw = atomicMod.readJsonWithRecovery(join(projDur, "kb.json"));
+	check("valid file reads as ok", rw.status === "ok" || rw.status === "missing");
+}
+
 
 // ---- path / id containment (P0.3) --------------------------------------
 check("isSafeSegment rejects traversal and separators", cps.isSafeSegment("../../etc") === false && cps.isSafeSegment("a/b") === false && cps.isSafeSegment("..") === false);

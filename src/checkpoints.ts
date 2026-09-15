@@ -31,6 +31,7 @@ import {
 	rmSync,
 } from "node:fs";
 import { dirname, join, relative, isAbsolute, sep } from "node:path";
+import { writeFileAtomic } from "./atomic.js";
 
 /** Directories never worth copying into a checkpoint (`.sdd` holds the checkpoints themselves). */
 const SKIP_DIRS = new Set(["node_modules", ".git", ".sdd", "__pycache__", ".mypy_cache", ".pytest_cache"]);
@@ -70,6 +71,8 @@ export function isSecretFile(name: string): boolean {
 /** One journaled data mutation (used for best-effort undo). */
 export interface DataOp {
 	ts: string;
+	/** Database the op was applied to, so a replay against another DB is caught. */
+	db?: string;
 	model: string;
 	method: "create" | "write" | "unlink";
 	ids: number[];
@@ -86,6 +89,8 @@ export interface CheckpointManifest {
 	createdAt: string;
 	phase: string | null;
 	specId: string | null;
+	/** Roots that were snapshotted, relative to projectRoot. */
+	dirs?: string[];
 	files: Array<{ path: string; bytes: number }>;
 	truncated: boolean;
 }
@@ -131,7 +136,7 @@ export function writeActiveState(projectRoot: string, patch: Partial<ActiveState
 	try {
 		const dir = sddDir(projectRoot);
 		mkdirSync(dir, { recursive: true, mode: 0o700 });
-		writeFileSync(join(dir, ACTIVE_FILE), JSON.stringify(next, null, 2), { mode: 0o600 });
+		writeFileAtomic(join(dir, ACTIVE_FILE), JSON.stringify(next, null, 2));
 	} catch {
 		// best effort: policy falls back to permissive-with-warning
 	}
@@ -258,11 +263,12 @@ export function createCheckpoint(
 			createdAt: new Date().toISOString(),
 			phase: options.phase ?? null,
 			specId: options.specId ?? null,
+			dirs: [...options.dirs],
 			files,
 			truncated,
 		};
-		writeFileSync(join(root, "manifest.json"), JSON.stringify(manifest, null, 2), { mode: 0o600 });
-		writeFileSync(join(root, "journal.json"), JSON.stringify([] satisfies DataOp[], null, 2), { mode: 0o600 });
+		writeFileAtomic(join(root, "manifest.json"), JSON.stringify(manifest, null, 2));
+		writeFileAtomic(join(root, "journal.json"), JSON.stringify([] satisfies DataOp[], null, 2));
 		writeActiveState(projectRoot, { checkpointId: id, specId: options.specId ?? undefined, phase: options.phase ?? undefined });
 		return manifest;
 	} catch {
@@ -305,14 +311,80 @@ export function readCheckpoint(projectRoot: string, id: string): CheckpointManif
 	}
 }
 
-/** Copy the checkpoint's files back over the project (files only). */
-export function restoreCheckpointFiles(projectRoot: string, id: string): { restored: string[]; missing: string[] } {
-	if (!isSafeSegment(id)) return { restored: [], missing: [] };
+/** Result of a file restore. */
+export interface RestoreResult {
+	/** Files rewritten from the snapshot. */
+	restored: string[];
+	/** Snapshot entries that could not be written back. */
+	missing: string[];
+	/** Files that exist now but were NOT in the snapshot (drift after it). */
+	created: string[];
+	/** Files actually removed (only when `prune` was requested). */
+	pruned: string[];
+	/** True when pruning was requested but the manifest predates `dirs`. */
+	pruneUnsupported: boolean;
+}
+
+/**
+ * Walk the snapshotted roots and list the files present now, relative to the
+ * project root. Bounded and symlink-free, mirroring the snapshot rules.
+ */
+function listFilesUnder(projectRoot: string, dirs: string[], out: Set<string>): void {
+	for (const dir of dirs) {
+		const abs = join(projectRoot, dir);
+		if (!isWithinRoot(projectRoot, abs) && abs !== projectRoot) continue;
+		if (!existsSync(abs)) continue;
+		const walk = (current: string, rel: string): void => {
+			let entries: string[];
+			try {
+				entries = readdirSync(current);
+			} catch {
+				return;
+			}
+			for (const name of entries) {
+				if (SKIP_DIRS.has(name) || isSecretFile(name)) continue;
+				const childAbs = join(current, name);
+				const childRel = rel === "" ? name : `${rel}/${name}`;
+				let st;
+				try {
+					st = lstatSync(childAbs);
+				} catch {
+					continue;
+				}
+				if (st.isSymbolicLink()) continue;
+				if (st.isDirectory()) walk(childAbs, childRel);
+				else if (st.isFile()) out.add(childRel);
+			}
+		};
+		walk(abs, dir);
+	}
+}
+
+/**
+ * Copy the checkpoint's files back over the project.
+ *
+ * A restore means "make the snapshotted roots look like the snapshot", so it
+ * also DETECTS files created after the checkpoint. They are reported as
+ * `created` and removed only when `prune` is requested: deleting working files
+ * is destructive, so it never happens implicitly, but it can no longer be
+ * silently forgotten either.
+ * @param projectRoot - workspace root.
+ * @param id - checkpoint id.
+ * @param options - `prune: true` also removes the files created after it.
+ * @returns restored/missing/created/pruned file lists.
+ */
+export function restoreCheckpointFiles(
+	projectRoot: string,
+	id: string,
+	options: { prune?: boolean } = {},
+): RestoreResult {
+	const empty: RestoreResult = { restored: [], missing: [], created: [], pruned: [], pruneUnsupported: false };
+	if (!isSafeSegment(id)) return empty;
 	const manifest = readCheckpoint(projectRoot, id);
 	const filesRoot = join(checkpointsDir(projectRoot), id, "files");
+	if (manifest === null || !existsSync(filesRoot)) return empty;
 	const restored: string[] = [];
 	const missing: string[] = [];
-	if (manifest === null || !existsSync(filesRoot)) return { restored, missing };
 	for (const entry of manifest.files) {
 		// A hostile/edited manifest must not write outside the project root.
 		if (
@@ -338,7 +410,32 @@ export function restoreCheckpointFiles(projectRoot: string, id: string): { resto
 			missing.push(entry.path);
 		}
 	}
-	return { restored, missing };
+
+	// Drift detection: anything under the snapshotted roots that the snapshot
+	// did not contain appeared afterwards.
+	const snapshotted = new Set(manifest.files.map((f) => f.path));
+	const dirs = Array.isArray(manifest.dirs) ? manifest.dirs.filter((d) => typeof d === "string") : [];
+	if (dirs.length === 0) {
+		return { restored, missing, created: [], pruned: [], pruneUnsupported: Boolean(options.prune) };
+	}
+	const present = new Set<string>();
+	listFilesUnder(projectRoot, dirs, present);
+	const created = [...present].filter((p) => !snapshotted.has(p)).sort();
+	const pruned: string[] = [];
+	if (options.prune === true) {
+		for (const rel of created) {
+			const abs = join(projectRoot, rel);
+			// Never delete outside the roots the snapshot actually covered.
+			if (!isWithinRoot(projectRoot, abs)) continue;
+			try {
+				rmSync(abs, { force: true });
+				pruned.push(rel);
+			} catch {
+				// left in place; it stays visible in `created`
+			}
+		}
+	}
+	return { restored, missing, created, pruned, pruneUnsupported: false };
 }
 
 /** Delete one checkpoint. */
@@ -390,7 +487,7 @@ export function appendDataOp(projectRoot: string, op: DataOp): void {
 	}
 	ops.push(op);
 	try {
-		writeFileSync(file, JSON.stringify(ops, null, 2), { mode: 0o600 });
+		writeFileAtomic(file, JSON.stringify(ops, null, 2));
 	} catch {
 		// best effort
 	}
@@ -414,7 +511,7 @@ export function writeJournal(projectRoot: string, ops: DataOp[]): void {
 	const active = readActiveState(projectRoot);
 	if (active.checkpointId === null) return;
 	try {
-		writeFileSync(join(checkpointsDir(projectRoot), active.checkpointId, "journal.json"), JSON.stringify(ops, null, 2), { mode: 0o600 });
+		writeFileAtomic(join(checkpointsDir(projectRoot), active.checkpointId, "journal.json"), JSON.stringify(ops, null, 2));
 	} catch {
 		// best effort
 	}

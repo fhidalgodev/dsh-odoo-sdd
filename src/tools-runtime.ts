@@ -40,6 +40,7 @@ export interface RuntimeDeps {
 		ids: number[];
 		preImage: Array<Record<string, unknown>>;
 		createdIds: number[];
+		context?: Record<string, unknown>;
 	}): void;
 	/** Path/display masking helper. */
 	display(pathValue: string): string;
@@ -50,6 +51,22 @@ export interface RuntimeDeps {
 	 */
 	auditFailure?(info: { tool: string; op: string; callId?: string; reason: string }): void;
 }
+
+/**
+ * Methods that only read. Kept as an explicit set (not "anything that is not a
+ * mutation") so adding a method to the tool enum forces a conscious
+ * classification instead of silently inheriting read-only privileges.
+ */
+export const READ_METHODS: ReadonlySet<string> = new Set([
+	"search_read",
+	"read",
+	"search_count",
+	"read_group",
+	"fields_get",
+]);
+
+/** Methods that write. These are the ones the allowlist, checkpoint and phase gates cover. */
+export const MUTATING_METHODS: ReadonlySet<string> = new Set(["create", "write", "unlink"]);
 
 /** Build and register `odoo_execute` and `odoo_validate`. */
 export function registerRuntimeTools(
@@ -63,19 +80,30 @@ export function registerRuntimeTools(
 		name: "odoo_execute",
 		description:
 			"Execute a JSON-RPC call against the connected instance with a fail-closed " +
-			"allowlist. READ calls (search_read/read/search_count) are allowed; MUTATING " +
-			"calls (create/write/unlink) are denied unless BOTH confirm_destructive=true AND " +
-			"the model is in the mutation allowlist, and they are journaled so " +
-			"sdd_checkpoint can undo them. Parameters are explicit (domain/ids/values/fields) " +
-			"to avoid guessing argument shapes. Output is redacted. Target must be a " +
-			"disposable dev/staging DB.",
+			"allowlist. READ calls (search_read/read/search_count/read_group/fields_get) are " +
+			"allowed; MUTATING calls (create/write/unlink) are denied unless BOTH " +
+			"confirm_destructive=true AND the model is in the mutation allowlist, and they are " +
+			"journaled so sdd_checkpoint can undo them. `context` is forwarded verbatim (use it " +
+			"for allowed_company_ids/company_id on multi-company instances, lang or tz); the " +
+			"server still applies its own ACL. Parameters are explicit " +
+			"(domain/ids/values/fields/groupby) to avoid guessing argument shapes. Output is " +
+			"redacted. Target must be a disposable dev/staging DB.",
 		parameters: {
 			model: { type: "string", required: true, description: "Odoo model name." },
 			method: {
 				type: "string",
 				required: true,
-				enum: ["search_read", "read", "create", "write", "unlink", "search_count"],
-				description: "Method to call.",
+				enum: [
+					"search_read",
+					"read",
+					"search_count",
+					"read_group",
+					"fields_get",
+					"create",
+					"write",
+					"unlink",
+				],
+				description: "Method to call. Classified explicitly: unknown methods are refused.",
 			},
 			// Odoo domains are lists of terms; a term is either a triple with a
 			// SCALAR value (`["state","=","draft"]`) or a bare logical operator
@@ -88,6 +116,9 @@ export function registerRuntimeTools(
 			order: { type: "string", description: "Order clause for search_read." },
 			confirm_destructive: { type: "boolean", description: "REQUIRED true for create/write/unlink." },
 			limit: { type: "number", description: "Row cap for reads (default 10)." },
+			groupby: { type: "array", items: { type: "string" }, description: "read_group: fields to group by, e.g. [\"state\"]." },
+			attributes: { type: "array", items: { type: "string" }, description: "fields_get: attributes to return, e.g. [\"type\",\"string\",\"required\"]." },
+			context: { type: "object", additionalProperties: true, description: "Odoo context forwarded verbatim as kwargs.context (allowed_company_ids, company_id, lang, tz)." },
 		},
 		output: {
 			schema: {
@@ -120,10 +151,36 @@ export function registerRuntimeTools(
 				order?: string;
 				confirm_destructive?: boolean;
 				limit?: number;
+				groupby?: string[];
+				attributes?: string[];
+				context?: Record<string, unknown>;
 			};
 			const model = a.model.trim();
 			const method = a.method;
-			const isMutating = method === "create" || method === "write" || method === "unlink";
+			// Explicit classification (fail-closed): a method in neither set is
+			// refused rather than silently treated as a read.
+			if (!READ_METHODS.has(method) && !MUTATING_METHODS.has(method)) {
+				return {
+					denied: true,
+					reason:
+						`Method "${method}" is not classified as a read or a mutation. ` +
+						`Allowed reads: ${[...READ_METHODS].join(", ")}. ` +
+						`Allowed mutations: ${[...MUTATING_METHODS].join(", ")}.`,
+					result: "",
+				};
+			}
+			const isMutating = MUTATING_METHODS.has(method);
+
+			// ---- context (multi-company / lang / tz) -------------------------
+			// Forwarded verbatim; the server still applies its own ACL and record
+			// rules. Rejecting a non-object keeps the payload predictable.
+			let callContext: Record<string, unknown> | undefined;
+			if (a.context !== undefined) {
+				if (a.context === null || typeof a.context !== "object" || Array.isArray(a.context)) {
+					return { denied: true, reason: "`context` must be a plain JSON object when provided.", result: "" };
+				}
+				callContext = a.context;
+			}
 
 			// ---- policy (allowlist + explicit confirmation) ------------------
 			if (isMutating) {
@@ -149,6 +206,21 @@ export function registerRuntimeTools(
 					callKwargs["limit"] = typeof a.limit === "number" ? a.limit : 10;
 					if (typeof a.order === "string" && a.order !== "") callKwargs["order"] = a.order;
 				}
+			} else if (method === "read_group") {
+				// Aggregations: positional (domain, fields, groupby) with the
+				// optional pagination/order in kwargs.
+				callArgs = [
+					Array.isArray(a.domain) ? a.domain : [],
+					Array.isArray(a.fields) ? a.fields : [],
+					Array.isArray(a.groupby) ? a.groupby : [],
+				];
+				if (typeof a.limit === "number") callKwargs["limit"] = a.limit;
+				if (typeof a.order === "string" && a.order !== "") callKwargs["orderby"] = a.order;
+			} else if (method === "fields_get") {
+				// Field discovery: no positional args, just the requested
+				// attributes. Lets the pipeline stop guessing field names.
+				callArgs = [];
+				if (Array.isArray(a.attributes)) callKwargs["attributes"] = a.attributes;
 			} else if (method === "read") {
 				if (!Array.isArray(a.ids) || a.ids.length === 0) {
 					return { denied: true, reason: "read requires a non-empty `ids` array.", result: "" };
@@ -176,6 +248,7 @@ export function registerRuntimeTools(
 				callArgs = [a.ids];
 			}
 
+			if (callContext !== undefined) callKwargs["context"] = callContext;
 			const { client, report } = deps.client();
 			if (client === null) {
 				// `report` carries the real reason: NOT CONFIGURED (missing
@@ -223,6 +296,7 @@ export function registerRuntimeTools(
 					ids,
 					preImage,
 					createdIds,
+					...(callContext !== undefined ? { context: callContext } : {}),
 				});
 			}
 

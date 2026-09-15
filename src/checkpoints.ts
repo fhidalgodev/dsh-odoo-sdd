@@ -80,6 +80,8 @@ export interface DataOp {
 	preImage: Array<Record<string, unknown>>;
 	/** Ids created by the mutation (for create-undo). */
 	createdIds: number[];
+	/** Odoo context the mutation ran under (company/lang), so an undo replays alike. */
+	context?: Record<string, unknown>;
 }
 
 /** Checkpoint metadata persisted beside the copied files. */

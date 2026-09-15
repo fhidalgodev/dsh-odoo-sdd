@@ -905,6 +905,130 @@ console.log("== transport details (log query, abort signal, web session) ==");
 	}
 }
 
+// ---- RPC capability: context (multi-company) and read methods (lote 4) ----
+console.log("== odoo_execute capability (context, read_group, fields_get) ==");
+{
+	const runtimeMod2 = await import(new URL("tools-runtime.js", libDir).href);
+	const rtTools2 = new Map();
+	const rpcCalls = [];
+	const journaled = [];
+	const allow = ["sale.order"];
+	runtimeMod2.registerRuntimeTools(
+		{ tools: { register: (t) => rtTools2.set(t.name, t) } },
+		{
+			client: () => ({
+				client: {
+					executeKw: async (model, method, args, kwargs) => {
+						rpcCalls.push({ model, method, args, kwargs });
+						return { ok: true, value: [] };
+					},
+				},
+				report: "stub",
+			}),
+			status: () => ({ detail: "stub" }),
+			projectRoot: dir,
+			allowlist: () => allow,
+			display: (v) => v,
+			recordDataOp: (op) => journaled.push(op),
+		},
+	);
+	const rx = rtTools2.get("odoo_execute");
+
+	// The classification is explicit and fail-closed.
+	check("read methods are classified as reads", runtimeMod2.READ_METHODS.has("search_read") && runtimeMod2.READ_METHODS.has("read_group") && runtimeMod2.READ_METHODS.has("fields_get"));
+	check("mutating methods are classified separately", runtimeMod2.MUTATING_METHODS.has("create") && !runtimeMod2.READ_METHODS.has("create"));
+	let rr = await (async () => {
+		try {
+			return await rx.execute({ model: "sale.order", method: "totally_bogus_method" });
+		} catch (err) {
+			return { denied: true, reason: err instanceof Error ? err.message : String(err) };
+		}
+	})();
+	check(
+		"an unknown method is refused by the tool schema",
+		rr.denied === true && /must be one of/i.test(rr.reason) && /read_group/.test(rr.reason),
+	);
+	// Defence in depth: the in-body classification refuses an unclassified
+	// method even if one is ever added to the enum without a decision.
+	check(
+		"the method sets stay disjoint and complete for the declared enum",
+		[...runtimeMod2.READ_METHODS].every((m) => !runtimeMod2.MUTATING_METHODS.has(m)) &&
+			runtimeMod2.READ_METHODS.size + runtimeMod2.MUTATING_METHODS.size === 8,
+	);
+
+	// context is forwarded verbatim as kwargs.context (multi-company).
+	rpcCalls.length = 0;
+	await rx.execute({
+		model: "sale.order",
+		method: "search_read",
+		domain: [["state", "=", "draft"]],
+		context: { allowed_company_ids: [1, 2], company_id: 2, lang: "es_VE" },
+	});
+	check(
+		"context reaches the RPC as kwargs.context",
+		rpcCalls.length === 1 &&
+			JSON.stringify(rpcCalls[0].kwargs.context) === JSON.stringify({ allowed_company_ids: [1, 2], company_id: 2, lang: "es_VE" }),
+	);
+	rr = await (async () => {
+		try {
+			return await rx.execute({ model: "sale.order", method: "search_read", context: ["not", "an", "object"] });
+		} catch (err) {
+			return { denied: true, reason: err instanceof Error ? err.message : String(err) };
+		}
+	})();
+	check("a non-object context is refused", rr.denied === true && /context.*must be an object/i.test(rr.reason));
+
+	// read_group: positional (domain, fields, groupby), pagination in kwargs.
+	rpcCalls.length = 0;
+	await rx.execute({
+		model: "sale.order",
+		method: "read_group",
+		domain: [["state", "=", "sale"]],
+		fields: ["amount_total:sum"],
+		groupby: ["partner_id"],
+		limit: 5,
+		order: "amount_total desc",
+	});
+	const rg = rpcCalls[0];
+	check(
+		"read_group builds the positional (domain, fields, groupby) call",
+		rg.method === "read_group" &&
+			JSON.stringify(rg.args[0]) === JSON.stringify([["state", "=", "sale"]]) &&
+			JSON.stringify(rg.args[1]) === JSON.stringify(["amount_total:sum"]) &&
+			JSON.stringify(rg.args[2]) === JSON.stringify(["partner_id"]),
+	);
+	check("read_group puts pagination in kwargs", rg.kwargs.limit === 5 && rg.kwargs.orderby === "amount_total desc");
+
+	// fields_get: no positional args, just attributes.
+	rpcCalls.length = 0;
+	await rx.execute({ model: "sale.order", method: "fields_get", attributes: ["type", "string"] });
+	const fg = rpcCalls[0];
+	check("fields_get sends no positional args", fg.method === "fields_get" && fg.args.length === 0);
+	check("fields_get forwards the requested attributes", JSON.stringify(fg.kwargs.attributes) === JSON.stringify(["type", "string"]));
+
+	// The new reads must NOT be gated as mutations.
+	check("read methods are not subject to the mutation allowlist", fg.kwargs.context === undefined);
+
+	// Mutations keep every gate, and the journal records the context used.
+	journaled.length = 0;
+	rr = await rx.execute({ model: "sale.order", method: "create", values: { name: "x" } });
+	check("create still requires confirm_destructive", rr.denied === true && /confirm_destructive/.test(rr.reason));
+	rpcCalls.length = 0;
+	await rx.execute({
+		model: "sale.order",
+		method: "create",
+		values: { name: "x" },
+		confirm_destructive: true,
+		context: { company_id: 3 },
+	});
+	check("an allowlisted create still runs", rpcCalls.length === 1 && rpcCalls[0].method === "create");
+	check(
+		"the journal records the context of the mutation",
+		journaled.length === 1 && JSON.stringify(journaled[0].context) === JSON.stringify({ company_id: 3 }),
+	);
+}
+
+
 
 // ---- security scan ------------------------------------------------------
 const vuln = join(dir, "mod_vuln");

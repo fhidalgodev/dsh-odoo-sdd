@@ -24,6 +24,7 @@
  */
 import { readFileSync, statSync, existsSync, chmodSync } from "node:fs";
 import { homedir } from "node:os";
+import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 
 /** Where a resolved credential file came from in the cascade. */
@@ -78,13 +79,17 @@ const REQUIRED_VARS = ["ODOO_URL", "ODOO_DB", "ODOO_USERNAME", "ODOO_PASSWORD"] 
 /** Hostnames treated as local for transport-security purposes (S1). */
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]", "ip6-localhost"]);
 
-/** True when the host is loopback-shaped (explicit list or 127.x / *.localhost). */
+/** True when the host is loopback-shaped (explicit list, real IPv4 127/8, or *.localhost). */
 function isLoopback(hostname: string): boolean {
-	return (
-		LOOPBACK_HOSTS.has(hostname) ||
-		hostname.startsWith("127.") ||
-		hostname.endsWith(".localhost")
-	);
+	if (LOOPBACK_HOSTS.has(hostname)) return true;
+	if (hostname.endsWith(".localhost")) return true;
+	// A hostname that merely *starts* with "127." (e.g. "127.odoo.example.com")
+	// is NOT loopback — only a genuine IPv4 in 127/8 qualifies.
+	if (isIP(hostname) === 4) {
+		const first = Number(hostname.split(".")[0]);
+		return first === 127;
+	}
+	return false;
 }
 
 /**
@@ -109,9 +114,12 @@ export function displayPath(text: string): string {
  * @returns the scrubbed text.
  */
 export function scrubGeneric(text: string): string {
+	// Covers `password=value`, `password: value`, `"password": "value"` (JSON),
+	// and `'password': 'value'`. The leading/trailing quotes group matches the
+	// same quote character on both sides via backreference.
 	let out = text.replace(
-		/\b(password|passwd|pwd|secret|api[-_]?key|apikey|access[-_]?token|auth[-_]?token|token|session[-_]?id|session_id|cookie)\b(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;"']+)/gi,
-		(_m, key: string, sep: string) => `${key}${sep}***REDACTED***`,
+		/(["']?)(password|passwd|pwd|secret|api[-_]?key|apikey|access[-_]?token|auth[-_]?token|token|session[-_]?id|session_id|cookie)\1(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;"']+)/gi,
+		(_m, q: string, key: string, sep: string) => `${q}${key}${q}${sep}***REDACTED***`,
 	);
 	out = out.replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer ***REDACTED***");
 	out = out.replace(/\/\/[^/\s:@]+:[^/\s@]+@/g, "//***:***@");

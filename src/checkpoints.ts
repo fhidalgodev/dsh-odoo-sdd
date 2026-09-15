@@ -30,7 +30,7 @@ import {
 	writeFileSync,
 	rmSync,
 } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, isAbsolute, sep } from "node:path";
 
 /** Directories never worth copying into a checkpoint (`.sdd` holds the checkpoints themselves). */
 const SKIP_DIRS = new Set(["node_modules", ".git", ".sdd", "__pycache__", ".mypy_cache", ".pytest_cache"]);
@@ -116,6 +116,35 @@ function slug(label: string): string {
 	return (label || "checkpoint").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "checkpoint";
 }
 
+/**
+ * True when `value` is a safe single path SEGMENT: non-empty, bounded, no NUL,
+ * no traversal (`..`), no separators and not absolute. Checkpoint ids and spec
+ * ids are single segments and are fed straight into `join(...)`; an unvalidated
+ * value could escape the checkpoint/spec root.
+ */
+export function isSafeSegment(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= 200 &&
+		!value.includes("\0") &&
+		value !== ".." &&
+		value !== "." &&
+		!value.includes("/") &&
+		!value.includes("\\")
+	);
+}
+
+/**
+ * True when `target` stays under `root` (containment, not lexical prefix).
+ * `target` is absolute; the RELATIVE path must not climb via `..` and must not
+ * resolve to an absolute path. Passing the root itself (rel === "") is allowed.
+ */
+export function isWithinRoot(root: string, target: string): boolean {
+	const rel = relative(root, target);
+	return rel !== ".." && !rel.startsWith(".." + sep) && !isAbsolute(rel);
+}
+
 /** Recursively copy a tree, skipping SKIP_DIRS, bounded by maxBytes. */
 function copyTree(src: string, dst: string, rel: string, acc: Array<{ path: string; bytes: number }>, budget: { left: number }): boolean {
 	let truncated = false;
@@ -177,8 +206,14 @@ export function createCheckpoint(
 	try {
 		mkdirSync(filesRoot, { recursive: true, mode: 0o700 });
 		for (const dir of options.dirs) {
+			// Reject a directory that would escape the project root (traversal /
+			// absolute path): never snapshot outside the workspace.
+			if (dir === null || dir === undefined || typeof dir !== "string" || dir.includes("..") || isAbsolute(dir)) {
+				return null;
+			}
 			const abs = join(projectRoot, dir);
 			if (!existsSync(abs)) continue;
+			if (!isWithinRoot(projectRoot, abs)) return null;
 			if (copyTree(abs, filesRoot, dir, files, budget)) truncated = true;
 		}
 		const manifest: CheckpointManifest = {
@@ -224,6 +259,7 @@ export function listCheckpoints(projectRoot: string): CheckpointManifest[] {
 
 /** Read one checkpoint manifest. */
 export function readCheckpoint(projectRoot: string, id: string): CheckpointManifest | null {
+	if (!isSafeSegment(id)) return null;
 	const file = join(checkpointsDir(projectRoot), id, "manifest.json");
 	if (!existsSync(file)) return null;
 	try {
@@ -235,14 +271,29 @@ export function readCheckpoint(projectRoot: string, id: string): CheckpointManif
 
 /** Copy the checkpoint's files back over the project (files only). */
 export function restoreCheckpointFiles(projectRoot: string, id: string): { restored: string[]; missing: string[] } {
+	if (!isSafeSegment(id)) return { restored: [], missing: [] };
 	const manifest = readCheckpoint(projectRoot, id);
 	const filesRoot = join(checkpointsDir(projectRoot), id, "files");
 	const restored: string[] = [];
 	const missing: string[] = [];
 	if (manifest === null || !existsSync(filesRoot)) return { restored, missing };
 	for (const entry of manifest.files) {
+		// A hostile/edited manifest must not write outside the project root.
+		if (
+			!entry.path ||
+			entry.path.includes("..") ||
+			entry.path.includes("\0") ||
+			isAbsolute(entry.path)
+		) {
+			missing.push(entry.path);
+			continue;
+		}
 		const from = join(filesRoot, entry.path);
 		const to = join(projectRoot, entry.path);
+		if (!isWithinRoot(projectRoot, to)) {
+			missing.push(entry.path);
+			continue;
+		}
 		try {
 			mkdirSync(dirname(to), { recursive: true });
 			copyFileSync(from, to);
@@ -256,6 +307,7 @@ export function restoreCheckpointFiles(projectRoot: string, id: string): { resto
 
 /** Delete one checkpoint. */
 export function dropCheckpoint(projectRoot: string, id: string): boolean {
+	if (!isSafeSegment(id)) return false; // never rm recursively on an unvalidated id
 	const dir = join(checkpointsDir(projectRoot), id);
 	if (!existsSync(dir)) return false;
 	try {
@@ -278,7 +330,16 @@ export function purgeCheckpoints(projectRoot: string, max: number): number {
 	return dropped;
 }
 
-/** Append one data operation to the ACTIVE checkpoint's journal. */
+/**
+ * Append one data operation to the ACTIVE checkpoint's journal.
+ *
+ * IMPORTANT (design decision): the journal stores raw pre-images so a restore
+ * can replay the exact prior values — redacting them here would break the data
+ * rollback that is the whole point of the journal. Exposure is therefore
+ * bounded to the local `.sdd/` directory, which is mode-0600 and gitignored
+ * (captured in `.gitignore`), rather than to the model/handoff. Do NOT send
+ * this journal through the model-facing content renderer.
+ */
 export function appendDataOp(projectRoot: string, op: DataOp): void {
 	const active = readActiveState(projectRoot);
 	if (active.checkpointId === null) return; // no checkpoint: nothing to journal against

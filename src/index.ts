@@ -61,6 +61,7 @@ import {
 	readJournal,
 	writeJournal,
 	appendDataOp,
+	isSafeSegment,
 	type DataOp,
 } from "./checkpoints.js";
 import { scanModule } from "./security-scan.js";
@@ -164,7 +165,10 @@ function root(config: OdooSddConfig): string {
 
 /** Resolve a spec directory under the configured specs dir. */
 function specDirOf(config: OdooSddConfig, specId: string): string {
-	return join(root(config), config.specsDir ?? "specs", specId);
+	// An unvalidated spec id could escape the specs root (traversal). Reject it
+	// fail-closed: map to a neutral dir so nothing real is created/read.
+	const safe = isSafeSegment(specId) ? specId : "__invalid__";
+	return join(root(config), config.specsDir ?? "specs", safe);
 }
 
 /** Load credentials and build a client, or a remediation report. */
@@ -255,6 +259,9 @@ interface SkillApi {
 		content: string;
 		whenToUse?: string;
 		invocation?: { modelInvocable: boolean; userInvocable: boolean };
+		source?: string;
+		resourceBase?: { kind: "directory"; path: string };
+		path?: string;
 	}): () => void;
 }
 
@@ -299,6 +306,7 @@ function registerOdooSddSkill(ctx: unknown): void {
 		}
 		const api = c.skills;
 		if (!api || typeof api.register !== "function") return; // fail-open: no skills host
+		const pkgRoot = dirname(fileURLToPath(import.meta.url)); // .../lib
 		api.register({
 			name,
 			description:
@@ -307,6 +315,14 @@ function registerOdooSddSkill(ctx: unknown): void {
 			...(whenToUse ? { whenToUse } : {}),
 			content,
 			invocation: { modelInvocable: true, userInvocable: true },
+			// `source` is part of the host SkillRegistration contract (the
+			// registry re-validates it when the definition is loaded); omitting
+			// it can make the registry reject the skill even though apply ran.
+			source: "runtime",
+			// Resolve relative resources (agents/*.md) from the installed package
+			// location, not from cwd.
+			resourceBase: { kind: "directory", path: join(pkgRoot, "..", "agents") },
+			path: skillPath,
 		});
 	} catch {
 		// A missing/unreadable skill must never break the plugin mount; the
@@ -1596,10 +1612,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			lines.push(journal.length === 0 ? "- (none)" : journal.slice(-20).map((o) => `- ${o.ts} ${o.model}.${o.method} ids=${JSON.stringify(o.ids)} created=${JSON.stringify(o.createdIds)}`).join("\n"));
 			lines.push("");
 			lines.push("## Decisions (logbook)");
-			lines.push(decisions.length === 0 ? "- (none)" : decisions.slice(-20).map((d) => `- ${d.summary}`).join("\n"));
+			lines.push(decisions.length === 0 ? "- (none)" : decisions.slice(-20).map((d) => `- ${sanitize(d.summary)}`).join("\n"));
 			lines.push("");
 			lines.push("## Open blockers");
-			lines.push(blockers.length === 0 ? "- (none)" : blockers.slice(-10).map((b) => `- ${b.summary}`).join("\n"));
+			lines.push(blockers.length === 0 ? "- (none)" : blockers.slice(-10).map((b) => `- ${sanitize(b.summary)}`).join("\n"));
 			lines.push("");
 			lines.push("## Next steps");
 			if (state.phase === "DONE") lines.push("- Delivered. Review the diff and commit with the project's conventions.");
@@ -1675,9 +1691,14 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		if (typeof ctx.tools.guard === "function") {
 			ctx.tools.guard((execution: unknown): string | undefined => {
 				try {
-					const call = (execution ?? {}) as { name?: unknown; args?: unknown };
+					const call = (execution ?? {}) as { name?: unknown; arguments?: unknown };
 					const name = String(call.name ?? "");
-					const args = (call.args && typeof call.args === "object" ? call.args : {}) as Record<string, unknown>;
+					// Host contract: dsh-tools 0.1.5 exposes `execution.arguments`
+					// (readonly unknown). Reading `args` never reflected the real
+					// payload, so the allowlist/phase/checkpoint gates were broken.
+					// Fall back to `args` only for older/host-compat, never rely on it.
+					const rawArgs = call.arguments ?? (call as { args?: unknown }).args ?? {};
+					const args = (rawArgs && typeof rawArgs === "object" ? rawArgs : {}) as Record<string, unknown>;
 					const cfg = effectiveConfig();
 					const active = readActiveState(cfg.projectRoot);
 
@@ -1725,7 +1746,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				try {
 					const cfg = effectiveConfig();
 					if (!cfg.auditAllTools) return;
-					const execution = (eventArgs[0] ?? {}) as { name?: unknown; args?: unknown };
+					const execution = (eventArgs[0] ?? {}) as { name?: unknown; arguments?: unknown };
 					const result = (eventArgs[1] ?? {}) as { isError?: unknown; error?: unknown };
 					const active = readActiveState(cfg.projectRoot);
 					const failed = Boolean(result.isError) || result.error !== undefined;
@@ -1733,7 +1754,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						cfg.projectRoot,
 						{
 							tool: String(execution.name ?? "unknown"),
-							args: execution.args,
+							// `arguments` is the host contract; `args` is legacy.
+							args: execution.arguments ?? (execution as { args?: unknown }).args,
 							outcome: failed ? "error" : "ok",
 							source: "tool",
 							phase: active.phase ?? undefined,

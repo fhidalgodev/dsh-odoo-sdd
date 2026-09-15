@@ -101,6 +101,9 @@ export class OdooClient {
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify(body),
 				signal: controller.signal,
+				// Never follow redirects, which could re-send an authenticated
+				// JSON-RPC body to an unintended host (307/308 preserve it).
+				redirect: "error",
 			});
 			const text = await response.text();
 			const sanitized = redact(text, this.#credentials);

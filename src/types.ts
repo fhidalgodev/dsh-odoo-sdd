@@ -122,6 +122,10 @@ export interface PluginConfig {
 	auditAllTools?: boolean;
 	/** How many checkpoints to retain. */
 	maxCheckpoints?: number;
+	/** Whether documentation blocks DONE: "required" | "optional" | "off". */
+	documentationPolicy?: "required" | "optional" | "off";
+	/** Documentation language; empty resolves from project files, then English. */
+	documentationLanguage?: string;
 }
 
 export type { ModuleInfo, LogEntry, Phase, KbNode, SddState };

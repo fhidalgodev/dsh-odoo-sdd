@@ -31,3 +31,8 @@
         securityInterviewRequired: true
         auditAllTools: true
         maxCheckpoints: 5
+        # Documentation gate: "required" blocks DONE, "optional" only reports,
+        # "off" skips the gate. Language defaults to English until the project's
+        # own rules file (or an explicit choice) says otherwise.
+        documentationPolicy: 'required'
+        documentationLanguage: ''

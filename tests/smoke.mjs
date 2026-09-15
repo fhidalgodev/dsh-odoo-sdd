@@ -347,9 +347,9 @@ check("odoo_setup registered", setup !== undefined);
 const expectedTools = [
 	"odoo_connect", "odoo_setup", "odoo_module", "odoo_execute", "odoo_validate",
 	"odoo_errors", "odoo_session", "odoo_config", "sdd_phase", "sdd_checkpoint",
-	"odoo_security_scan", "sdd_handoff",
+	"odoo_security_scan", "sdd_handoff", "odoo_docs",
 ];
-check("registers exactly the 12 documented tools", registered.size === expectedTools.length);
+check("registers exactly the 13 documented tools", registered.size === expectedTools.length);
 check(
 	"registered tool names match the documented set",
 	expectedTools.every((n) => registered.has(n)),
@@ -1147,7 +1147,7 @@ let sSec = sdd.loadState(secDir);
 sSec.phase = "ARCHITECTURE";
 const gateR1 = sdd.transition(sSec, "WRITE_CODE", "APPROVED", "try incomplete security");
 check("security gate blocks an empty ## Security", gateR1.ok === false && gateR1.reason.includes("security model is incomplete"));
-writeFileSync(join(secDir, "architecture.md"), "# Architecture\n\n## Models\nx\n\n## Views\ny\n\n## Security\nGroups: base.group_user plus a new group_my_manager. Access via security/ir.model.access.csv with read/create/write/unlink per group. No record rules needed.\n\n## Manifest\nz\n", { mode: 0o600 });
+writeFileSync(join(secDir, "architecture.md"), "# Architecture\n\n## Models\nx\n\n## Views\ny\n\n## Security\nGroups: base.group_user plus a new group_my_manager. Access via security/ir.model.access.csv with read/create/write/unlink per group. No record rules needed.\n\n## Manifest\nz\n\n## Documentation\nLanguage: en. Fragments: DESCRIPTION.md (Reference) and USAGE.md (How-to) only; no extra fragments. index.html: not needed.\n", { mode: 0o600 });
 let sSec2 = sdd.loadState(secDir);
 sSec2.phase = "ARCHITECTURE";
 const gateR2 = sdd.transition(sSec2, "WRITE_CODE", "APPROVED", "complete security");
@@ -1212,6 +1212,121 @@ check("handoff written", hR.ok === true && existsSync(join(projH, "specs", "001-
 const hText = readFileSync(join(projH, "specs", "001-h", "handoff.md"), "utf8");
 check("handoff documents next steps", hText.includes("## Next steps"));
 check("handoff documents configuration", hText.includes("## Configuration in effect"));
+
+// ---- odoo_docs: standalone documentation of an existing module (lote 6) ----
+console.log("== odoo_docs (fragments, Diátaxis, changelog, scaffold) ==");
+{
+	const docsMod = await import(new URL("docs-scan.js", libDir).href);
+	const convMod = await import(new URL("project-conventions.js", libDir).href);
+
+	// A module with no documentation at all, documented WITHOUT any spec/phase.
+	const projDoc = join(dir, "projDocs");
+	const modDir = join(projDoc, "my_module");
+	mkdirSync(join(modDir, "models"), { recursive: true });
+	writeFileSync(join(modDir, "__manifest__.py"), "{'name':'my_module','version':'19.0.1.0.0','depends':['base']}", { mode: 0o600 });
+	writeFileSync(join(modDir, "models", "m.py"), "from odoo import models\nclass A(models.Model):\n    _name = 'x.doc'\n", { mode: 0o600 });
+	plugin.apply(fakeCtx, { projectRoot: projDoc });
+	const docs = registered.get("odoo_docs");
+	check("odoo_docs is registered", docs !== undefined);
+
+	// STANDALONE: no sdd_phase, no checkpoint, no instance involved.
+	let dr = await docs.execute({ operation: "check", module_dir: modDir });
+	check("check runs standalone (no spec/phase needed)", dr.ok === false && Array.isArray(dr.findings));
+	check("missing mandatory fragments are ERRORs", dr.findings.some((f) => f.rule === "docs-fragment-missing" && f.severity === "ERROR" && f.file === "readme/DESCRIPTION.md"));
+	check("missing index.html is a WARN", dr.findings.some((f) => f.rule === "docs-index-missing" && f.severity === "WARN"));
+	check("a new model without a Mermaid ERD is flagged", dr.findings.some((f) => f.rule === "docs-erd-missing"));
+
+	// Changelog: mandatory for a bug fix, not for the initial release.
+	let bugScan = docsMod.scanDocs(modDir, { mode: "bug" });
+	let createScan = docsMod.scanDocs(modDir, { mode: "create" });
+	check("changelog is REQUIRED for a bug fix", bugScan.changelogRequired === true && bugScan.findings.some((f) => f.rule === "docs-changelog-missing" && f.severity === "ERROR"));
+	check("changelog is not demanded for a brand-new module", createScan.findings.every((f) => f.rule !== "docs-changelog-missing"));
+	// An already-released module demands one even in create mode.
+	writeFileSync(join(modDir, "__manifest__.py"), "{'name':'my_module','version':'19.0.1.2.0','depends':['base'],'summary':'x'}", { mode: 0o600 });
+	const released = docsMod.scanDocs(modDir, { mode: "create" });
+	check("an already-released module requires a changelog entry", released.findings.some((f) => f.rule === "docs-changelog-missing" && f.severity === "ERROR"));
+
+	// Version scheme.
+	writeFileSync(join(modDir, "__manifest__.py"), "{'name':'my_module','version':'1.0','depends':['base']}", { mode: 0o600 });
+	check("a non-5-component version is an ERROR", docsMod.scanDocs(modDir).findings.some((f) => f.rule === "docs-version-scheme" && f.severity === "ERROR"));
+	writeFileSync(join(modDir, "__manifest__.py"), "{'name':'my_module','version':'19.0.1.0.0','depends':['base'],'summary':'My module'}", { mode: 0o600 });
+
+	// Language: English by default, project file wins, explicit parameter wins.
+	check("language defaults to English", convMod.resolveDocsLanguage({}).language === "en");
+	writeFileSync(join(projDoc, "AGENTS.md"), "# Reglas\n\n## Documentación del Módulo\n\nLos archivos README.rst e index.html deben redactarse en ESPAÑOL.\n", { mode: 0o600 });
+	const fromProject = convMod.resolveDocsLanguage({ projectRoot: projDoc });
+	check("a project rules file overrides the default", fromProject.language === "es" && fromProject.source === "project-file");
+	check("an explicit parameter overrides the project file", convMod.resolveDocsLanguage({ projectRoot: projDoc, explicit: "pt" }).language === "pt");
+	// A line about CODE language must not be mistaken for a docs language.
+	writeFileSync(join(projDoc, "AGENTS.md"), "# Reglas\n\nEl código debe estar en INGLÉS.\n", { mode: 0o600 });
+	check("a code-language line is not read as the docs language", convMod.resolveDocsLanguage({ projectRoot: projDoc }).language === "en");
+
+	// plan maps the fragments to Diátaxis.
+	dr = await docs.execute({ operation: "plan", module_dir: modDir });
+	check("plan reports the Diátaxis mapping", /Diátaxis|Reference|How-to/.test(dr.detail));
+	check("plan states what the plugin cannot run", /gen-odoo-readme/.test(dr.detail));
+
+	// scaffold creates the skeletons, create-only and flagged as unfinished.
+	dr = await docs.execute({ operation: "scaffold", module_dir: modDir });
+	check("scaffold creates the readme fragments", dr.artifacts.includes("readme/DESCRIPTION.md") && existsSync(join(modDir, "readme", "DESCRIPTION.md")));
+	check("scaffold creates the index.html skeleton", existsSync(join(modDir, "static", "description", "index.html")));
+	check("scaffold marks the fragments as unfinished", dr.findings.some((f) => f.rule === "docs-fragment-scaffolded"));
+	check("scaffolded fragments are reported, not approved", /NEEDS_CONTENT|SCAFFOLD/.test(dr.summary) || dr.findings.some((f) => f.rule === "docs-fragment-scaffolded"));
+	const before = readFileSync(join(modDir, "readme", "DESCRIPTION.md"), "utf8");
+	writeFileSync(join(modDir, "readme", "DESCRIPTION.md"), before.replace("# DESCRIPTION", "# DESCRIPTION\n\nX\n").replace(/<!-- odoo-sdd:scaffold[^>]*-->/, ""), { mode: 0o600 });
+	dr = await docs.execute({ operation: "scaffold", module_dir: modDir });
+	const after = readFileSync(join(modDir, "readme", "DESCRIPTION.md"), "utf8");
+	check("scaffold NEVER overwrites existing content", after.includes("X"));
+
+	// report: needs a spec to persist, and refuses a hollow doc set.
+	dr = await docs.execute({ operation: "report", module_dir: modDir, mode: "bug" });
+	check("report without spec_id does not write", dr.artifacts.includes("docs-report.md") === false && /NOT written/.test(dr.detail));
+	await registered.get("sdd_phase").execute({ operation: "init", spec_id: "010-docs" });
+	dr = await docs.execute({ operation: "report", module_dir: modDir, spec_id: "010-docs", mode: "bug" });
+	const repFile = join(projDoc, "specs", "010-docs", "docs-report.md");
+	check("report persists into the spec", existsSync(repFile));
+	const repText = readFileSync(repFile, "utf8");
+	check("report carries a machine-readable verdict", /Verdict:\s*(APPROVED|NEEDS_CONTENT)/.test(repText));
+	check("a module missing its changelog is NOT approved", /Verdict:\s*NEEDS_CONTENT/.test(repText));
+
+	// DONE gate honours the policy.
+	const gateDir = join(dir, "specs", "011-docgate");
+	sdd.initSpecDir(gateDir);
+	writeFileSync(
+		join(gateDir, "test-plan.md"),
+		"# Test Plan\n\n| AC | Scenario | Layer (static/server/rpc/ui/manual) | Status |\n|---|---|---|---|\n| AC1 | x | rpc | passed |\n",
+	);
+	const gSt = sdd.loadState(gateDir);
+	gSt.phase = "FIX_LOOP";
+	sdd.recordSuccess(gSt, "AC1 ok");
+	let gR = sdd.transition(gSt, "DONE", null, "done", "human", "supervised", { documentationPolicy: "required" });
+	check("required policy blocks DONE without a docs report", gR.ok === false && /documentation/i.test(gR.reason));
+	gR = sdd.transition(gSt, "DONE", null, "done", "human", "supervised", { documentationPolicy: "optional" });
+	check("optional policy does not block DONE", gR.ok === true);
+	writeFileSync(join(gateDir, "docs-report.md"), "# Documentation report\n\nVerdict: APPROVED\n\n## Findings\n- (none)\n", { mode: 0o600 });
+	const gSt2 = sdd.loadState(gateDir);
+	gSt2.phase = "FIX_LOOP";
+	check("a NEEDS_CONTENT verdict is refused", (() => {
+		writeFileSync(join(gateDir, "docs-report.md"), "# R\n\nVerdict: NEEDS_CONTENT\n", { mode: 0o600 });
+		const g3 = sdd.loadState(gateDir);
+		g3.phase = "FIX_LOOP";
+		return sdd.transition(g3, "DONE", null, "d", "human", "supervised", { documentationPolicy: "required" }).ok === false;
+	})());
+	writeFileSync(join(gateDir, "docs-report.md"), "# Documentation report\n\nVerdict: APPROVED\n\n## Findings\n- (none)\n", { mode: 0o600 });
+	gR = sdd.transition(gSt2, "DONE", null, "done", "human", "supervised", { documentationPolicy: "required" });
+	check("an APPROVED report lets DONE through", gR.ok === true);
+
+	// The ARCHITECTURE content gate ignores template comments.
+	const archDir = join(dir, "specs", "012-archdocs");
+	sdd.initSpecDir(archDir);
+	check("an untouched skeleton does NOT satisfy the documentation gate", sdd.documentationGaps(archDir).length > 0);
+	writeFileSync(
+		join(archDir, "architecture.md"),
+		"# Architecture\n\n## Models\nx\n\n## Views\ny\n\n## Security\ngroups base.group_user; ir.model.access.csv read/write/create/unlink; no record rules needed.\n\n## Manifest\nz\n\n## Documentation\nLanguage: en. Fragments: DESCRIPTION.md (Reference), USAGE.md (How-to); no extra fragments.\n",
+		{ mode: 0o600 },
+	);
+	check("a real decision satisfies the documentation gate", sdd.documentationGaps(archDir).length === 0);
+}
 
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

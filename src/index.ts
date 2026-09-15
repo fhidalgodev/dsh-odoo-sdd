@@ -51,6 +51,7 @@ import { writeFileAtomic } from "./atomic.js";
 import { purgeOwnedState, purgePlan, PRESERVED } from "./lifecycle.js";
 import { withAudit } from "./audit.js";
 import { registerRuntimeTools } from "./tools-runtime.js";
+import { registerDocsTool } from "./docs-tool.js";
 import { appendAuditLine, recordAudit } from "./audit.js";
 import {
 	readActiveState,
@@ -117,6 +118,8 @@ export const Config = z.object({
 	securityInterviewRequired: z.boolean(),
 	auditAllTools: z.boolean(),
 	maxCheckpoints: z.number(),
+	documentationPolicy: z.string(),
+	documentationLanguage: z.string(),
 });
 
 /** Effective deployment configuration after validation. */
@@ -145,6 +148,10 @@ interface OdooSddConfig {
 	auditAllTools?: boolean;
 	/** How many checkpoints to retain. */
 	maxCheckpoints?: number;
+	/** Whether documentation blocks DONE: "required" | "optional" | "off". */
+	documentationPolicy?: string;
+	/** Documentation language; empty means resolve from project files, then "en". */
+	documentationLanguage?: string;
 }
 
 /** Minimal structural view of the host tool registry. */
@@ -470,6 +477,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		securityInterviewRequired: config.securityInterviewRequired ?? true,
 		auditAllTools: config.auditAllTools ?? true,
 		maxCheckpoints: config.maxCheckpoints ?? 5,
+		documentationPolicy: config.documentationPolicy ?? "required",
+		documentationLanguage: config.documentationLanguage ?? "",
 	};
 	// Live source of the Settings section. The host hands us a THUNK returning
 	// the currently authoritative value (the resolved user scope while attached,
@@ -1273,7 +1282,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					note,
 					args.approval_source ?? "human",
 					readAutonomy(root(config)),
-					{ securityReviewRequired: effectiveConfig().securityReviewRequired },
+					{
+						securityReviewRequired: effectiveConfig().securityReviewRequired,
+						documentationPolicy: effectiveConfig().documentationPolicy ?? "required",
+					},
 				);
 				if (result.ok) {
 					writeActiveState(root(config), { specId: args.spec_id, phase: result.state.phase });
@@ -1382,6 +1394,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			securityReviewRequired: { type: "boolean", description: "Require a clean security review before DONE." },
 			securityInterviewRequired: { type: "boolean", description: "Require the security interview (groups/ACL/rules) before ARCHITECTURE." },
 			auditAllTools: { type: "boolean", description: "Record every tool call of the run in .sdd/audit.jsonl." },
+			documentationPolicy: { type: "string", enum: ["required", "optional", "off"], description: "Whether documentation blocks DONE." },
+			documentationLanguage: { type: "string", description: "Documentation language; empty resolves from the project's own rules, then English." },
 			maxCheckpoints: { type: "number", description: "How many checkpoints to retain." },
 		},
 		output: {
@@ -1409,6 +1423,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							securityReviewRequired: { type: "boolean", required: true },
 							securityInterviewRequired: { type: "boolean", required: true },
 							auditAllTools: { type: "boolean", required: true },
+					documentationPolicy: { type: "string", required: true },
+					documentationLanguage: { type: "string", required: true },
 							maxCheckpoints: { type: "number", required: true },
 						},
 					},
@@ -1436,6 +1452,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			securityInterviewRequired?: boolean;
 			auditAllTools?: boolean;
 			maxCheckpoints?: number;
+			documentationPolicy?: string;
+			documentationLanguage?: string;
 		}, exec?: unknown) {
 			/** Project the stored JSON onto the known, typed configuration shape. */
 			const normalize = (data: Record<string, unknown>) => {
@@ -1457,6 +1475,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					securityReviewRequired: typeof data["securityReviewRequired"] === "boolean" ? data["securityReviewRequired"] : true,
 					securityInterviewRequired: typeof data["securityInterviewRequired"] === "boolean" ? data["securityInterviewRequired"] : true,
 					auditAllTools: typeof data["auditAllTools"] === "boolean" ? data["auditAllTools"] : true,
+					documentationPolicy: (() => {
+						const v = asString(data["documentationPolicy"], "required");
+						return v === "optional" || v === "off" ? v : "required";
+					})(),
+					documentationLanguage: asString(data["documentationLanguage"], ""),
 					maxCheckpoints: typeof data["maxCheckpoints"] === "number" ? data["maxCheckpoints"] : 5,
 				};
 			};
@@ -1505,6 +1528,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.securityReviewRequired !== undefined) updates["securityReviewRequired"] = args.securityReviewRequired;
 			if (args.securityInterviewRequired !== undefined) updates["securityInterviewRequired"] = args.securityInterviewRequired;
 			if (args.auditAllTools !== undefined) updates["auditAllTools"] = args.auditAllTools;
+			if (args.documentationPolicy !== undefined) updates["documentationPolicy"] = args.documentationPolicy;
+			if (args.documentationLanguage !== undefined) updates["documentationLanguage"] = args.documentationLanguage;
 			if (args.maxCheckpoints !== undefined) updates["maxCheckpoints"] = args.maxCheckpoints;
 			if (Object.keys(updates).length === 0) {
 				return {
@@ -1571,6 +1596,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			securityInterviewRequired: asBool(merged["securityInterviewRequired"], config.securityInterviewRequired ?? true),
 			auditAllTools: asBool(merged["auditAllTools"], config.auditAllTools ?? true),
 			maxCheckpoints: asNum(merged["maxCheckpoints"], config.maxCheckpoints ?? 5),
+			documentationPolicy: asString(merged["documentationPolicy"], config.documentationPolicy ?? "required"),
+			documentationLanguage: asString(merged["documentationLanguage"], config.documentationLanguage ?? ""),
 		};
 	};
 
@@ -2111,6 +2138,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	} catch {
 		// Hosts without guard/events keep working; the policy is simply inactive.
 	}
+
+	registerDocsTool(ctx, {
+		projectRoot: () => effectiveConfig().projectRoot,
+		configuredLanguage: () => effectiveConfig().documentationLanguage,
+		display: (v) => displayPath(v),
+	});
 
 	registerRuntimeTools(ctx, {
 		client: () => clientFor(effectiveConfig().projectRoot),

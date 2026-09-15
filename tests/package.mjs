@@ -88,6 +88,7 @@ for (const agent of [
 	"consultant",
 	"human-proxy",
 	"security-reviewer",
+	"documentation",
 ]) {
 	required.push(`agents/${agent}.md`);
 }

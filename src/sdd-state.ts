@@ -249,7 +249,7 @@ export function transition(
 	note: string,
 	approvalSource?: "human" | "human-proxy",
 	mode?: "supervised" | "autonomous",
-	policy?: { securityReviewRequired?: boolean },
+	policy?: { securityReviewRequired?: boolean; documentationPolicy?: string },
 ): TransitionResult {
 	const stop = stopRequested(state.specDir);
 	if (stop !== null) {
@@ -321,6 +321,19 @@ export function transition(
 					state,
 				};
 			}
+			// Documentation is the other decision ARCHITECTURE must record.
+			const docGaps = documentationGaps(state.specDir);
+			if (docGaps.length > 0) {
+				return {
+					ok: false,
+					reason:
+						"ARCHITECTURE cannot advance: the documentation decisions are incomplete. Missing: " +
+						docGaps.join("; ") +
+						". State the documentation language, the OCA fragments that apply (with their audience) " +
+						"and whether index.html, Web Tours and migrations apply — or record an explicit decision.",
+					state,
+				};
+			}
 		}
 		if ((approvalMarker ?? "").trim() !== "APPROVED") {
 			return {
@@ -379,6 +392,18 @@ export function transition(
 					"A failed or absent verification can never be reported as success.",
 				state,
 			};
+		}
+		// Documentation is a declared policy too (required by default).
+		if (policy?.documentationPolicy === "required") {
+			const docsGaps = documentationReviewGaps(state.specDir);
+			if (docsGaps.length > 0) {
+				return {
+					ok: false,
+					reason:
+						"Cannot reach DONE: documentation is required but incomplete. " + docsGaps.join(" "),
+					state,
+				};
+			}
 		}
 		// Security review is a declared policy, so it must be a real gate: with
 		// `securityReviewRequired` armed a PASSED verdict alone is not enough.
@@ -541,7 +566,7 @@ const HEADING_REQUIREMENTS: Array<{
 	{
 		phase: "ARCHITECTURE",
 		file: "architecture.md",
-		required: ["## Models", "## Views", "## Security", "## Manifest"],
+		required: ["## Models", "## Views", "## Security", "## Manifest", "## Documentation"],
 	},
 	{
 		phase: "ARCHITECTURE",
@@ -621,6 +646,73 @@ export function evidenceGaps(specDir: string): string[] {
 		gaps.push("test-plan.md has no AC rows: a PASSED verdict needs per-AC evidence.");
 	}
 	return gaps;
+}
+
+/**
+ * Content gate for the `## Documentation` section of `architecture.md`.
+ *
+ * A heading alone is not a decision: the section must state the language, the
+ * OCA fragments that apply (with their Diátaxis audience) and whether
+ * `index.html`, Web Tours and migrations apply. An explicit "no extra
+ * fragments" is a valid answer — silence is not.
+ * @param specDir - spec directory holding architecture.md.
+ * @returns the list of missing decisions (empty when complete).
+ */
+export function documentationGaps(specDir: string): string[] {
+	const path = join(specDir, "architecture.md");
+	if (!existsSync(path)) return ["architecture.md is missing"];
+	const text = readFileSync(path, "utf8");
+	const idx = text.indexOf("## Documentation");
+	if (idx < 0) return ["`## Documentation` is missing"];
+	const rest = text.slice(idx + "## Documentation".length);
+	const next = rest.indexOf("\n## ");
+	// Strip HTML comments: the template's own guidance is not a decision, so an
+	// untouched skeleton must NOT satisfy the gate.
+	const section = (next < 0 ? rest : rest.slice(0, next)).replace(/<!--[\s\S]*?-->/g, "").trim();
+	if (section === "") return ["`## Documentation` is empty (template comments do not count as a decision)"];
+	const gaps: string[] = [];
+	// Language must be decided (a code such as en/es, or an explicit statement).
+	if (!/\b(en|es|pt|fr|de|it)\b|english|espa[ñn]ol|spanish|language|idioma/i.test(section)) {
+		gaps.push("state the documentation language (default English unless the project says otherwise)");
+	}
+	// The fragment decision must be explicit, in either direction.
+	const namesFragments = /description\.md|usage\.md|context\.md|configure\.md|install\.md|roadmap\.md|contributors\.md/i.test(section);
+	const statesNone = /(no (extra )?(fragments?|readme)|sin fragmentos|not applicable)/i.test(section);
+	if (!namesFragments && !statesNone) {
+		gaps.push("list the OCA fragments that apply (DESCRIPTION/USAGE/CONTEXT/…) or state \"no extra fragments\"");
+	}
+	// Audience mapping is what makes the section a Diátaxis decision.
+	if (!/di[aá]taxis|tutorial|how-?to|reference|explanation|audiencia|audience/i.test(section)) {
+		gaps.push("map each fragment to its audience (Diátaxis: Tutorial/How-to/Reference/Explanation)");
+	}
+	return gaps;
+}
+
+/**
+ * Documentation gate for DONE when the policy is `required`: the review record
+ * must exist with an APPROVED verdict and no ERROR findings.
+ * @param specDir - spec directory holding docs-report.md.
+ * @returns the list of unmet requirements (empty when clean).
+ */
+export function documentationReviewGaps(specDir: string): string[] {
+	const path = join(specDir, "docs-report.md");
+	if (!existsSync(path)) {
+		return [
+			"Run `odoo_docs operation=report spec_id=<id>` to record the documentation outcome " +
+				"(fragments, changelog, findings) in specs/<id>/docs-report.md.",
+		];
+	}
+	const text = readFileSync(path, "utf8");
+	if (/\bREJECTED\b|\bFAILED\b/i.test(text)) {
+		return ["docs-report.md records a REJECTED/FAILED verdict; fix the findings and re-run."];
+	}
+	if (/Verdict:\s*NEEDS_CONTENT/i.test(text)) {
+		return ["docs-report.md verdict is NEEDS_CONTENT (a fragment is still a scaffold or an ERROR remains)."];
+	}
+	if (!/Verdict:\s*APPROVED/i.test(text)) {
+		return ["docs-report.md carries no machine-readable `Verdict: APPROVED` line."];
+	}
+	return [];
 }
 
 /**
@@ -771,7 +863,11 @@ export function initSpecDir(specDir: string): void {
 			"# Architecture\n\n## Models\n\n<!-- New/inherited models, fields, relations, constraints. -->\n\n" +
 				"## Views\n\n<!-- XML IDs to inherit, form/tree changes, menus, actions. -->\n\n" +
 				"## Security\n\n<!-- Groups, ir.model.access.csv, record rules. -->\n\n" +
-				"## Manifest\n\n<!-- Directory layout and exact depends + data. -->\n",
+				"## Manifest\n\n<!-- Directory layout and exact depends + data. -->\n\n" +
+				"## Documentation\n\n<!-- Language (default English unless the project says otherwise), the OCA\n" +
+				"     readme fragments that apply mapped to their Diátaxis audience (Tutorial/How-to/\n" +
+				"     Reference/Explanation), and whether index.html, Web Tours and migrations apply.\n" +
+				"     Write \"no extra fragments\" explicitly when none are needed. -->\n",
 		],
 		[
 			"test-plan.md",

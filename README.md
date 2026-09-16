@@ -4,9 +4,8 @@
 
 <h3>Turn DeepSeek Harness into a closed-loop Odoo workshop:<br/>spec → architecture → code → verify, against a real instance</h3>
 
-<!-- Badges resolve once the package is published to npm and the repository is
-     public on GitHub under fhidalgodev/dsh-odoo-sdd. Update the links if you
-     publish under a different owner. -->
+<!-- The npm badges resolve against the published package (dsh-odoo-sdd@0.1.0).
+     Update the owner/repo in the GitHub badges if this is forked elsewhere. -->
 <p align="center">
   <a href="https://www.npmjs.com/package/dsh-odoo-sdd"><img src="https://img.shields.io/npm/v/dsh-odoo-sdd.svg?style=for-the-badge&color=cb3837&labelColor=161b22&logo=npm&logoColor=white" alt="npm version"/></a>
   <a href="https://github.com/fhidalgodev/dsh-odoo-sdd/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/fhidalgodev/dsh-odoo-sdd/ci.yml?style=for-the-badge&label=ci&labelColor=161b22&logo=githubactions&logoColor=white" alt="CI"/></a>
@@ -707,15 +706,38 @@ version from being installable-but-unloadable.
 
 ### Publishing (maintainers)
 
-`lib/` is build output and is gitignored, so the tarball is built by the
-`prepack` hook — never by hand, never from a stale tree:
+**npm does not follow GitHub.** They are two independent registries: a push, a tag
+or a GitHub Release updates GitHub and nothing else, and `npm publish` updates npm
+and nothing else. A published version is **immutable** — it cannot be overwritten,
+only superseded — so `package.json` is bumped for every release.
+
+`lib/` is build output and is gitignored, so the tarball is built by the `prepack`
+hook — never by hand, never from a stale tree. The **first** publication is manual
+(npm only lets you register a trusted publisher for a package that already
+exists):
 
 ```bash
 npm login                 # once; then `npm whoami` should answer
 npm publish               # prepack runs `tsc` and packs the result
-npm version patch         # for the NEXT release, not the first one
 npm view dsh-odoo-sdd version   # verify what the registry actually has
 ```
+
+After that, [`.github/workflows/publish.yml`](.github/workflows/publish.yml) does
+it: **publishing a GitHub Release** (or a manual *workflow_dispatch*) runs the
+same gates as CI — typecheck, build, tests, the publish simulation — checks that
+the release tag matches `package.json`, refuses a version that is already on the
+registry, and publishes with **provenance** through npm's OIDC **trusted
+publishing**, so no `NPM_TOKEN` lives in this repository.
+
+One-time setup for that automation: on npmjs.com → the package → *Settings* →
+*Trusted publishers* → *Add* → provider **GitHub Actions**, owner `fhidalgodev`,
+repository `dsh-odoo-sdd`, workflow filename `publish.yml`, environment **blank**
+(a mismatch is a `403 npm-trusted-publisher-not-configured`). Prefer a token?
+Create a granular access token with *bypass 2FA* and store it as the `NPM_TOKEN`
+secret — the workflow says where.
+
+So a release is: bump the version → merge → publish the Release, and the tag, the
+Release and the npm version end up agreeing.
 
 The same hooks make a repository install work: `prepare` compiles the sources
 when TypeScript is present (`npm i github:fhidalgodev/dsh-odoo-sdd`), and skips

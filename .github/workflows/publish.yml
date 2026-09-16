@@ -1,0 +1,107 @@
+# Publishing to npm is a SEPARATE act from pushing to GitHub.
+#
+# The two registries know nothing about each other: a push (or a tag, or a
+# GitHub Release) updates GitHub and NOT npm, and `npm publish` updates npm and
+# not GitHub. This workflow is the bridge, and it is deliberately explicit
+# about when it crosses: a published GitHub Release (or a manual run), never a
+# push to main.
+#
+# AUTHENTICATION: npm Trusted Publishing (OIDC), so there is NO long-lived
+# token in this repository — `id-token: write` is the whole credential. It
+# requires a one-time setup, in this order:
+#   1. publish the package ONCE by hand (`npm login && npm publish`): npm only
+#      lets you register a trusted publisher for a package that exists;
+#   2. on npmjs.com → the package → Settings → Trusted publishers → Add:
+#      provider "GitHub Actions", owner `fhidalgodev`, repository
+#      `dsh-odoo-sdd`, workflow filename `publish.yml`, environment BLANK
+#      (this workflow declares none; a mismatch is a 403).
+# If you would rather use a token: create a granular access token with
+# "bypass 2FA", store it as the NPM_TOKEN secret and add
+# `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}` to the publish step's env.
+name: Publish to npm
+
+on:
+  # The trigger is a RELEASE, not a push: a version published to npm can never
+  # be unpublished-and-replaced the way a branch can be rewritten.
+  release:
+    types: [published]
+  # Manual escape hatch: it runs the same gates and publishes the version in
+  # package.json as it stands on the selected ref.
+  workflow_dispatch:
+
+# Least privilege, plus exactly what OIDC needs.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 24 on purpose: npm's OIDC trusted publishing needs npm >= 11.5.1,
+      # which ships with the Node 24 line. The test matrix still covers 20/22.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: ''
+
+      - name: Install dev dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Install host packages (the optional peers, needed to compile)
+        run: npm install --no-save --no-audit --no-fund @deepseek-ai/dsh@^0.1.2-rc.1
+
+      # The same gates as CI. A publish that skips them would be a release
+      # nobody tested, and npm versions are immutable.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Tests
+        run: npm test
+
+      # This is the step that would have caught a tarball shipping without its
+      # compiled entry point; it runs the publish simulation.
+      - name: Packaging contract (tarball contents)
+        run: npm run test:package
+
+      # A tag says v0.2.0 while package.json says 0.1.0 more often than anyone
+      # expects. Publishing the wrong version is not undoable, so refuse.
+      - name: Check the release tag matches package.json
+        if: github.event_name == 'release'
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="${{ github.event.release.tag_name }}"
+          echo "tag=$TAG version=$VERSION"
+          if [ "v$VERSION" != "$TAG" ] && [ "$VERSION" != "$TAG" ]; then
+            echo "::error::the release tag ($TAG) does not match package.json ($VERSION)"
+            exit 1
+          fi
+
+      # npm rejects a version that already exists, but failing here says WHY
+      # instead of leaving a red X on an opaque 403.
+      - name: Check the version is not published yet
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "::error::$NAME@$VERSION is already on the registry; bump the version"
+            exit 1
+          fi
+          echo "$NAME@$VERSION is free to publish."
+
+      # `prepack` rebuilds lib/ here, so the tarball cannot be built from a
+      # stale tree even if the steps above changed something.
+      - name: Publish (OIDC trusted publishing, with provenance)
+        run: npm publish --provenance --access public
+
+      - name: Show what the registry actually has
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          npm view "$NAME" version dist-tags --json

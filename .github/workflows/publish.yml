@@ -107,10 +107,55 @@ jobs:
           fi
           echo "$NAME@$VERSION is free to publish."
 
+      # Preflight: the two silent killers of OIDC publishing, checked out loud
+      # BEFORE anything is attempted. npm's own failure for both is a 404 that
+      # points at nothing, so the log has to carry the answer instead.
+      - name: Preflight the OIDC prerequisites
+        run: |
+          echo "node: $(node -v)"
+          echo "npm:  $(npm -v)"
+          NPM_MAJOR=$(npm -v | cut -d. -f1)
+          NPM_MINOR=$(npm -v | cut -d. -f2)
+          if [ "$NPM_MAJOR" -lt 11 ] || { [ "$NPM_MAJOR" -eq 11 ] && [ "$NPM_MINOR" -lt 5 ]; }; then
+            echo "::error::trusted publishing needs npm >= 11.5.1 (have $(npm -v)); use node-version 24.x or upgrade npm"
+            exit 1
+          fi
+          # The OIDC request URL only exists when `id-token: write` reached the
+          # job; without it npm has nothing to authenticate with.
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::no OIDC token endpoint: the job is missing 'permissions: id-token: write'"
+            exit 1
+          fi
+          echo "OIDC token endpoint: present"
+          echo "workflow identity npm will verify: ${{ github.workflow_ref }}"
+          echo "job environment: NONE declared by this job, so the 'Environment name'"
+          echo "                 field on npmjs.com must be empty as well."
+
       # `prepack` rebuilds lib/ here, so the tarball cannot be built from a
       # stale tree even if the steps above changed something.
       - name: Publish (OIDC trusted publishing, with provenance)
+        id: publish
         run: npm publish --provenance --access public
+
+      # npm reports BOTH of the misconfigurations below as the same misleading
+      # 404 on the PUT, so say what to check while the failure is still fresh.
+      - name: Diagnose a failed publish
+        if: failure() && steps.publish.outcome == 'failure'
+        run: |
+          cat <<'CHECKLIST'
+          ::error::The publish was rejected. Two misconfigurations produce this same 404:
+            1. Environment mismatch. This job declares NO environment, so the
+               "Environment name" field on npmjs.com (package → Settings → Trusted
+               publishers) must be EMPTY. If it has a value, either clear it or
+               declare `environment: <name>` on this job so both agree.
+            2. Trusted publisher identity. On npmjs.com it must read exactly:
+               provider GitHub Actions · owner fhidalgodev · repository dsh-odoo-sdd
+               · workflow filename publish.yml · environment (blank).
+               A path instead of a filename (`.github/workflows/publish.yml`) does
+               not match.
+            If both look right, compare `npm -v` above: npm older than 11.5.1
+            cannot do the OIDC exchange at all.
+          CHECKLIST
 
       - name: Show what the registry actually has
         run: |

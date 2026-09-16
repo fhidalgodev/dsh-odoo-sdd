@@ -145,6 +145,7 @@ const required = [
 	"LICENSE",
 	"README.md",
 	"README.es.md",
+	"README.zh-CN.md",
 	".env.example",
 	"cordis.patch.yml",
 	"client/client.js",
@@ -198,7 +199,10 @@ for (const file of srcModules) {
 // being listed here by hand, so the check cannot drift from the documents.
 // ---------------------------------------------------------------------------
 const localImages = new Set();
-for (const doc of ["README.md", "README.es.md"]) {
+for (const doc of ["README.md", "README.es.md", "README.zh-CN.md"]) {
+	// A missing translation is already reported by the required-file checks
+	// above; reading it here must not turn that into an ENOENT stack trace.
+	if (!existsSync(join(root, doc))) continue;
 	const text = readFileSync(join(root, doc), "utf8");
 	for (const match of text.matchAll(/<img[^>]+src="(?!https?:)([^"]+)"/g)) localImages.add(match[1]);
 	for (const match of text.matchAll(/!\[[^\]]*\]\((?!https?:)([^)]+)\)/g)) localImages.add(match[1]);

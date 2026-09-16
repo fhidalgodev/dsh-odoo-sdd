@@ -50,6 +50,7 @@
     ".env.example",
     "README.md",
     "README.es.md",
+    "README.zh-CN.md",
     "LICENSE"
   ],
   "scripts": {

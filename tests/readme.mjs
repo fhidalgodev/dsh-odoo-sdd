@@ -43,11 +43,19 @@ function check(name, ok, detail) {
 
 console.log("== README contract (structure + tool coverage) ==");
 
-const FILES = [
-	{ file: "README.md", h1: "# Spec-Driven Development for Odoo", lang: "en" },
-	{ file: "README.es.md", h1: "# Spec-Driven Development para Odoo", lang: "es" },
-];
+/** The closing sections, under any of the names the READMEs use for them. */
+const TAIL = {
+	thanks: /^## .*(Acknowledgments|Agradecimientos|致谢)/,
+	license: /^## .*(License|Licencia|许可证)/,
+};
+/** The author line, under any of those languages. `[:：]` covers both colons. */
+const AUTHOR = /<b>(Author|Autor|作者)[:：]<\/b>/;
 
+const FILES = [
+	{ file: "README.md", h1: "# Spec-Driven Development for Odoo", lang: "en", toolsHeading: (h) => /tools/i.test(h), toolCount: /\b(\d+)\s+tools\b/i },
+	{ file: "README.es.md", h1: "# Spec-Driven Development para Odoo", lang: "es", toolsHeading: (h) => /tools/i.test(h), toolCount: /\b(\d+)\s+tools\b/i },
+	{ file: "README.zh-CN.md", h1: "# 面向 Odoo 的规范驱动开发", lang: "zh", toolsHeading: (h) => /工具/.test(h), toolCount: /(\d+)\s*个工具/ },
+];
 // ---- the REAL registered tool names, straight from the compiled plugin.
 if (!existsSync(join(root, "lib", "index.js"))) {
 	console.error("lib/ is missing: run `npm run build` before this test.");
@@ -140,21 +148,34 @@ function headingLevels(rawText) {
 }
 
 const docs = FILES.map((entry) => {
-	const raw = readFileSync(join(root, entry.file), "utf8");
+	// A missing translation is a contract failure, not a crash: the readers below
+	// used to throw ENOENT before a single check could report which file is gone.
+	let raw = "";
+	let missing = false;
+	try {
+		raw = readFileSync(join(root, entry.file), "utf8");
+	} catch {
+		missing = true;
+	}
 	const text = normalize(raw);
 	const lines = text.split("\n");
 	const visible = visibleLines(lines);
 	return {
 		...entry,
+		missing,
 		raw,
 		text,
 		lines,
-		tools: tableAfter(raw, (h) => /tools/i.test(h)),
+		tools: tableAfter(raw, entry.toolsHeading),
 		headings: headingLevels(raw),
 	};
 });
 
 for (const doc of docs) {
+	if (doc.missing) {
+		check(`${doc.file}: the translation exists`, false, "file not found");
+		continue;
+	}
 	check(`${doc.file}: exists and is not empty`, doc.text.length > 2000, `${doc.text.length} bytes`);
 	// The house header is: the banner, then the exact H1. Both halves are pinned,
 	// so a later edit can neither drop the banner nor push the title under it —
@@ -177,23 +198,30 @@ for (const doc of docs) {
 			if (firstLine(crlf) !== doc.lines[0]) return false;
 			const crlfLines = normalize(crlf).split("\n");
 			if (crlfLines[imgLine] !== doc.lines[imgLine] || crlfLines[headingLine] !== doc.h1) return false;
-			const crlfTools = [...tableAfter(crlf, (h) => /tools/i.test(h))].sort();
+			const crlfTools = [...tableAfter(crlf, doc.toolsHeading)].sort();
 			if (crlfTools.length !== doc.tools.length || !crlfTools.every((n, i) => n === [...doc.tools].sort()[i])) return false;
 			if (headingLevels(crlf).length !== doc.headings.length) return false;
-			const langIdx = crlfLines.findIndex((l) => /href="README\.(md|es\.md)"/.test(l));
-			const authorIdx = crlfLines.findIndex((l) => /<b>(Author|Autor):<\/b>/.test(l));
+			const langIdx = crlfLines.findIndex((l) => /href="README\.(md|es\.md|zh-CN\.md)"/.test(l));
+			const authorIdx = crlfLines.findIndex((l) => AUTHOR.test(l));
 			return langIdx !== -1 && authorIdx !== -1 && langIdx < authorIdx;
 		})(),
 	);
 	check(`${doc.file}: badges use the for-the-badge style`, doc.text.includes("style=for-the-badge"));
 	check(`${doc.file}: license badge points at the repo license`, doc.text.includes("img.shields.io/github/license/fhidalgodev/dsh-odoo-sdd"));
 	check(`${doc.file}: contributors image is 480 wide`, doc.text.includes('width="480"'));
+	// The two house assets, as RELATIVE paths in every language. An absolute
+	// raw.githubusercontent URL would render today and rot quietly later (the
+	// catalog's own screenshot convention says exactly this), and the packaging
+	// test cannot see it because it only follows relative references.
+	for (const asset of ["assets/odoo-sdd.svg", "assets/settings-panel.jpg"]) {
+		check(`${doc.file}: references ${asset} relatively`, doc.text.includes(`src="${asset}"`));
+	}
 	check(`${doc.file}: no leftover template placeholder`, !/\bTODO\b|\bFIXME\b|<plugin>\/\.env\.example/.test(doc.text.replace("cp <plugin>/.env.example .env", "")));
 	check(
 		`${doc.file}: language link sits on its own line before the author`,
 		(() => {
-			const langIdx = doc.lines.findIndex((l) => /href="README\.(md|es\.md)"/.test(l));
-			const authorIdx = doc.lines.findIndex((l) => /<b>(Author|Autor):<\/b>/.test(l));
+			const langIdx = doc.lines.findIndex((l) => /href="README\.(md|es\.md|zh-CN\.md)"/.test(l));
+			const authorIdx = doc.lines.findIndex((l) => AUTHOR.test(l));
 			if (langIdx === -1 || authorIdx === -1 || langIdx >= authorIdx) return false;
 			// Its own line means: not sharing a line with the badge row.
 			const langLine = doc.lines[langIdx];
@@ -205,8 +233,8 @@ for (const doc of docs) {
 		(() => {
 			const idx = (re) => doc.lines.findIndex((l) => re.test(l));
 			const star = idx(/^## .*Star History/);
-			const thanks = idx(/^## .*(Acknowledgments|Agradecimientos)/);
-			const license = idx(/^## .*(License|Licencia)/);
+			const thanks = idx(TAIL.thanks);
+			const license = idx(TAIL.license);
 			return star !== -1 && thanks !== -1 && license !== -1 && star < thanks && thanks < license;
 		})(),
 	);
@@ -216,14 +244,14 @@ for (const doc of docs) {
 	check(
 		`${doc.file}: the tool-count in the section title matches the code`,
 		(() => {
-			const heading = doc.text.split("\n").find((l) => /^## .*\btools\b/i.test(l)) ?? "";
-			const match = /\b(\d+)\s+tools\b/i.exec(heading);
+			const heading = doc.lines.find((l) => /^## /.test(l) && doc.toolsHeading(l)) ?? "";
+			const match = doc.toolCount.exec(heading);
 			return match !== null && Number(match[1]) === toolNames.length;
 		})(),
 	);
 
 	// ---- the tool table must match the code, exactly.
-	const listed = [...doc.tools].sort();
+	const listed = [...(doc.tools ?? [])].sort();
 	check(
 		`${doc.file}: the tool table lists exactly the registered tools`,
 		listed.length === toolNames.length && listed.every((n) => toolNames.includes(n)),
@@ -234,22 +262,36 @@ for (const doc of docs) {
 	}
 }
 
-// ---- both READMEs must stay in step with each other.
+// ---- every README must stay in step with the others. These used to compare
+// docs[0] with docs[1] by hand, which silently stopped checking the moment a
+// third language appeared: the loop is the contract, not the pair.
+const baseline = docs[0];
+const skeletonCounts = (list) => list.map((doc) => `${doc.lang}=${doc.headings.length}`).join(" ");
 check(
-	"both READMEs share the same section skeleton",
-	docs[0].headings.length === docs[1].headings.length &&
-		docs[0].headings.every((h, i) => h === docs[1].headings[i]),
-	`en=${docs[0].headings.length} es=${docs[1].headings.length}`,
+	"all READMEs share the same section skeleton",
+	docs.every((doc) => doc.headings.length === baseline.headings.length && doc.headings.every((h, i) => h === baseline.headings[i])),
+	skeletonCounts(docs),
 );
 check(
-	"both READMEs document the same tools",
-	docs[0].tools.length === docs[1].tools.length &&
-		[...docs[0].tools].sort().every((n, i) => n === [...docs[1].tools].sort()[i]),
+	"all READMEs document the same tools",
+	docs.every((doc) => {
+		const mine = [...(doc.tools ?? [])].sort();
+		const reference = [...baseline.tools].sort();
+		return mine.length === reference.length && mine.every((n, i) => n === reference[i]);
+	}),
+	docs.map((doc) => `${doc.lang}=${(doc.tools ?? []).length}`).join(" "),
 );
 check(
-	"both READMEs carry the same badge set",
-	(docs[0].text.match(/img.shields.io[^"]+/g) ?? []).length === (docs[1].text.match(/img.shields.io[^"]+/g) ?? []).length,
+	"all READMEs carry the same badge set",
+	new Set(docs.map((doc) => (doc.text.match(/img.shields.io[^"]+/g) ?? []).length)).size === 1,
+	docs.map((doc) => `${doc.lang}=${(doc.text.match(/img.shields.io[^"]+/g) ?? []).length}`).join(" "),
 );
+// A switcher that forgets a language is the classic translation bug: the new
+// file links to everyone and the existing ones keep linking to nobody.
+for (const doc of docs) {
+	const missing = FILES.filter((other) => !doc.text.includes(`href="${other.file}"`)).map((other) => other.file);
+	check(`${doc.file}: the switcher links to every other language`, missing.length === 0, `missing: ${missing.join(", ")}`);
+}
 
 console.log(`\n${checks - failures}/${checks} checks passed.`);
 if (failures > 0) {

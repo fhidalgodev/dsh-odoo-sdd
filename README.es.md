@@ -22,7 +22,8 @@
 
 <p align="center">
   <a href="README.md"><b>🇬🇧 English</b></a> &nbsp;•&nbsp;
-  <a href="README.es.md"><b>🇪🇸 Español</b></a>
+  <a href="README.es.md"><b>🇪🇸 Español</b></a> &nbsp;•&nbsp;
+  <a href="README.zh-CN.md"><b>🇨🇳 简体中文</b></a>
 </p>
 
 <p align="center">

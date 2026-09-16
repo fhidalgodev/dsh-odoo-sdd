@@ -42,12 +42,23 @@ jobs:
 
       # Node 24 on purpose: npm's OIDC trusted publishing needs npm >= 11.5.1,
       # which ships with the Node 24 line. The test matrix still covers 20/22.
+      #
+      # `registry-url` is DELIBERATELY absent. With it, setup-node writes
+      # `_authToken=${NODE_AUTH_TOKEN}` into ~/.npmrc and exports a placeholder
+      # value when no real token is in the environment; npm then sends that
+      # placeholder as a bearer token on the publish PUT, gets a 404, and never
+      # falls back to the OIDC trusted-publisher flow — even though
+      # `--provenance` already signs through OIDC.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
           cache: ''
+
+      # Configure the registry with NO auth token, so the only credential npm
+      # can use is the OIDC token issued for `id-token: write`.
+      - name: Configure the registry without a token
+        run: npm config set registry https://registry.npmjs.org/
 
       - name: Install dev dependencies
         run: npm install --no-audit --no-fund

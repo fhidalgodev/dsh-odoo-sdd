@@ -580,6 +580,10 @@ name — a foreign folder is never adopted. `.sdd/` always stays with the projec
 Open **Settings → Odoo SDD** in the Web UI. Everything is editable there, plus a
 few copy-paste presets where you need them.
 
+<p align="center">
+  <img src="assets/settings-panel.jpg" alt="Settings → Odoo SDD: where specs live, who approves the phases, licensing, and the mutation allowlist" width="640" />
+</p>
+
 ```yaml
 # ~/.dsh/profiles/<profile>/cordis.patch.yml (optional: same fields, as a patch)
 - insert:

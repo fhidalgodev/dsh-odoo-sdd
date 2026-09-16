@@ -209,6 +209,40 @@ for (const reference of localImages) {
 	check(`ships the image the READMEs reference (${clean})`, shipped.has(clean) && existsSync(join(root, clean)));
 }
 
+// ---------------------------------------------------------------------------
+// THE MARKET SCREENSHOTS DECLARATION
+//
+// A plugin market reads `screenshots.json` from the repository (it is not part
+// of the tarball), and a malformed one is not an error there: the market simply
+// falls back to scraping the README, so the curated shots would vanish without
+// anything failing here. The rules below are the ones the catalog's own
+// probe-screenshots.mjs enforces, checked in the repository that has to satisfy
+// them.
+// ---------------------------------------------------------------------------
+const shotsFile = join(root, "screenshots.json");
+if (!existsSync(shotsFile)) {
+	check("screenshots.json exists (the market reads it from the repository)", false);
+} else {
+	let declared = null;
+	try {
+		const doc = JSON.parse(readFileSync(shotsFile, "utf8"));
+		declared = Array.isArray(doc) ? doc : Array.isArray(doc?.screenshots) ? doc.screenshots : null;
+	} catch (err) {
+		check("screenshots.json is valid JSON", false, err instanceof Error ? err.message : String(err));
+	}
+	if (declared !== null) {
+		check("screenshots.json declares 1 to 8 images", declared.length >= 1 && declared.length <= 8, `${declared.length}`);
+		check("every screenshot is a non-empty string", declared.every((s) => typeof s === "string" && s.trim() !== ""));
+		check(
+			"relative screenshot paths stay inside the repository",
+			declared.every((s) => !/^https?:/i.test(s) && !s.startsWith("/") && !s.split("/").includes("..")),
+		);
+		for (const shot of declared) {
+			check(`the screenshot exists (${shot})`, existsSync(join(root, shot)));
+		}
+	}
+}
+
 // The mount contract: the bundle patch must be declared AND shipped.
 const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const patch = manifest?.dsh?.bundle?.patch;

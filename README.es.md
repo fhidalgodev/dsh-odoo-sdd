@@ -589,6 +589,10 @@ carpeta — una carpeta ajena nunca se adopta. `.sdd/` siempre queda en el proye
 Abrí **Ajustes → Odoo SDD** en la Web UI. Todo es editable ahí, más algunos
 presets para copiar y pegar donde los necesites.
 
+<p align="center">
+  <img src="assets/settings-panel.jpg" alt="Ajustes → Odoo SDD: dónde viven las specs, quién aprueba las fases, licencia y el allowlist de mutaciones" width="640" />
+</p>
+
 ```yaml
 # ~/.dsh/profiles/<perfil>/cordis.patch.yml (opcional: los mismos campos, como parche)
 - insert:

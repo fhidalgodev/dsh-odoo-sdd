@@ -4,6 +4,14 @@
   "description": "Spec-Driven Development pipeline for Odoo as a DeepSeek Harness plugin: connects to an existing Odoo instance (JSON-RPC), orchestrates the 5-phase SDD workflow, and enforces fail-closed safety gates.",
   "author": "Franyer Hidalgo <fhidalgo.dev@gmail.com> (https://github.com/fhidalgodev)",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fhidalgodev/dsh-odoo-sdd.git"
+  },
+  "bugs": {
+    "url": "https://github.com/fhidalgodev/dsh-odoo-sdd/issues"
+  },
+  "homepage": "https://github.com/fhidalgodev/dsh-odoo-sdd#readme",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

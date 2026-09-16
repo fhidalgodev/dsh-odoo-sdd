@@ -208,6 +208,40 @@ check(
 );
 
 // ---------------------------------------------------------------------------
+// PROVENANCE NEEDS THE REPOSITORY DECLARED
+//
+// The first automated release reached the registry, signed its provenance, and
+// was rejected with a 422 that npm only produces AFTER a successful OIDC
+// exchange:
+//
+//   Failed to validate repository information: package.json: "repository.url"
+//   is "", expected to match "https://github.com/fhidalgodev/dsh-odoo-sdd"
+//
+// The registry compares that field with the repository the attestation claims,
+// so a publishable manifest has to declare it. This normalises the usual URL
+// spellings (git+, .git, ssh) and fails before a release can burn a version.
+// ---------------------------------------------------------------------------
+const canonicalRepo = "https://github.com/fhidalgodev/dsh-odoo-sdd";
+/** Reduce the repository spellings npm accepts to one comparable URL. */
+function normalizeRepoUrl(url) {
+	return String(url ?? "")
+		.trim()
+		.toLowerCase()
+		.replace(/^git\+/, "")
+		.replace(/^git@([^:]+):/, "https://$1/")
+		.replace(/^ssh:\/\/git@/, "https://")
+		.replace(/\.git$/, "")
+		.replace(/\/+$/, "");
+}
+check("package.json declares a repository", typeof manifest?.repository?.url === "string" && manifest.repository.url !== "");
+check(
+	"the declared repository is the one provenance will attest",
+	normalizeRepoUrl(manifest?.repository?.url) === canonicalRepo,
+	`declared=${String(manifest?.repository?.url)} normalized=${normalizeRepoUrl(manifest?.repository?.url)}`,
+);
+check("the repository type is git", manifest?.repository?.type === "git");
+
+// ---------------------------------------------------------------------------
 // THE PUBLISH SIMULATION
 //
 // The first version of this package passed every check above and would still

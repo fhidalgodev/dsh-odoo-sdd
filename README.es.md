@@ -4,9 +4,8 @@
 
 <h3>Convertí DeepSeek Harness en un taller Odoo de bucle cerrado:<br/>spec → arquitectura → código → verificación, contra una instancia real</h3>
 
-<!-- Los badges de npm se resuelven contra el paquete publicado
-     (dsh-odoo-sdd@0.1.0). Actualizá owner/repo en los badges de GitHub si esto
-     se bifurca a otra cuenta. -->
+<!-- Los badges de npm se resuelven contra el paquete publicado. Actualizá
+     owner/repo en los badges de GitHub si esto se bifurca a otra cuenta. -->
 <p align="center">
   <a href="https://www.npmjs.com/package/dsh-odoo-sdd"><img src="https://img.shields.io/npm/v/dsh-odoo-sdd.svg?style=for-the-badge&color=cb3837&labelColor=161b22&logo=npm&logoColor=white" alt="npm version"/></a>
   <a href="https://github.com/fhidalgodev/dsh-odoo-sdd/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/fhidalgodev/dsh-odoo-sdd/ci.yml?style=for-the-badge&label=ci&labelColor=161b22&logo=githubactions&logoColor=white" alt="CI"/></a>

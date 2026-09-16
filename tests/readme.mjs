@@ -156,7 +156,13 @@ const docs = FILES.map((entry) => {
 
 for (const doc of docs) {
 	check(`${doc.file}: exists and is not empty`, doc.text.length > 2000, `${doc.text.length} bytes`);
-	check(`${doc.file}: starts with the exact H1`, doc.lines[0] === doc.h1, doc.lines[0]);
+	// The house header is: the banner, then the exact H1. Both halves are pinned,
+	// so a later edit can neither drop the banner nor push the title under it —
+	// and a README that opens with something else entirely still fails.
+	const imgLine = doc.lines.findIndex((l) => /<img src="assets\/odoo-sdd\.svg"/.test(l));
+	const headingLine = doc.lines.findIndex((l) => /^# /.test(l));
+	check(`${doc.file}: opens with the banner`, imgLine !== -1 && imgLine < headingLine, `img=${imgLine} h1=${headingLine}`);
+	check(`${doc.file}: the H1 is the first heading, exactly`, doc.lines[headingLine] === doc.h1, doc.lines[headingLine]);
 	check(`${doc.file}: no YAML frontmatter block`, !doc.text.startsWith("---"));
 	// Windows git checks the file out with CRLF. Pin that the contract survives
 	// it here, on Linux, instead of learning it from a red Windows CI run: the
@@ -165,11 +171,15 @@ for (const doc of docs) {
 		`${doc.file}: the contract holds with CRLF line endings (Windows checkout)`,
 		(() => {
 			const crlf = doc.text.replace(/\n/g, "\r\n");
-			if (firstLine(crlf) !== doc.h1) return false;
+			// The banner line has to survive the checkout too: it is the first line
+			// now, so a stray `\r` would break the header exactly as it once broke
+			// the H1 assertion.
+			if (firstLine(crlf) !== doc.lines[0]) return false;
+			const crlfLines = normalize(crlf).split("\n");
+			if (crlfLines[imgLine] !== doc.lines[imgLine] || crlfLines[headingLine] !== doc.h1) return false;
 			const crlfTools = [...tableAfter(crlf, (h) => /tools/i.test(h))].sort();
 			if (crlfTools.length !== doc.tools.length || !crlfTools.every((n, i) => n === [...doc.tools].sort()[i])) return false;
 			if (headingLevels(crlf).length !== doc.headings.length) return false;
-			const crlfLines = normalize(crlf).split("\n");
 			const langIdx = crlfLines.findIndex((l) => /href="README\.(md|es\.md)"/.test(l));
 			const authorIdx = crlfLines.findIndex((l) => /<b>(Author|Autor):<\/b>/.test(l));
 			return langIdx !== -1 && authorIdx !== -1 && langIdx < authorIdx;

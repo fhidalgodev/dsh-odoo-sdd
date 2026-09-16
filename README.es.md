@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/odoo-sdd.svg" alt="dsh-odoo-sdd — Desarrollo Guiado por Especificación para Odoo" width="800" />
+</p>
+
 # Spec-Driven Development para Odoo
 
 <div align="center">

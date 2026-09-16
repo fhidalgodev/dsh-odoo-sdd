@@ -187,6 +187,28 @@ for (const file of srcModules) {
 	check(`lib/${compiled} is built and shipped`, libModules.has(compiled) && shipped.has(`lib/${compiled}`));
 }
 
+// ---------------------------------------------------------------------------
+// A REFERENCED FILE MUST BE SHIPPED
+//
+// The npm page renders README.md from inside the tarball, so a relative image
+// resolved against the package has to BE in the package: a banner referenced
+// from `assets/` and left out of `files` shows as a broken image to every
+// consumer while CI stays green — the same class of bug as the missing `lib/`,
+// one directory over. The references are derived from the READMEs instead of
+// being listed here by hand, so the check cannot drift from the documents.
+// ---------------------------------------------------------------------------
+const localImages = new Set();
+for (const doc of ["README.md", "README.es.md"]) {
+	const text = readFileSync(join(root, doc), "utf8");
+	for (const match of text.matchAll(/<img[^>]+src="(?!https?:)([^"]+)"/g)) localImages.add(match[1]);
+	for (const match of text.matchAll(/!\[[^\]]*\]\((?!https?:)([^)]+)\)/g)) localImages.add(match[1]);
+}
+check("the READMEs reference at least one local image", localImages.size > 0, `${localImages.size} found`);
+for (const reference of localImages) {
+	const clean = reference.replace(/^\.\//, "");
+	check(`ships the image the READMEs reference (${clean})`, shipped.has(clean) && existsSync(join(root, clean)));
+}
+
 // The mount contract: the bundle patch must be declared AND shipped.
 const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const patch = manifest?.dsh?.bundle?.patch;

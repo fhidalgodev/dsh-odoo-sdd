@@ -45,6 +45,7 @@
     "agents",
     "skills",
     "client",
+    "assets",
     "cordis.patch.yml",
     ".env.example",
     "README.md",

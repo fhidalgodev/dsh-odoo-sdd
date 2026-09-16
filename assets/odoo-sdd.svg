@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400" width="100%" height="100%">
+  <defs>
+    <!-- Tipografía y colores.
+         No @import here on purpose: an SVG rendered through <img> (GitHub, npm,
+         the plugin market) cannot load external resources anyway, and shipping
+         one would make a documentation asset call a third party. The stack
+         below falls back to the system UI font, which is what it renders with
+         everywhere this banner is actually displayed. -->
+    <style>
+      .text-title { font-family: 'Inter', system-ui, sans-serif; font-weight: 800; font-size: 48px; fill: #FFFFFF; }
+      .text-subtitle { font-family: 'Inter', system-ui, sans-serif; font-weight: 600; font-size: 14px; fill: #8892B0; letter-spacing: 0.4em; }
+      .text-dsh { fill: #4A90E2; }
+      .text-odoo { fill: #714B67; }
+      .text-sdd { fill: #00F0FF; }
+      .wave { fill: none; stroke-linecap: round; }
+    </style>
+
+    <!-- Fondo espacial oscuro -->
+    <radialGradient id="bg" cx="50%" cy="100%" r="100%">
+      <stop offset="0%" stop-color="#19152a" />
+      <stop offset="100%" stop-color="#0a0a0f" />
+    </radialGradient>
+
+    <!-- Degradados para el Ghost Wave (Mezcla de DeepSeek Blue, Odoo Purple y Cyan) -->
+    <linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#714B67" stop-opacity="0" />
+      <stop offset="50%" stop-color="#714B67" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#4A90E2" stop-opacity="0" />
+    </linearGradient>
+
+    <linearGradient id="g2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#4A90E2" stop-opacity="0" />
+      <stop offset="50%" stop-color="#00F0FF" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#714B67" stop-opacity="0" />
+    </linearGradient>
+
+    <linearGradient id="g3" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#714B67" stop-opacity="0" />
+      <stop offset="50%" stop-color="#00F0FF" stop-opacity="0.5" />
+      <stop offset="100%" stop-color="#4A90E2" stop-opacity="0" />
+    </linearGradient>
+
+    <!-- Efecto de resplandor (Glow/Ghost) -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="10" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <!-- Efecto de resplandor sutil para el centro -->
+    <filter id="glow-center">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Fondo -->
+  <rect width="800" height="400" fill="url(#bg)" />
+
+  <!-- Patrón de cuadrícula tecnológica -->
+  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+    <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#FFFFFF" stroke-opacity="0.03" stroke-width="1"/>
+  </pattern>
+  <rect width="800" height="400" fill="url(#grid)" />
+
+  <!-- Animación GHOST WAVES -->
+  <g filter="url(#glow)" opacity="0.8">
+    <!-- Onda 1 -->
+    <path class="wave" stroke="url(#g1)" stroke-width="4" d="M-100,200 C150,300 250,50 400,200 C550,350 700,100 900,200">
+      <animate attributeName="d"
+               values="M-100,200 C150,300 250,50 400,200 C550,350 700,100 900,200;
+                       M-100,250 C100,150 300,350 450,200 C600,50 750,300 900,250;
+                       M-100,200 C150,300 250,50 400,200 C550,350 700,100 900,200"
+               dur="12s" repeatCount="indefinite" />
+    </path>
+    <!-- Onda 2 -->
+    <path class="wave" stroke="url(#g2)" stroke-width="2" d="M-100,250 C100,100 300,300 450,150 C600,0 750,250 900,150">
+      <animate attributeName="d"
+               values="M-100,250 C100,100 300,300 450,150 C600,0 750,250 900,150;
+                       M-100,150 C150,350 250,50 400,250 C550,450 700,50 900,250;
+                       M-100,250 C100,100 300,300 450,150 C600,0 750,250 900,150"
+               dur="16s" repeatCount="indefinite" />
+    </path>
+    <!-- Onda 3 -->
+    <path class="wave" stroke="url(#g3)" stroke-width="5" opacity="0.6" d="M-100,150 C200,50 300,350 500,250 C700,150 800,300 900,200">
+      <animate attributeName="d"
+               values="M-100,150 C200,50 300,350 500,250 C700,150 800,300 900,200;
+                       M-100,200 C150,300 350,100 450,200 C550,300 750,100 900,150;
+                       M-100,150 C200,50 300,350 500,250 C700,150 800,300 900,200"
+               dur="20s" repeatCount="indefinite" />
+    </path>
+  </g>
+
+  <!-- Nodo Central (Representa el Harness y JSON-RPC) -->
+  <g transform="translate(400, 140)">
+    <!-- Anillo exterior rotatorio (Odoo Purple) -->
+    <circle cx="0" cy="0" r="70" fill="none" stroke="#714B67" stroke-width="2" stroke-dasharray="10 15" opacity="0.8">
+      <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="25s" repeatCount="indefinite"/>
+    </circle>
+
+    <!-- Anillo interior rotatorio (Cyan SDD) -->
+    <circle cx="0" cy="0" r="55" fill="none" stroke="#00F0FF" stroke-width="3" stroke-dasharray="40 20">
+      <animateTransform attributeName="transform" type="rotate" from="360" to="0" dur="15s" repeatCount="indefinite"/>
+    </circle>
+
+    <!-- Core resplandeciente -->
+    <circle cx="0" cy="0" r="28" fill="#0a0a0f" stroke="#00F0FF" stroke-width="3" filter="url(#glow-center)"/>
+    <circle cx="0" cy="0" r="14" fill="#00F0FF" filter="url(#glow-center)">
+      <animate attributeName="opacity" values="0.4;1;0.4" dur="4s" repeatCount="indefinite"/>
+      <animate attributeName="r" values="12;16;12" dur="4s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+
+  <!-- Tipografía -->
+  <text x="400" y="305" class="text-title" text-anchor="middle">
+    <tspan class="text-dsh">DSH</tspan> <tspan class="text-odoo">ODOO</tspan> <tspan class="text-sdd">SDD</tspan>
+  </text>
+  <text x="400" y="340" class="text-subtitle" text-anchor="middle">
+    SPECIFICATION-DRIVEN DEVELOPMENT
+  </text>
+</svg>

@@ -146,13 +146,28 @@ autonomous mode.
 dsh plugin --profile web add dsh-odoo-sdd
 ```
 
+That installs the **published package from the npm registry** — no clone, no
+build, nothing to compile on your side. `dsh plugin` is a thin `pnpm` forwarder:
+it runs `pnpm add` inside the profile directory and then registers the bundle
+(`dsh.profile.bundles`). Two consequences worth knowing:
+
+- **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
+- Any pnpm spec works, so you can pin a version:
+  `dsh plugin --profile web add dsh-odoo-sdd@0.1.1`.
+
+Prefer plain npm — a project that depends on the plugin, or a CI job?
+
+```bash
+npm install dsh-odoo-sdd        # 0.1.1, published with a provenance attestation
+```
+
 > [!IMPORTANT]
 > Restart DSH and refresh the browser tab after installing. Client-side changes
 > (the **Odoo SDD** settings panel) load from the installed package.
 
-Installing from a git clone? `lib/` is build output and is **not** committed;
-`npm install` builds it through the `prepare` hook, and you can always ask for it
-explicitly:
+**Working on the plugin itself?** Install the checkout instead. `lib/` is build
+output and is **not** committed; `npm install` builds it through the `prepare`
+hook, and you can always ask for it explicitly:
 
 ```bash
 git clone https://github.com/fhidalgodev/dsh-odoo-sdd && cd dsh-odoo-sdd
@@ -161,6 +176,13 @@ npm run host:deps    # optional peers, needed to compile (no-save)
 npm run build        # emits lib/ — required, package main is lib/index.js
 dsh plugin --profile odoo add .
 ```
+
+> [!NOTE]
+> A **git** install runs that `prepare` build on the consumer's machine, and pnpm
+> blocks dependency build scripts until they are allowed: the command tells you
+> the exact key to add under `allowBuilds` in the profile's
+> `pnpm-workspace.yaml`. A registry install needs none of that — the tarball
+> already ships `lib/`.
 
 `dsh plugin add` records the bundle in the profile's `package.json`
 (`dsh.profile.bundles`), and the package ships a Cordis patch

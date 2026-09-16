@@ -147,13 +147,29 @@ defecto, y se pueden delegar a un agente proxy humano si elegís el modo autóno
 dsh plugin --profile web add dsh-odoo-sdd
 ```
 
+Eso instala el **paquete publicado en el registro de npm** — sin clonar, sin
+compilar, sin nada que construir de tu lado. `dsh plugin` es un forwarder fino de
+`pnpm`: corre `pnpm add` dentro del directorio del perfil y después registra el
+bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
+
+- **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
+- Acepta cualquier spec de pnpm, así que podés fijar una versión:
+  `dsh plugin --profile web add dsh-odoo-sdd@0.1.1`.
+
+¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
+
+```bash
+npm install dsh-odoo-sdd        # 0.1.1, publicada con attestation de provenance
+```
+
 > [!IMPORTANT]
 > Reiniciá DSH y refrescá la pestaña del navegador después de instalar. Los
 > cambios del lado cliente (el panel **Odoo SDD** en Ajustes) se cargan desde el
 > paquete instalado.
 
-¿Instalando desde un clon de git? `lib/` es salida de build y **no** se versiona;
-`npm install` lo compila con el hook `prepare`, y siempre podés pedirlo explícito:
+**¿Estás trabajando en el plugin?** Instalá el checkout. `lib/` es salida de build
+y **no** se versiona; `npm install` lo compila con el hook `prepare`, y siempre
+podés pedirlo explícito:
 
 ```bash
 git clone https://github.com/fhidalgodev/dsh-odoo-sdd && cd dsh-odoo-sdd
@@ -162,6 +178,13 @@ npm run host:deps    # peers opcionales, necesarios para compilar (no-save)
 npm run build        # genera lib/ — obligatorio, el main es lib/index.js
 dsh plugin --profile odoo add .
 ```
+
+> [!NOTE]
+> Una instalación desde **git** corre ese build `prepare` en la máquina del
+> consumidor, y pnpm bloquea los scripts de build de las dependencias hasta que
+> los permitas: el comando te dice la clave exacta que hay que agregar en
+> `allowBuilds` dentro del `pnpm-workspace.yaml` del perfil. Una instalación desde
+> el registro no necesita nada de eso — el tarball ya trae `lib/`.
 
 `dsh plugin add` registra el bundle en el `package.json` del perfil
 (`dsh.profile.bundles`), y el paquete trae su propio parche de Cordis

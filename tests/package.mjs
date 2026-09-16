@@ -258,6 +258,49 @@ rmSync(join(stage, "node_modules"), { force: true });
 rmSync(stage, { recursive: true, force: true });
 check("cleaning up the staging copy did not touch the real node_modules", existsSync(join(root, "node_modules", "typescript", "bin", "tsc")));
 
+// ---------------------------------------------------------------------------
+// THE INSTALL HOOK MUST NOT BREAK AN INSTALL
+//
+// `prepare` runs during `npm install` — including in CI, where the optional
+// host peers that provide the types are installed in a LATER step. An earlier
+// version of this script typechecked right there and failed EVERY job before
+// the explicit typecheck step could run, at "Install dev dependencies". This
+// reproduces that exact tree: TypeScript and @types/node present, host peers
+// absent. It also pins the other half of the invariant, which is what keeps the
+// publish path honest: `prepack` REFUSES in the same tree instead of shipping a
+// build nobody checked.
+// ---------------------------------------------------------------------------
+const installStage = mkdtempSync(join(tmpdir(), "dsh-odoo-sdd-install-"));
+try {
+	for (const name of ["src", "scripts", "tsconfig.json", "package.json"]) {
+		cpSync(join(root, name), join(installStage, name), { recursive: true });
+	}
+	mkdirSync(join(installStage, "node_modules", "@types"), { recursive: true });
+	for (const [target, link] of [
+		[join(root, "node_modules", "typescript"), join(installStage, "node_modules", "typescript")],
+		[join(root, "node_modules", "@types", "node"), join(installStage, "node_modules", "@types", "node")],
+	]) {
+		symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+	}
+	const hook = (args) => {
+		try {
+			execFileSync(process.execPath, [join(installStage, "scripts", "prepare.mjs"), ...args], { cwd: installStage, stdio: ["ignore", "ignore", "ignore"] });
+			return 0;
+		} catch (err) {
+			return typeof err?.status === "number" ? err.status : 1;
+		}
+	};
+	check("prepare exits 0 when the host peers are not installed (npm install must not fail)", hook([]) === 0);
+	check("prepare still produces the entry point there, by emitting without checking", existsSync(join(installStage, "lib", "index.js")));
+	check("prepack REFUSES to package a build it could not typecheck", hook(["--force"]) !== 0);
+} catch (err) {
+	check("the install-hook simulation could not run", false, err instanceof Error ? err.message : String(err));
+} finally {
+	// The symlinks go first, and never through a recursive delete.
+	for (const name of ["node_modules", "lib"]) rmSync(join(installStage, name), { recursive: true, force: true });
+	rmSync(installStage, { recursive: true, force: true });
+}
+
 console.log(`\n${checks - failures}/${checks} checks passed.`);
 if (failures > 0) {
 	console.error(`${failures} CHECK(S) FAILED`);

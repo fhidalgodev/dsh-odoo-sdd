@@ -482,11 +482,16 @@ has a way back and a way to prove what happened.
   `.sdd/session.json` (chmod 600) and returns only the path.
 - **No install scripts beyond the build.** The only lifecycle scripts are
   `prepare`/`prepack`, which compile `src/` into the shipped `lib/` and do
-  nothing else — no network, no `postinstall`, no shell. They run `tsc` when it
-  is available and otherwise say so and skip, because a `file:` install has no
-  devDependencies. `prepack` is what guarantees that a published tarball is
-  never missing the entry point its `main` promises (that failure was real: a
-  clean clone packed 39 files and zero of them under `lib/`).
+  nothing else — no network, no `postinstall`, no shell. The two have opposite
+  failure policies on purpose: **`prepare` (which runs on an install) never
+  fails one** — without the devDependencies or the optional host peers it says
+  what it could not check and emits without type checking so the plugin still
+  loads — while **`prepack` (which runs on a publish) refuses to package a build
+  it could not typecheck**. `prepack` is also what guarantees a published tarball
+  is never missing the entry point its `main` promises (that failure was real: a
+  clean clone packed 39 files and zero of them under `lib/`; so was its sequel,
+  a `prepare` that typechecked during `npm install` and failed every CI job
+  before the step that installs those peers could run).
 - **Host requirement declared twice**, following dsh-market discovery
   conventions: `engines.dsh` and lockstep optional peer ranges on
   `@deepseek-ai/{cordis,dsh-tools,schemastery}`. On a host without the `tools`
@@ -702,7 +707,10 @@ Windows, so a local `npm run typecheck && npm test` reproduces the pipeline.
 `test:package` also **simulates the publish**: it copies the package without
 `lib/` (what a fresh clone has), runs `npm pack` on it and asserts the tarball
 still contains the compiled entry point. That is the check that keeps a released
-version from being installable-but-unloadable.
+version from being installable-but-unloadable. It then simulates the **install**
+side — a tree with the compiler but without the optional host peers, which is
+exactly CI's `npm install` — and asserts that `prepare` exits 0 there while
+`prepack` refuses.
 
 ### Publishing (maintainers)
 

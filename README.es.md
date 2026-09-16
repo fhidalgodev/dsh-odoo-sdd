@@ -490,11 +490,17 @@ camino de mutación tiene vuelta atrás y forma de probar qué pasó.
   cookie en `.sdd/session.json` (chmod 600) y devuelve solo la ruta.
 - **Sin scripts de instalación más allá del build.** Los únicos hooks de
   ciclo de vida son `prepare`/`prepack`, que compilan `src/` hacia el `lib/` que
-  se distribuye y no hacen nada más — sin red, sin `postinstall`, sin shell.
-  Corren `tsc` cuando está disponible y, si no, lo dicen y se saltan, porque una
-  instalación `file:` no tiene devDependencies. `prepack` es lo que garantiza que
-  un tarball publicado nunca salga sin el entry point que su `main` promete (el
-  fallo fue real: un clon limpio empaquetó 39 archivos y cero bajo `lib/`).
+  se distribuye y no hacen nada más — sin red, sin `postinstall`, sin shell. Los
+  dos tienen políticas de fallo opuestas a propósito: **`prepare` (que corre en
+  una instalación) nunca rompe una** — sin las devDependencies o sin los peers
+  opcionales del host dice qué no pudo verificar y emite sin typecheck para que
+  el plugin igual cargue —, mientras que **`prepack` (que corre en una
+  publicación) se niega a empaquetar un build que no pudo typechequear**.
+  `prepack` es además lo que garantiza que un tarball publicado nunca salga sin
+  el entry point que su `main` promete (el fallo fue real: un clon limpio
+  empaquetó 39 archivos y cero bajo `lib/`; también lo fue su secuela, un
+  `prepare` que typechequeaba durante `npm install` y tumbaba todos los jobs del
+  CI antes de que corriera el paso que instala esos peers).
 - **Requisito de host declarado dos veces**, siguiendo las convenciones de
   descubrimiento de dsh-market: `engines.dsh` y rangos peer opcionales lockstep
   sobre `@deepseek-ai/{cordis,dsh-tools,schemastery}`. Ante un host sin el
@@ -711,7 +717,10 @@ Windows, así que `npm run typecheck && npm test` en local reproduce el pipeline
 `test:package` además **simula la publicación**: copia el paquete sin `lib/` (lo
 que tiene un clon recién hecho), corre `npm pack` sobre esa copia y verifica que el
 tarball igual contenga el entry point compilado. Ese es el chequeo que evita que
-una versión publicada sea instalable pero no cargable.
+una versión publicada sea instalable pero no cargable. Después simula el lado de
+la **instalación** — un árbol con el compilador pero sin los peers opcionales del
+host, que es exactamente el `npm install` del CI — y verifica que ahí `prepare`
+salga 0 y `prepack` se niegue.
 
 ### Publicar (maintainers)
 

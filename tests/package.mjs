@@ -15,7 +15,8 @@
  * @module dsh-odoo-sdd/tests/package
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -89,6 +90,32 @@ function npmInvocation() {
 	return { command: shim, args: ["pack", "--dry-run", "--json"], shell: process.platform === "win32", how: shim, source: "shim" };
 }
 const npm = npmInvocation();
+
+// Keep npm's cache INSIDE the project: `npm pack` otherwise writes to ~/.npm,
+// which fails on a read-only $HOME sandbox (EROFS) and makes this check depend
+// on the machine's global state instead of the package itself.
+const cacheDir = join(root, "node_modules", ".cache", "npm-pack");
+mkdirSync(cacheDir, { recursive: true });
+
+/**
+ * Pack a directory and return the file list npm reports.
+ * @param cwd - the package directory to pack.
+ * @returns the shipped paths.
+ */
+function packFileList(cwd) {
+	const out = execFileSync(npm.command, npm.args, {
+		cwd,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "ignore"],
+		maxBuffer: 32 * 1024 * 1024,
+		env: { ...process.env, npm_config_cache: cacheDir },
+		...(npm.shell ? { shell: true } : {}),
+	});
+	const parsed = JSON.parse(out);
+	const entry = Array.isArray(parsed) ? parsed[0] : parsed;
+	return new Set((entry?.files ?? []).map((f) => f.path));
+}
+
 // The bug this pins: a `.cmd`/`.bat` launched WITHOUT a shell throws EINVAL on
 // Windows (Node >= 20.12/21.7.0). Spawning the shim with a shell is legitimate,
 // so the invariant is about the combination, not about the name.
@@ -103,29 +130,13 @@ if (providedPath !== "" && /[\\/]npm[\\/]|npm-cli\.js$/i.test(providedPath)) {
 }
 console.log(`  INFO  npm invocation: ${npm.how} [${npm.source}]${npm.shell ? " (via shell)" : ""}`);
 
-// Keep npm's cache INSIDE the project: `npm pack` otherwise writes to ~/.npm,
-// which fails on a read-only $HOME sandbox (EROFS) and makes this check depend
-// on the machine's global state instead of the package itself.
-const cacheDir = join(root, "node_modules", ".cache", "npm-pack");
-mkdirSync(cacheDir, { recursive: true });
-let packed;
+let shipped;
 try {
-	const out = execFileSync(npm.command, npm.args, {
-		cwd: root,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "ignore"],
-		maxBuffer: 32 * 1024 * 1024,
-		env: { ...process.env, npm_config_cache: cacheDir },
-		...(npm.shell ? { shell: true } : {}),
-	});
-	packed = JSON.parse(out);
+	shipped = packFileList(root);
 } catch (err) {
 	console.error(`Could not run \`npm pack --dry-run --json\` via ${npm.how}: ${err instanceof Error ? err.message : String(err)}`);
 	process.exit(2);
 }
-
-const entry = Array.isArray(packed) ? packed[0] : packed;
-const shipped = new Set((entry?.files ?? []).map((f) => f.path));
 check("npm pack reports a file list", shipped.size > 0, `got ${shipped.size} entries`);
 
 // Everything the runtime loads by path must be inside the package.
@@ -195,6 +206,57 @@ check(
 	"peer packages stay optional (host provides them)",
 	manifest?.peerDependenciesMeta?.["@deepseek-ai/dsh-tools"]?.optional === true,
 );
+
+// ---------------------------------------------------------------------------
+// THE PUBLISH SIMULATION
+//
+// The first version of this package passed every check above and would still
+// have shipped BROKEN: `lib/` is gitignored, so packing from a clean clone
+// yielded a tarball with `main: lib/index.js` and no `lib/` in it at all (39
+// files, zero under lib/). A registry tarball is never built by the consumer,
+// so the fix has to be a packaging hook — and the hook is what this asserts:
+// a package tree WITHOUT lib/, packed the way `npm publish` packs it, must come
+// out with the compiled plugin inside.
+// ---------------------------------------------------------------------------
+check(
+	"a build hook is declared for packaging (prepack) and for installs (prepare)",
+	typeof manifest?.scripts?.prepack === "string" && typeof manifest?.scripts?.prepare === "string",
+	`prepack=${String(manifest?.scripts?.prepack)} prepare=${String(manifest?.scripts?.prepare)}`,
+);
+
+const stage = mkdtempSync(join(tmpdir(), "dsh-odoo-sdd-publish-"));
+let staged;
+try {
+	// The package file set, minus lib/: exactly what a fresh clone has.
+	const shipThese = ["src", "client", "agents", "skills", "scripts", "cordis.patch.yml", ".env.example", "README.md", "README.es.md", "LICENSE", "package.json", "tsconfig.json"];
+	for (const name of shipThese) {
+		if (existsSync(join(root, name))) cpSync(join(root, name), join(stage, name), { recursive: true });
+	}
+	check("the staging copy has no lib/ (that is the point)", !existsSync(join(stage, "lib", "index.js")));
+	// The compiler lives in the real node_modules; a junction needs no Windows
+	// privilege, unlike a directory symlink.
+	symlinkSync(join(root, "node_modules"), join(stage, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+	staged = packFileList(stage);
+} catch (err) {
+	console.error(`The publish simulation could not run: ${err instanceof Error ? err.message : String(err)}`);
+	rmSync(stage, { recursive: true, force: true });
+	process.exit(2);
+}
+check("packing a tree without lib/ still ships the entry point", staged.has("lib/index.js"));
+check(
+	"packing a tree without lib/ ships every compiled module",
+	srcModules.every((file) => staged.has(`lib/${file.slice(0, -3)}.js`)),
+	`missing: ${srcModules.filter((f) => !staged.has(`lib/${f.slice(0, -3)}.js`)).join(", ")}`,
+);
+check("the publish simulation kept the personas and skills", staged.has("agents/functional.md") && staged.has("skills/odoo-functional-sdd/SKILL.md"));
+// The hook must build, not smuggle: a build helper is never part of the tarball.
+check("the build helper itself is not shipped", !staged.has("scripts/prepare.mjs"));
+
+// Unlink the junction FIRST and by itself: a recursive delete that follows it
+// would take the real node_modules with it.
+rmSync(join(stage, "node_modules"), { force: true });
+rmSync(stage, { recursive: true, force: true });
+check("cleaning up the staging copy did not touch the real node_modules", existsSync(join(root, "node_modules", "typescript", "bin", "tsc")));
 
 console.log(`\n${checks - failures}/${checks} checks passed.`);
 if (failures > 0) {

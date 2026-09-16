@@ -112,6 +112,10 @@ autonomous mode.
 - 🔁 **A real feedback loop.** `odoo_module install` returns the server's own
   output or traceback; `odoo_errors` reads `ir.logging`; failures become a
   persisted FAILED verdict instead of a hopeful summary.
+- 🧾 **Not only modules.** The same machine also runs a **functional** spec
+  (`mode=functional`): configure a live instance and load data in
+  human-approved batches, with Odoo's own importer for CSV/Excel, and close with
+  a runbook a person can repeat. → [The functional path](#-the-functional-path-configure-and-import)
 - 🔒 **Credentials are not consent.** The first socket of a project needs an
   explicit human authorization bound to `url + db + user` (`.sdd/grants.json`).
 - ⏪ **Rollback that tells the truth.** Checkpoints snapshot files and journal
@@ -147,12 +151,13 @@ dsh plugin --profile web add dsh-odoo-sdd
 > Restart DSH and refresh the browser tab after installing. Client-side changes
 > (the **Odoo SDD** settings panel) load from the installed package.
 
-Installing from a git clone? `lib/` is build output and is **not** committed, so
-compile it once first:
+Installing from a git clone? `lib/` is build output and is **not** committed;
+`npm install` builds it through the `prepare` hook, and you can always ask for it
+explicitly:
 
 ```bash
 git clone https://github.com/fhidalgodev/dsh-odoo-sdd && cd dsh-odoo-sdd
-npm install          # devDependencies: typescript
+npm install          # devDependencies: typescript, then prepare builds lib/
 npm run host:deps    # optional peers, needed to compile (no-save)
 npm run build        # emits lib/ — required, package main is lib/index.js
 dsh plugin --profile odoo add .
@@ -206,6 +211,16 @@ The agent picks up `odoo-sdd-workflow` from the session skill catalog and follow
 the protocol. If you want to be explicit — or you want to be sure the full
 instructions are loaded — start your message with `/odoo-sdd-workflow`.
 
+For configuration and data work on a running instance, ask for that instead:
+
+```text
+Set up company, taxes and chart of accounts in my dev instance, then import
+this customers.csv — functional SDD, dev environment, no production.
+```
+
+That selects `odoo-functional-sdd` (or `/odoo-functional-sdd` explicitly) and
+the `functional` spec mode described below.
+
 ---
 
 ## 🧭 The five phases
@@ -239,6 +254,88 @@ specs/<NNN>-<slug>/
 ├── docs-report.md · security-report.md
 └── handoff.md           # written by sdd_handoff when the run closes
 ```
+
+---
+
+## 🧩 The functional path (configure and import)
+
+Not every Odoo job is code. Setting up a company, its taxes, its users and its
+master data is **configuration and data**, and it happens on a live instance —
+where a wrong click is not a failed test but a real record. The same SDD machine
+covers it with a different middle phase and stricter closing rules.
+
+```mermaid
+graph TD
+    C1["1 CLARIFY<br/>objective, instance, ENVIRONMENT"] --> R2["2 READ_SPEC<br/>spec.md, criteria, sources"]
+    R2 -->|APPROVED| A3["3 ARCHITECTURE<br/>to-be process, batches, risks"]
+    A3 -->|APPROVED| X4["4 APPLY_CONFIG<br/>discovery + approved batches"]
+    X4 --> V5["5 VERIFY<br/>re-read the records, evidence per AC"]
+    V5 -->|PASSED| D9(["runbook.md + handoff.md - DONE"])
+    V5 -->|FAILED| F6["FIX_LOOP"]
+    F6 --> X4
+
+    style X4 fill:#1e1e2e,stroke:#f9e2af,stroke-width:2px,color:#cdd6f4
+```
+
+| | Development run | Functional run |
+|---|---|---|
+| Chosen at `CLARIFY` | `mode=create` or `mode=bug` | `mode=functional` |
+| Middle phase | `WRITE_CODE` (module source) | `APPLY_CONFIG` (batches against the instance) |
+| Deliverable | module + OCA docs | configured instance + `functional-runbook.md` |
+| Skill | `odoo-sdd-workflow` | `odoo-functional-sdd` |
+
+**How a change reaches the instance.** Nothing is written "to see what happens":
+
+1. **Discovery first**, under its OWN approval: which models, which fields, how
+   many records. Reads are not mutations, but an approved scope is what stops
+   "just looking around" from turning into a change.
+2. **Plan**: the design becomes batches. Each one declares its destination and
+   environment, the version and capabilities used, company and context, the
+   acceptance criteria it covers, its ordered operations, record identity,
+   preconditions, expected result, risks, recovery and manual steps.
+3. **Approve**: the human sees the exact batch and approves it through the native
+   approval seam. The receipt is bound to the hashes of the spec, the design, the
+   plan and the batch — change any of them and the approval is void.
+4. **Apply**: one operation at a time, re-checking those hashes, persisting each
+   operation's state *before* the call and *after* the result.
+5. **An unknown outcome is not a retry.** A timeout after a mutation may mean
+   Odoo already committed, so the operation is marked `indeterminate`, the batch
+   stops and the run parks until a human reconciles it.
+6. **Close honestly**: `sdd_phase succeed` demands an explicit `pass` per
+   acceptance criterion, the security review is mandatory, and so is the
+   **runbook** (who does it, in which company, prerequisites, the verified menu
+   path, the steps with their field labels, the expected result, how to check it
+   and how to undo it) — whatever the documentation policy says.
+
+**The environment is declared, never assumed.** `ODOO_SDD_ENVIRONMENT` on the
+target says `dev`, `staging` or `production`. A plan that declares a different
+environment than the target is refused (`environment-mismatch`), an undeclared
+target asks for it (`NEEDS_ENVIRONMENT`), and production additionally needs a
+declared backup reference plus its own approval. High-risk changes are proven in
+staging first.
+
+**Imports go through Odoo's importer, never through a hand-written parser:**
+
+```text
+odoo_import use=prepare file=... model=res.partner   # uploads, with its own approval
+odoo_import use=preview   ...                        # what ODOO read: sheets, headers, sample
+odoo_import use=map       ...                        # one decision per column, no blanks
+odoo_import use=plan      ...                        # becomes an `apply` batch
+odoo_functional operation=approve / apply            # the batch path, unchanged
+```
+
+The version contract is explicit (majors 10–19: `file`/`import_id` + JSONP on the
+old endpoint, `ufile`/`id` + JSON on the new one, `do`/`execute_import` for the
+apply), and a version outside the verified families is **refused** with what to
+investigate instead of guessed. A file that changed after the upload invalidates
+the mapping; a `nextrow` in the answer means the importer stopped mid-file and is
+reported as partial, never as success — and the rows it counted are never
+re-sent. The session cookie stays in `.sdd/session.json` (mode 600) and out of
+every tool result.
+
+> [!NOTE]
+> The functional path needs an instance, and the importer needs a web session:
+> run `odoo_session` once before `odoo_import use=prepare`.
 
 ---
 
@@ -384,8 +481,13 @@ has a way back and a way to prove what happened.
   being shown to the model or persisted to the KB.
 - **Session cookies never reach the model.** `odoo_session` writes the cookie to
   `.sdd/session.json` (chmod 600) and returns only the path.
-- **No install scripts.** The package executes no build scripts; it ships source
-  plus a documented build step.
+- **No install scripts beyond the build.** The only lifecycle scripts are
+  `prepare`/`prepack`, which compile `src/` into the shipped `lib/` and do
+  nothing else — no network, no `postinstall`, no shell. They run `tsc` when it
+  is available and otherwise say so and skip, because a `file:` install has no
+  devDependencies. `prepack` is what guarantees that a published tarball is
+  never missing the entry point its `main` promises (that failure was real: a
+  clean clone packed 39 files and zero of them under `lib/`).
 - **Host requirement declared twice**, following dsh-market discovery
   conventions: `engines.dsh` and lockstep optional peer ranges on
   `@deepseek-ai/{cordis,dsh-tools,schemastery}`. On a host without the `tools`
@@ -591,12 +693,33 @@ settings section.
 ```bash
 npm run typecheck   # tsc --noEmit
 npm run build       # emits lib/ (required: package main is lib/index.js)
-npm test            # server invariants + Cordis host contract + client bundle + README contract
+npm test            # server invariants + Cordis host contract + client bundle + README + functional/import
 npm run test:package  # tarball contents (a file the runtime loads but `files` omits)
 ```
 
 These are exactly the steps [CI](.github/workflows/ci.yml) runs on Linux and
 Windows, so a local `npm run typecheck && npm test` reproduces the pipeline.
+
+`test:package` also **simulates the publish**: it copies the package without
+`lib/` (what a fresh clone has), runs `npm pack` on it and asserts the tarball
+still contains the compiled entry point. That is the check that keeps a released
+version from being installable-but-unloadable.
+
+### Publishing (maintainers)
+
+`lib/` is build output and is gitignored, so the tarball is built by the
+`prepack` hook — never by hand, never from a stale tree:
+
+```bash
+npm login                 # once; then `npm whoami` should answer
+npm publish               # prepack runs `tsc` and packs the result
+npm version patch         # for the NEXT release, not the first one
+npm view dsh-odoo-sdd version   # verify what the registry actually has
+```
+
+The same hooks make a repository install work: `prepare` compiles the sources
+when TypeScript is present (`npm i github:fhidalgodev/dsh-odoo-sdd`), and skips
+with a notice when it is not (a `file:` install has no devDependencies).
 
 </details>
 

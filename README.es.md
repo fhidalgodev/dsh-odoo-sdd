@@ -111,6 +111,11 @@ defecto, y se pueden delegar a un agente proxy humano si elegís el modo autóno
 - 🔁 **Bucle de feedback real.** `odoo_module install` devuelve la salida o el
   traceback del servidor; `odoo_errors` lee `ir.logging`; los fallos se convierten
   en un veredicto FAILED persistido, no en un resumen esperanzado.
+- 🧾 **No sólo módulos.** La misma máquina también corre una spec **funcional**
+  (`mode=functional`): configurar una instancia viva y cargar datos en lotes
+  aprobados por una persona, con el importador propio de Odoo para CSV/Excel, y
+  cerrar con un runbook que alguien puede repetir.
+  → [El camino funcional](#-el-camino-funcional-configurar-e-importar)
 - 🔒 **Las credenciales no son consentimiento.** El primer socket de un proyecto
   necesita una autorización humana explícita atada a `url + db + usuario`
   (`.sdd/grants.json`).
@@ -148,12 +153,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 > cambios del lado cliente (el panel **Odoo SDD** en Ajustes) se cargan desde el
 > paquete instalado.
 
-¿Instalando desde un clon de git? `lib/` es salida de build y **no** se versiona,
-así que compilalo una vez primero:
+¿Instalando desde un clon de git? `lib/` es salida de build y **no** se versiona;
+`npm install` lo compila con el hook `prepare`, y siempre podés pedirlo explícito:
 
 ```bash
 git clone https://github.com/fhidalgodev/dsh-odoo-sdd && cd dsh-odoo-sdd
-npm install          # devDependencies: typescript
+npm install          # devDependencies: typescript, y prepare compila lib/
 npm run host:deps    # peers opcionales, necesarios para compilar (no-save)
 npm run build        # genera lib/ — obligatorio, el main es lib/index.js
 dsh plugin --profile odoo add .
@@ -207,6 +212,16 @@ El agente toma `odoo-sdd-workflow` del catálogo de skills de la sesión y sigue
 protocolo. Si querés ser explícito — o asegurarte de que las instrucciones
 completas se carguen — empezá tu mensaje con `/odoo-sdd-workflow`.
 
+Para trabajo de configuración y datos sobre una instancia viva, pedí eso:
+
+```text
+Configurá empresa, impuestos y plan de cuentas en mi instancia de dev, y después
+importá este clientes.csv — SDD funcional, entorno dev, nada de producción.
+```
+
+Eso selecciona `odoo-functional-sdd` (o `/odoo-functional-sdd` explícito) y el
+modo de spec `functional` que sigue abajo.
+
 ---
 
 ## 🧭 Las cinco fases
@@ -241,6 +256,91 @@ specs/<NNN>-<slug>/
 ├── docs-report.md · security-report.md
 └── handoff.md           # lo escribe sdd_handoff al cerrar la ejecución
 ```
+
+---
+
+## 🧩 El camino funcional (configurar e importar)
+
+No todo trabajo de Odoo es código. Montar una empresa, sus impuestos, sus
+usuarios y sus datos maestros es **configuración y datos**, y pasa sobre una
+instancia viva — donde un clic equivocado no es un test fallido, es un registro
+real. La misma máquina SDD lo cubre con otra fase en el medio y reglas de cierre
+más estrictas.
+
+```mermaid
+graph TD
+    C1["1 CLARIFY<br/>objetivo, instancia, ENTORNO"] --> R2["2 READ_SPEC<br/>spec.md, criterios, fuentes"]
+    R2 -->|APPROVED| A3["3 ARCHITECTURE<br/>proceso to-be, lotes, riesgos"]
+    A3 -->|APPROVED| X4["4 APPLY_CONFIG<br/>descubrimiento + lotes aprobados"]
+    X4 --> V5["5 VERIFY<br/>releer los registros, evidencia por criterio"]
+    V5 -->|PASSED| D9(["runbook.md + handoff.md - DONE"])
+    V5 -->|FAILED| F6["FIX_LOOP"]
+    F6 --> X4
+
+    style X4 fill:#1e1e2e,stroke:#f9e2af,stroke-width:2px,color:#cdd6f4
+```
+
+| | Corrida de desarrollo | Corrida funcional |
+|---|---|---|
+| Se elige en `CLARIFY` | `mode=create` o `mode=bug` | `mode=functional` |
+| Fase del medio | `WRITE_CODE` (código del módulo) | `APPLY_CONFIG` (lotes contra la instancia) |
+| Entregable | módulo + docs OCA | instancia configurada + `functional-runbook.md` |
+| Skill | `odoo-sdd-workflow` | `odoo-functional-sdd` |
+
+**Cómo llega un cambio a la instancia.** Nada se escribe "a ver qué pasa":
+
+1. **Primero el descubrimiento**, con su **propia** aprobación: qué modelos, qué
+   campos, cuántos registros. Leer no es mutar, pero un alcance aprobado es lo que
+   impide que "mirar un poco" se convierta en un cambio.
+2. **Plan**: el diseño se vuelve lotes. Cada uno declara destino y entorno, la
+   versión y capacidades usadas, compañía y contexto, los criterios de aceptación
+   que cubre, sus operaciones ordenadas, la identidad de los registros, las
+   precondiciones, el resultado esperado, los riesgos, la recuperación y los pasos
+   manuales.
+3. **Aprobar**: la persona ve el lote exacto y lo aprueba por la compuerta nativa.
+   El recibo queda atado a los hashes de la spec, el diseño, el plan y el lote —
+   cambiá cualquiera y la aprobación deja de valer.
+4. **Aplicar**: una operación a la vez, reverificando esos hashes, persistiendo el
+   estado de cada operación **antes** de la llamada y **después** del resultado.
+5. **Un resultado desconocido no es un reintento.** Un timeout después de una
+   mutación puede significar que Odoo ya confirmó: la operación queda
+   `indeterminate`, el lote se detiene y la corrida se estaciona hasta que una
+   persona la reconcilie.
+6. **Cerrar con honestidad**: `sdd_phase succeed` exige un `pass` explícito por
+   criterio de aceptación, la revisión de seguridad es obligatoria, y también lo
+   es el **runbook** (quién lo hace, en qué compañía, prerequisitos, la ruta de
+   menú verificada, los pasos con sus etiquetas de campo, el resultado esperado,
+   cómo comprobarlo y cómo deshacerlo) — diga lo que diga la política de
+   documentación.
+
+**El entorno se declara, nunca se asume.** `ODOO_SDD_ENVIRONMENT` en el destino
+dice `dev`, `staging` o `production`. Un plan que declara un entorno distinto al
+del destino se rechaza (`environment-mismatch`), un destino sin declarar lo pide
+(`NEEDS_ENVIRONMENT`), y producción además exige un respaldo declarado y su
+propia aprobación. Los cambios de riesgo alto se prueban primero en staging.
+
+**Las importaciones van por el importador de Odoo, nunca por un parser propio:**
+
+```text
+odoo_import use=prepare file=... model=res.partner   # sube el archivo, con su propia aprobación
+odoo_import use=preview   ...                        # lo que ODOO leyó: hojas, encabezados, muestra
+odoo_import use=map       ...                        # una decisión por columna, sin huecos
+odoo_import use=plan      ...                        # se vuelve un lote `apply`
+odoo_functional operation=approve / apply            # el mismo camino de lotes, sin cambios
+```
+
+El contrato por versión es explícito (mayores 10–19: `file`/`import_id` + JSONP en
+el endpoint viejo, `ufile`/`id` + JSON en el nuevo, `do`/`execute_import` para
+aplicar), y una versión fuera de las familias verificadas se **rechaza** indicando
+qué investigar en vez de adivinar. Un archivo que cambió después de la subida
+invalida el mapeo; un `nextrow` en la respuesta significa que el importador se
+detuvo a mitad del archivo y se reporta como parcial, nunca como éxito — y las
+filas que contó no se reenvían. La cookie de sesión queda en `.sdd/session.json`
+(modo 600) y fuera de todo resultado de tool.
+
+> [!NOTE]
+> El camino funcional necesita una instancia, y el importador necesita sesión web:
+> corré `odoo_session` una vez antes de `odoo_import use=prepare`.
 
 ---
 
@@ -388,8 +488,13 @@ camino de mutación tiene vuelta atrás y forma de probar qué pasó.
   `~/…`) antes de mostrarse al modelo o persistirse en el KB.
 - **Las cookies de sesión nunca llegan al modelo.** `odoo_session` escribe la
   cookie en `.sdd/session.json` (chmod 600) y devuelve solo la ruta.
-- **Sin scripts de instalación.** El paquete no ejecuta scripts de build;
-  distribuye fuente más un paso de compilación documentado.
+- **Sin scripts de instalación más allá del build.** Los únicos hooks de
+  ciclo de vida son `prepare`/`prepack`, que compilan `src/` hacia el `lib/` que
+  se distribuye y no hacen nada más — sin red, sin `postinstall`, sin shell.
+  Corren `tsc` cuando está disponible y, si no, lo dicen y se saltan, porque una
+  instalación `file:` no tiene devDependencies. `prepack` es lo que garantiza que
+  un tarball publicado nunca salga sin el entry point que su `main` promete (el
+  fallo fue real: un clon limpio empaquetó 39 archivos y cero bajo `lib/`).
 - **Requisito de host declarado dos veces**, siguiendo las convenciones de
   descubrimiento de dsh-market: `engines.dsh` y rangos peer opcionales lockstep
   sobre `@deepseek-ai/{cordis,dsh-tools,schemastery}`. Ante un host sin el
@@ -596,12 +701,34 @@ ModuleLoader que aporta la sección **Odoo SDD** en Ajustes.
 ```bash
 npm run typecheck   # tsc --noEmit
 npm run build       # genera lib/ (obligatorio: el main es lib/index.js)
-npm test            # invariantes del servidor + contrato de host Cordis + bundle cliente + contrato de README
+npm test            # invariantes del servidor + contrato de host + bundle cliente + README + funcional/import
 npm run test:package  # contenido del tarball (un archivo que el runtime carga y `files` omite)
 ```
 
 Son exactamente los pasos que corre el [CI](.github/workflows/ci.yml) en Linux y
 Windows, así que `npm run typecheck && npm test` en local reproduce el pipeline.
+
+`test:package` además **simula la publicación**: copia el paquete sin `lib/` (lo
+que tiene un clon recién hecho), corre `npm pack` sobre esa copia y verifica que el
+tarball igual contenga el entry point compilado. Ese es el chequeo que evita que
+una versión publicada sea instalable pero no cargable.
+
+### Publicar (maintainers)
+
+`lib/` es salida de build y está en `.gitignore`, así que el tarball lo arma el
+hook `prepack` — nunca a mano, nunca desde un árbol viejo:
+
+```bash
+npm login                 # una vez; después `npm whoami` debe responder
+npm publish               # prepack corre `tsc` y empaqueta el resultado
+npm version patch         # para la SIGUIENTE release, no para la primera
+npm view dsh-odoo-sdd version   # verificá qué tiene el registro realmente
+```
+
+Los mismos hooks hacen que instalar desde el repositorio funcione: `prepare`
+compila las fuentes cuando TypeScript está presente
+(`npm i github:fhidalgodev/dsh-odoo-sdd`) y se salta con un aviso cuando no lo
+está (una instalación `file:` no tiene devDependencies).
 
 </details>
 

@@ -22,6 +22,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+/** The version the documents must agree with (see the advertised-version check). */
+const manifestVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 
 let failures = 0;
 let checks = 0;
@@ -216,6 +218,15 @@ for (const doc of docs) {
 	for (const asset of ["assets/odoo-sdd.svg", "assets/settings-panel.jpg"]) {
 		check(`${doc.file}: references ${asset} relatively`, doc.text.includes(`src="${asset}"`));
 	}
+	// The pinnable install example names a released version, so it goes stale on
+	// every release. Pinned to the manifest instead of to somebody's memory of
+	// the last bump: the docs cannot advertise a version the package is not.
+	const advertised = [...doc.text.matchAll(/dsh-odoo-sdd@(\d+\.\d+\.\d+)/g)].map((m) => m[1]);
+	check(
+		`${doc.file}: the version it advertises is the packaged one`,
+		advertised.length > 0 && advertised.every((v) => v === manifestVersion),
+		`advertised=${advertised.join(", ")} packaged=${manifestVersion}`,
+	);
 	check(`${doc.file}: no leftover template placeholder`, !/\bTODO\b|\bFIXME\b|<plugin>\/\.env\.example/.test(doc.text.replace("cp <plugin>/.env.example .env", "")));
 	check(
 		`${doc.file}: language link sits on its own line before the author`,

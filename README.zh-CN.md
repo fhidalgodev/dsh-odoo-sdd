@@ -150,12 +150,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.1.1`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.1.2`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.1.1，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.1.2，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]

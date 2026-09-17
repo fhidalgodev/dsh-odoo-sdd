@@ -249,11 +249,16 @@ agent 会从会话的 skill 目录里取出 `odoo-sdd-workflow` 并遵循协议�
 
 在 ARCHITECTURE 阶段，agent 还会**主动询问**那些"早决定很便宜、晚发现很昂贵"的
 事情：form/tree 之外的**额外视图类型**（包括用于描述模型如何被搜索的
-**search 视图** —— 自定义过滤器、收藏夹）以及**报表**（通过
-`ir.actions.report`/QWeb 的 PDF、SQL、CSV/XLSX、外部工具），并在答案就是如此时
-明确声明 "form + tree only" 或 "no reports needed"。这些是**指引性**决定：记录在
-`## Views` / `## Reports` 中，并在 `sdd_phase status` 里作为警告呈现，按设计不
-阻塞 —— 安全模型才是唯一 fail-closed 的内容门禁。
+**search 视图** —— 自定义过滤器、收藏夹）、**报表**（通过
+`ir.actions.report`/QWeb 的 PDF、SQL、CSV/XLSX、外部工具）、**web tours**
+（onboarding、测试，或都不需要 —— 并说明加载它的 asset bundle，因为没有任何
+bundle 加载的 tour 永远不会执行）以及**演示数据**（哪些文件、用途是什么）。每一项
+都要明确回答："form + tree only"、"no reports needed"、"no tours needed"、
+"no demo data"。这些是**指引性**决定：记录在 `## Views` / `## Reports` /
+`## Tours` / `## Demo data` 中，并在 `sdd_phase status` 里作为警告呈现，按设计不
+阻塞 —— 安全模型才是唯一 fail-closed 的内容门禁。各版本的 tour API、执行它的
+`HttpCase` 以及演示数据的陷阱都在
+`skills/odoo-sdd-workflow/references/tours-and-demo.md`。
 
 每个 spec 的产物（全部在磁盘上，可断点续跑）：
 

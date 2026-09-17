@@ -50,6 +50,13 @@ interface Rule {
 	severity: Severity;
 	/** File extensions this rule applies to (empty = all scanned). */
 	exts: string[];
+	/**
+	 * Restrict the rule to certain paths (relative to the module root). Demo
+	 * data earns its own rules: a literal password or an access rule inside
+	 * `demo/` is a different risk from the same line in the module's real
+	 * security model, and only the path tells them apart.
+	 */
+	path?: RegExp;
 	message: string;
 	hint: string;
 	/** True when the line violates the rule. */
@@ -129,6 +136,25 @@ const RULES: Rule[] = [
 		hint: "Remove pdb/breakpoint and stray prints before delivery.",
 		match: (l) => /\b(import\s+pdb|breakpoint\s*\(|pdb\.set_trace\s*\()/.test(l),
 	},
+	{
+		id: "demo-user-password",
+		severity: "WARN",
+		exts: [".xml", ".csv"],
+		path: /(^|\/)demo\//,
+		message: "Demo data sets a user password literal: a known credential in every database where demo is loaded.",
+		hint: "Keep the demo password obvious and documented, or let the administrator set it after the install.",
+		match: (l) => /name=["']password["']/i.test(l) || /["']password["']\s*[,:]/i.test(l),
+	},
+	{
+		id: "demo-access-declared",
+		severity: "WARN",
+		exts: [".xml", ".csv"],
+		path: /(^|\/)demo\//,
+		message: "Demo data declares groups, access lines or record rules: access belongs to the module's security model, not to demo/.",
+		hint: "Move the security model to security/ (always loaded) and leave demo/ for records only.",
+		match: (l) =>
+			/model=["'](res\.groups|ir\.model\.access|ir\.rule)["']/.test(l) || /^\s*(access_|rule_)[A-Za-z0-9_]*\s*,/.test(l),
+	},
 ];
 
 /** Recursively collect scannable files under `dir`, bounded. */
@@ -199,6 +225,7 @@ export function scanModule(moduleDir: string): ScanResult {
 			if (line.trim() === "") continue;
 			for (const rule of RULES) {
 				if (rule.exts.length > 0 && !rule.exts.includes(ext)) continue;
+				if (rule.path !== undefined && !rule.path.test(file.rel)) continue;
 				if (!rule.match(line, ext)) continue;
 				// A justification comment on the SAME or PREVIOUS line clears
 				// the sudo warning (the comment may sit above the call).

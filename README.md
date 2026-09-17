@@ -263,11 +263,16 @@ the `functional` spec mode described below.
 In ARCHITECTURE the agent also **asks** about the things that are cheap to decide
 early and expensive to discover late: **extra view types** beyond form/tree
 (including a **search view** for how a model is searched — custom filters,
-favorites) and **reports** (PDF via `ir.actions.report`/QWeb, SQL, CSV/XLSX, an
-external tool), declaring "form + tree only" or "no reports needed" when that is
-the answer. Those are **guide** decisions: recorded in `## Views` / `## Reports`
-and surfaced as warnings in `sdd_phase status`, non-blocking by design — the
-security model is the only fail-closed content gate.
+favorites), **reports** (PDF via `ir.actions.report`/QWeb, SQL, CSV/XLSX, an
+external tool), **web tours** (onboarding, test, or none — with the asset bundle
+that loads them, because a tour no bundle loads never runs) and **demo data**
+(which files, and what for). Each one is answered explicitly — "form + tree
+only", "no reports needed", "no tours needed", "no demo data". Those are
+**guide** decisions: recorded in `## Views` / `## Reports` / `## Tours` /
+`## Demo data` and surfaced as warnings in `sdd_phase status`, non-blocking by
+design — the security model is the only fail-closed content gate. The
+version-by-version tour API, the `HttpCase` that executes a tour and the demo
+traps live in `skills/odoo-sdd-workflow/references/tours-and-demo.md`.
 
 Per-spec artifacts (all on disk, resumable):
 

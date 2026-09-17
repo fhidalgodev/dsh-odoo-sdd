@@ -262,6 +262,19 @@ Once clarified: `sdd_phase advance next_phase=READ_SPEC`.
      Tours and migration scripts apply. Write "no extra fragments" explicitly
      when none are needed: the gate refuses a heading with only template
      comments, and only the security model gate is evaluated before it.
+   - `## Tours`: which web tours ship (onboarding for the end user, test for CI,
+     both) and the asset bundle that loads each one — `web.assets_tests` for a
+     test tour, `web.assets_backend`/`frontend` for onboarding — plus the
+     `HttpCase` + `start_tour` that executes it. A tour no bundle loads never
+     runs. The registration API is version-specific (14–16 `tour.register`, 17+
+     `registry.category("web_tour.tours")`): the verified matrix, the Python
+     bridge and the traps are in `references/tours-and-demo.md`. If none, write
+     exactly "no tours needed".
+   - `## Demo data`: whether the module ships demo data, in which `demo/` files
+     (declared in the manifest's `"demo"` key) and what for — plus the
+     consequence: the functionality must never depend on demo data, because
+     production databases are created without it. If none, write exactly
+     "no demo data".
    - Security: groups, `ir.model.access.csv`, record rules.
    - Directory layout and exact `__manifest__.py` depends.
    - Localization: if extending a country localization, use the
@@ -270,12 +283,17 @@ Once clarified: `sdd_phase advance next_phase=READ_SPEC`.
    developer with `ask_user_question` about anything the spec left open — do not
    assume. Ask specifically (a) which **extra view types** any model needs
    beyond form/tree — including whether a **`search` view** is needed for custom
-   filters/favorites on how the model is searched — and (b) which **reports**
+   filters/favorites on how the model is searched — (b) which **reports**
    (PDF/SQL/CSV/XLSX/dashboard) are needed and in which medium (Odoo
-   `ir.actions.report` vs external). Record the
+   `ir.actions.report` vs external), (c) whether the module needs a **tour**
+   (onboarding, test, both or none) and whether the instance being verified can
+   actually execute it (`--test-enable` needs shell access; without it a tour is
+   evidence a human runs), and (d) whether it ships **demo data** and for what.
+   Record the
    answer verbatim as `decision` nodes in the KB and mirror it in
    `architecture.md`. If the developer answers "no"/"form+tree only"/"no
-   reports", record that as an explicit decision; if they do not answer, record
+   reports"/"no tours"/"no demo data", record that as an explicit decision; if
+   they do not answer, record
    the assumed default and note it. Answers here are guidance, NOT a gate — the
    only fail-closed blocker for advancing ARCHITECTURE is the security model
    (see the `## Security` content gate).

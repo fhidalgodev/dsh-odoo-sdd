@@ -39,12 +39,24 @@ const MUTATING_METHODS = new Set(["create", "write", "unlink"]);
 /** How an operation is carried out. */
 export type OperationKind = "execute" | "import";
 
+/** What kind of data an import carries: real business data, or a sample. */
+export type ImportDataKind = "real" | "sample";
+
 /** The declaration of an `import` operation (Odoo's own importer). */
 export interface ImportOperationSpec {
 	/** Database id of the temporary `base_import.import` record holding the file. */
 	importId: number;
 	/** Original file name, for the report and the runbook. */
 	fileName: string;
+	/**
+	 * Whether the file carries real business data or a sample/demo dataset.
+	 *
+	 * DECLARED, never guessed: the file name is a hint at most, and the cost of
+	 * being wrong is asymmetric — loading demo rows into a production database is
+	 * not undone by the plugin's journal. An undeclared import in production is
+	 * therefore refused (see `validateBatch`).
+	 */
+	dataKind?: ImportDataKind;
 	/** Column mapping: one decision per column of the file. */
 	columns: unknown[];
 	/** Importer options (headers, separator, encoding…). */
@@ -354,6 +366,51 @@ export function validateBatch(batch: Batch, environment: TargetEnvironment): Pla
 						where: at,
 						message: "this batch APPLIES the import; run a dry run (dryRun: true) first when the file or the mapping is new",
 					});
+				}
+				// Sample data in a real environment. The declaration is the whole
+				// point: the plugin cannot tell a demo file from a customer list by
+				// reading it, and demo rows land in the same tables as real ones.
+				if (spec.dataKind !== undefined && spec.dataKind !== "real" && spec.dataKind !== "sample") {
+					findings.push({
+						severity: "ERROR",
+						where: at,
+						message: `dataKind must be "real" or "sample" (got ${JSON.stringify(spec.dataKind)})`,
+					});
+				}
+				if (environment === "production" && spec.dataKind === undefined) {
+					findings.push({
+						severity: "ERROR",
+						where: at,
+						message:
+							"an import into production must declare `dataKind` (\"real\", or \"sample\" for a demo/test dataset): " +
+							"the plugin cannot tell them apart from the file, and demo rows are not undone by the journal",
+					});
+				}
+				if (spec.dataKind === "sample") {
+					const looksReal = !/demo|sample|example|ejemplo|test|prueba|fixture/i.test(spec.fileName ?? "");
+					if (environment === "production") {
+						findings.push({
+							severity: "ERROR",
+							where: at,
+							message:
+								"sample/demo data cannot be imported into production: load it in dev or staging. " +
+								"If this file really is business data, declare dataKind: \"real\".",
+						});
+					} else if (environment === "staging") {
+						findings.push({
+							severity: "WARN",
+							where: at,
+							message: "this batch loads sample/demo data into staging — confirm nobody will read it as real business data",
+						});
+					} else if (looksReal) {
+						// The name is only a hint: it never decides, it only helps the
+						// operator notice a mislabelled file before it lands.
+						findings.push({
+							severity: "WARN",
+							where: at,
+							message: `"${spec.fileName}" is declared as sample data but its name does not say so — confirm the declaration is right`,
+						});
+					}
 				}
 				const undecided = spec.columns.filter((c) => {
 					const column = c as { field?: unknown; decision?: unknown };

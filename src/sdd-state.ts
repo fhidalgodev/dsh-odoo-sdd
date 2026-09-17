@@ -1015,6 +1015,11 @@ const NO_EXTRA_VIEWS = /(form\s*\+\s*tree|no extra view|solo\s+form|only form)/i
 const REPORT_KEYWORDS =
 	/\b(report|pdf|sql|csv|xlsx|export|qweb|ir\.actions\.report|\breport\b)\b/i;
 const NO_REPORTS = /no reports needed|no report (is )?needed|sin reportes|no requiere reportes/i;
+/** A tour decision can be refused explicitly, in either language. */
+const NO_TOURS = /no tours?( needed| required)?|sin tours|no tours? (are )?needed/i;
+/** The asset bundle is the part that makes a tour actually run. */
+const TOUR_BUNDLE = /assets_tests|assets_backend|assets_frontend|web\.assets/i;
+const NO_DEMO = /no demo( data)?|sin datos demo|no demo data|n\/a/i;
 
 /**
  * Informational, NON-blocking design inventory for ARCHITECTURE. Unlike the
@@ -1056,6 +1061,46 @@ export function designWarnings(specDir: string, mode: PipelineMode | null = null
 		warnings.push(
 			"`## Reports` looks empty — name the report(s) and their medium, or write \"no reports needed\".",
 		);
+	}
+	// Tours and demo data are asked only where they are a design decision: a bug
+	// fix is scoped to a defect, and demanding a tour inventory there would be
+	// noise. Views/Reports keep their existing behaviour in every dev mode.
+	if (mode !== "bug") {
+		const tours = section("Tours");
+		const tourBody = tours.replace(/<!--[\s\S]*?-->/g, "").trim();
+		if (tours.trim() === "") {
+			warnings.push(
+				"`## Tours` is missing — state which web tours ship (onboarding, test, or both), which asset " +
+				"bundle loads each one, and on which versions, or write \"no tours needed\" (see " +
+				"`skills/odoo-sdd-workflow/references/tours-and-demo.md`).",
+			);
+		} else if (tourBody === "") {
+			warnings.push(
+				"`## Tours` looks empty — name the tours and the bundle that loads them " +
+				"(`web.assets_tests` for a test tour, backend/frontend for onboarding), or write \"no tours needed\".",
+			);
+		} else if (!NO_TOURS.test(tourBody) && !TOUR_BUNDLE.test(tourBody)) {
+			// The trap this exists for: a tour file that no bundle loads is dead
+			// code, and nothing else in the pipeline notices.
+			warnings.push(
+				"`## Tours` declares tours but no asset bundle — a tour outside its bundle never runs: name " +
+				"`web.assets_tests` (test) or `web.assets_backend`/`web.assets_frontend` (onboarding), and the " +
+				"`HttpCase` + `start_tour` that executes it.",
+			);
+		}
+		const demo = section("Demo data");
+		const demoBody = demo.replace(/<!--[\s\S]*?-->/g, "").trim();
+		if (demo.trim() === "") {
+			warnings.push(
+				"`## Demo data` is missing — state whether the module ships demo data, in which files, and what " +
+				"it is for, or write \"no demo data\". The functionality must never depend on it: production " +
+				"databases are created without demo.",
+			);
+		} else if (demoBody === "") {
+			warnings.push(
+				"`## Demo data` looks empty — name the files and their purpose, or write \"no demo data\".",
+			);
+		}
 	}
 	return warnings;
 }
@@ -1147,6 +1192,14 @@ export function initSpecDir(specDir: string, mode: PipelineMode | null = null): 
 			"architecture.md",
 			"# Architecture\n\n## Models\n\n<!-- New/inherited models, fields, relations, constraints. -->\n\n" +
 				"## Views\n\n<!-- XML IDs to inherit, form/tree changes, menus, actions. -->\n\n" +
+				"## Tours\n\n<!-- Onboarding and/or test web tours, each one with the asset bundle that\n" +
+				"     loads it (web.assets_tests for a test tour, backend/frontend for onboarding) and\n" +
+				"     the HttpCase + start_tour that executes it — or \"no tours needed\". A tour that no\n" +
+				"     bundle loads never runs. See\n" +
+				"     skills/odoo-sdd-workflow/references/tours-and-demo.md for the per-version API. -->\n\n" +
+				"## Demo data\n\n<!-- Files under demo/ declared in the manifest's \"demo\" key and what they\n" +
+				"     are for (fixtures, demonstration) — or \"no demo data\". The functionality must\n" +
+				"     never depend on it: production databases are created without demo. -->\n\n" +
 				"## Security\n\n<!-- Groups, ir.model.access.csv, record rules. -->\n\n" +
 				"## Manifest\n\n<!-- Directory layout and exact depends + data. -->\n\n" +
 				"## Documentation\n\n<!-- Language (default English unless the project says otherwise), the OCA\n" +

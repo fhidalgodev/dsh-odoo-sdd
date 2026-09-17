@@ -51,6 +51,8 @@ console.log("== design inventory (guide, non-blocking) ==");
 		join(designDir, "architecture.md"),
 		"# Architecture\n\n## Models\n\nA model.\n\n" +
 			"## Views\n\nForm + tree only (no extra view types).\n\n" +
+			"## Tours\n\nNo tours needed.\n\n" +
+			"## Demo data\n\nNo demo data.\n\n" +
 			"## Security\n\nbase.group_user; ir.model.access.csv read/write/create/unlink; no record rules needed.\n\n" +
 			"## Manifest\n\nmodule_a\n\n" +
 			"## Reports\n\nNo reports needed.\n",
@@ -62,6 +64,8 @@ console.log("== design inventory (guide, non-blocking) ==");
 		join(designDir, "architecture.md"),
 		"# Architecture\n\n## Models\n\nA model.\n\n" +
 			"## Views\n\nkanban for the kanban board with grouping by stage.\n\n" +
+			"## Tours\n\nNo tours needed.\n\n" +
+			"## Demo data\n\nNo demo data.\n\n" +
 			"## Security\n\nbase.group_user; ir.model.access.csv read/write/create/unlink; no record rules needed.\n\n" +
 			"## Manifest\n\nmodule_a\n\n" +
 			"## Reports\n\nNo reports needed.\n",
@@ -73,12 +77,62 @@ console.log("== design inventory (guide, non-blocking) ==");
 		join(designDir, "architecture.md"),
 		"# Architecture\n\n## Models\n\nA model.\n\n" +
 			"## Views\n\nsearch view with a name filter and group-by on stage.\n\n" +
+			"## Tours\n\nNo tours needed.\n\n" +
+			"## Demo data\n\nNo demo data.\n\n" +
 			"## Security\n\nbase.group_user; ir.model.access.csv read/write/create/unlink; no record rules needed.\n\n" +
 			"## Manifest\n\nmodule_a\n\n" +
 			"## Reports\n\nNo reports needed.\n",
 	);
 	warns = sdd.designWarnings(designDir);
 	check("search-view declaration clears the extra-view-type warning", warns.length === 0);
+
+	// ---- tours and demo data: asked where they are a design decision, silent
+	// where they are not. The skeleton carries both sections with only template
+	// comments, so the nudge has to fire on the comment-stripped body.
+	const skeleton = join(dir, "specs", "003-tours");
+	sdd.initSpecDir(skeleton);
+	const skelWarns = sdd.designWarnings(skeleton, "create");
+	check("skeleton architecture.md asks for the tours decision", skelWarns.some((w) => /`## Tours`/.test(w)));
+	check("skeleton architecture.md asks for the demo-data decision", skelWarns.some((w) => /`## Demo data`/.test(w)));
+
+	// A declared tour with no asset bundle is the trap this warning exists for:
+	// the file is dead code and nothing else notices.
+	writeFileSync(
+		join(designDir, "architecture.md"),
+		"# Architecture\n\n## Models\n\nA model.\n\n" +
+			"## Views\n\nForm + tree only (no extra view types).\n\n" +
+			"## Tours\n\nA test tour that creates a sale order.\n\n" +
+			"## Demo data\n\nNo demo data.\n\n" +
+			"## Security\n\nbase.group_user; ir.model.access.csv read/write/create/unlink; no record rules needed.\n\n" +
+			"## Manifest\n\nmodule_a\n\n" +
+			"## Reports\n\nNo reports needed.\n",
+	);
+	warns = sdd.designWarnings(designDir, "create");
+	check("a tour without an asset bundle is warned about", warns.some((w) => /asset bundle/.test(w)));
+	check("a declared demo decision silences the demo warning", !warns.some((w) => /`## Demo data`/.test(w)));
+
+	// Naming the bundle is what makes the tour run.
+	writeFileSync(
+		join(designDir, "architecture.md"),
+		"# Architecture\n\n## Models\n\nA model.\n\n" +
+			"## Views\n\nForm + tree only (no extra view types).\n\n" +
+			"## Tours\n\nTest tour loaded by web.assets_tests and run by HttpCase.start_tour.\n\n" +
+			"## Demo data\n\nNo demo data.\n\n" +
+			"## Security\n\nbase.group_user; ir.model.access.csv read/write/create/unlink; no record rules needed.\n\n" +
+			"## Manifest\n\nmodule_a\n\n" +
+			"## Reports\n\nNo reports needed.\n",
+	);
+	check("a tour with its bundle produces no design warnings", sdd.designWarnings(designDir, "create").length === 0);
+
+	// A bug fix is scoped to the defect: the two new inventories stay quiet there,
+	// while the pre-existing view/report inventory keeps its behaviour.
+	const bugWarns = sdd.designWarnings(skeleton, "bug");
+	check("tours/demo are not asked in bug mode", !bugWarns.some((w) => /`## Tours`|`## Demo data`/.test(w)));
+	check("views/reports keep their warning in bug mode", bugWarns.some((w) => /Reports/i.test(w)));
+	check(
+		"tours/demo are not asked for a functional spec",
+		sdd.designWarnings(join(dir, "specs", "001-demo"), "functional").every((w) => !/`## Tours`|`## Demo data`/.test(w)),
+	);
 }
 
 let st = sdd.loadState(specDir);
@@ -823,6 +877,52 @@ mkdirSync(modBroken, { recursive: true });
 writeFileSync(join(modBroken, "__manifest__.py"), "{'data':['views/gone.xml']}", { mode: 0o600 });
 v = await validateD.execute({ module_dir: modBroken });
 check("odoo_validate flags declared-but-missing XML", v.valid === false && v.findings.some((f) => f.severity === "ERROR"));
+
+// --- odoo_validate: demo data, tours and the mechanical OCA XML rules ---
+// A demo file declared but absent is an ERROR, exactly like a missing view: the
+// install fails on the instance, so it must fail here first.
+const modDemo = join(dir, "mod_demo");
+mkdirSync(join(modDemo, "demo"), { recursive: true });
+mkdirSync(join(modDemo, "static", "tests", "tours"), { recursive: true });
+writeFileSync(join(modDemo, "__manifest__.py"), "{'name':'t','depends':['base'],'data':[],'demo':['demo/missing.xml']}", { mode: 0o600 });
+writeFileSync(join(modDemo, "demo", "orphan.xml"), '<odoo><record id="orphan" model="res.partner"/></odoo>', { mode: 0o600 });
+writeFileSync(join(modDemo, "static", "tests", "tours", "t.js"), 'registry.category("web_tour.tours").add("t", {});', { mode: 0o600 });
+let dv = await validateD.execute({ module_dir: modDemo });
+check("odoo_validate flags a declared-but-missing demo file", dv.valid === false && dv.findings.some((f) => f.severity === "ERROR" && /demo file not found/i.test(f.message)));
+check("odoo_validate warns about a demo file nothing declares", dv.findings.some((f) => /not declared in the manifest's "demo" key/.test(f.message)));
+check("odoo_validate warns about a tour that no bundle loads", dv.findings.some((f) => /assets_tests/.test(f.message)));
+
+// The same module corrected: bundle declared, demo declared, OCA order respected.
+const modClean = join(dir, "mod_clean");
+mkdirSync(join(modClean, "demo"), { recursive: true });
+mkdirSync(join(modClean, "static", "tests", "tours"), { recursive: true });
+writeFileSync(
+	join(modClean, "__manifest__.py"),
+	"{'name':'t','depends':['base'],'assets':{'web.assets_tests':['static/tests/tours/t.js']},'demo':['demo/a.xml']}",
+	{ mode: 0o600 },
+);
+writeFileSync(
+	join(modClean, "demo", "a.xml"),
+	'<odoo>\n  <record id="partner_demo" model="res.partner">\n    <field name="name" eval="\'x\'"/>\n  </record>\n</odoo>',
+	{ mode: 0o600 },
+);
+const cv = await validateD.execute({ module_dir: modClean });
+check("a bundled tour and a declared demo file produce no findings", cv.findings.length === 0, JSON.stringify(cv.findings));
+
+// Each mechanical OCA rule, on its own violation.
+const modOca = join(dir, "mod_oca");
+mkdirSync(join(modOca, "demo"), { recursive: true });
+writeFileSync(join(modOca, "__manifest__.py"), "{'name':'t','depends':['base'],'demo':['demo/bad.xml']}", { mode: 0o600 });
+writeFileSync(
+	join(modOca, "demo", "bad.xml"),
+	'<odoo>\n  <record model="res.partner" id="mod_oca.p1"/>\n  <record id="p2" model="res.partner">\n    <field eval="1" name="x"/>\n  </record>\n</odoo>',
+	{ mode: 0o600 },
+);
+const ov = await validateD.execute({ module_dir: modOca });
+check("OCA: `model` before `id` is warned", ov.findings.some((f) => /`model` before `id`/.test(f.message)));
+check("OCA: an external id repeating the module name is warned", ov.findings.some((f) => /repeats this module's own name/.test(f.message)));
+check("OCA: `eval` before `name` is warned", ov.findings.some((f) => /`eval` before `name`/.test(f.message)));
+check("OCA warnings never turn a module invalid", ov.valid === true);
 
 // --- odoo_execute fail-closed (no instance needed for the deny path) ---
 let ex = await executeD.execute({ model: "sale.order", method: "unlink" });
@@ -1781,6 +1881,30 @@ check("clean fixture scans clean", sec.scanModule(cleanMod).clean === true);
 // A non-existent path must be an ERROR, never a silent "clean" (P1.3).
 const missingScan = sec.scanModule(join(dir, "does-not-exist-at-all"));
 check("scan of a missing directory is NOT clean", missingScan.clean === false);
+
+// ---- demo data rules are PATH-aware -------------------------------------
+// A literal password or an access declaration inside demo/ is a different risk
+// from the same line in the module's real security model, so the rules only fire
+// under demo/. The fixture puts both spellings side by side: the security/ copy
+// must stay silent.
+const demoRisk = join(dir, "mod_demorisk");
+mkdirSync(join(demoRisk, "demo"), { recursive: true });
+mkdirSync(join(demoRisk, "security"), { recursive: true });
+writeFileSync(join(demoRisk, "__manifest__.py"), "{'name':'d','depends':['base']}", { mode: 0o600 });
+writeFileSync(
+	join(demoRisk, "demo", "users.xml"),
+	'<odoo>\n  <record id="u1" model="res.users">\n    <field name="password">demo1234</field>\n  </record>\n  <record id="g1" model="res.groups"/>\n</odoo>',
+	{ mode: 0o600 },
+);
+writeFileSync(join(demoRisk, "security", "groups.xml"), '<odoo><record id="g2" model="res.groups"/></odoo>', { mode: 0o600 });
+const demoScan = sec.scanModule(demoRisk);
+check("demo data with a literal password is flagged", demoScan.findings.some((f) => f.rule === "demo-user-password"));
+check("demo data declaring access is flagged", demoScan.findings.some((f) => f.rule === "demo-access-declared"));
+check(
+	"the same access line outside demo/ is not flagged by the demo rule",
+	!demoScan.findings.some((f) => f.rule === "demo-access-declared" && f.file.startsWith("security/")),
+);
+check("demo findings are WARN, never a blocked verdict", demoScan.findings.filter((f) => f.rule.startsWith("demo-")).every((f) => f.severity === "WARN"));
 check(
 	"scan of a missing directory reports a path-not-found ERROR",
 	missingScan.findings.some((f) => f.rule === "path-not-found" && f.severity === "ERROR"),

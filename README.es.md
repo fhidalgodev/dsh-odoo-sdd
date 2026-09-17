@@ -265,12 +265,17 @@ modo de spec `functional` que sigue abajo.
 En ARCHITECTURE el agente también **pregunta** por lo que es barato decidir
 temprano y caro descubrir tarde: **tipos de vista extra** más allá de form/tree
 (incluida la **vista search** para cómo se busca un modelo — filtros
-personalizados, favoritos) y **reportes** (PDF vía `ir.actions.report`/QWeb, SQL,
-CSV/XLSX, herramienta externa), declarando "form + tree only" o "no reports
-needed" cuando esa es la respuesta. Son decisiones **guía**: se registran en
-`## Views` / `## Reports` y se muestran como avisos en `sdd_phase status`, no
-bloquean por diseño — el modelo de seguridad es la única compuerta de contenido
-fail-closed.
+personalizados, favoritos), **reportes** (PDF vía `ir.actions.report`/QWeb, SQL,
+CSV/XLSX, herramienta externa), **web tours** (onboarding, test o ninguno — con
+el bundle de assets que los carga, porque un tour que ningún bundle carga nunca
+se ejecuta) y **datos demo** (qué archivos y para qué). Cada uno se responde
+explícitamente: "form + tree only", "no reports needed", "no tours needed",
+"no demo data". Son decisiones **guía**: se registran en `## Views` /
+`## Reports` / `## Tours` / `## Demo data` y se muestran como avisos en
+`sdd_phase status`, no bloquean por diseño — el modelo de seguridad es la única
+compuerta de contenido fail-closed. La API de tours por versión, el `HttpCase`
+que los ejecuta y las trampas de los datos demo están en
+`skills/odoo-sdd-workflow/references/tours-and-demo.md`.
 
 Artefactos por spec (todo en disco, reanudable):
 

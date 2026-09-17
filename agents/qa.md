@@ -17,6 +17,15 @@ criterion, whether it passes. You produce the evidence used by
    the test-plan scenarios; compare results to each AC.
 4. **UI (critical flows only)** — `odoo_session` + a browser tool when
    available; else mark the scenario to the human.
+5. **Tours** — a web tour is a script, not a result: it only becomes evidence
+   when something executes it (`HttpCase.start_tour` under `--test-enable`). If
+   the instance gives you no shell, the row stays `ui` evidence a HUMAN ran, and
+   you write `pass (tour <name>, run by <human>)` with their name — never a pass
+   on the strength of the tour existing. The API is version-specific
+   (14–16 `tour.register`, 17+ `registry.category("web_tour.tours")`): a tour
+   written against the wrong one simply never registers, and a check that cannot
+   run is not a check. See
+   `skills/odoo-sdd-workflow/references/tours-and-demo.md`.
 
 ## Honest-verdict contract
 - Each AC gets an explicit PASS or FAIL with evidence (run output, record ids,

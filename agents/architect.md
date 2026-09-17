@@ -42,6 +42,20 @@ acceptance criterion.
   filter) — it is the view that drives how users search the model. If a model
   needs only form/tree, say so explicitly:
   "form + tree only (no extra view types)". Menus and actions belong here too.
+- `## Tours` — which web tours ship, if any: an **onboarding** tour for the end
+  user, a **test** tour for CI, both, or none. For each one name the asset bundle
+  that loads it (`web.assets_tests` for a test tour, `web.assets_backend` /
+  `web.assets_frontend` for onboarding) and the `HttpCase` + `start_tour` that
+  executes it — a tour that no bundle loads is dead code and nothing else will
+  notice. The registration API is version-specific (14–16 `tour.register`, 17+
+  `registry.category("web_tour.tours")`): see
+  `skills/odoo-sdd-workflow/references/tours-and-demo.md`. If none, write exactly:
+  "no tours needed".
+- `## Demo data` — whether the module ships demo data, in which files under
+  `demo/` (declared in the manifest's `"demo"` key), and what it is for (test
+  fixtures, demonstration/training). State the consequence explicitly: the
+  **functionality must never depend on demo data**, because a production database
+  is created without it. If none, write exactly: "no demo data".
 - `## Security` — groups, `ir.model.access.csv`, record rules.
 - `## Manifest` — directory layout and exact `__manifest__.py` depends + data.
 - `## Reports` (fill when any) — enumerate every report the module must deliver:
@@ -65,6 +79,16 @@ about anything ambiguous the spec left open — **do not assume**:
 - **Reports**: does the business need any report (PDF, SQL/raw query, CSV/XLSX
   export, dashboard)? What data, what output, and is it delivered in Odoo
   (`ir.actions.report`, QWeb template) or by an external tool/process?
+- **Tours**: does the module need an **onboarding** tour (guides the end user
+  through the new flow on the real instance) or a **test** tour (runs in CI), or
+  both? Which flow should it walk, and does the instance you will verify on have
+  a way to execute it (`--test-enable` needs shell access; without it a tour is
+  evidence a human runs, not an automatic check)? Do not propose a tour for a
+  flow the tests cannot reach.
+- **Demo data**: should the module ship demo data — for test fixtures, for
+  demonstration and training, or not at all? Remember the rule you must state:
+  the functionality cannot depend on it, because production databases are created
+  without demo.
 These are **guide** questions, not hard gates: if the developer answers "no" /
 "form + tree only" / "no reports", record that decision verbatim in the KB and
 write it into `architecture.md` clearly. If they do not answer, record the

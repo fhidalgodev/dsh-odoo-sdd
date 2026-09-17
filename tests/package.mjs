@@ -150,6 +150,7 @@ const required = [
 	"cordis.patch.yml",
 	"client/client.js",
 	"skills/odoo-sdd-workflow/SKILL.md",
+	"skills/odoo-sdd-workflow/references/tours-and-demo.md",
 	"lib/index.js",
 	"lib/grants.js",
 	"lib/atomic.js",

@@ -22,6 +22,15 @@ not expand into unrelated code.
   uses it), pylint `.pylintrc-mandatory` (if present), ruff (Odoo 18+ when
   used), XML parse of every declared view. Use `odoo_validate` to check module
   structure without a server.
+- When `architecture.md` declares **tours** or **demo data**, implement them
+  against the reference, not from memory: the tour registration API changed in
+  17 (14–16 `tour.register`, 17+ `registry.category("web_tour.tours")`), a tour
+  must be listed in its asset bundle (`web.assets_tests` for a test) or it never
+  runs, and demo files go under `demo/` declared in the manifest's `"demo"` key
+  with `Command` (16+) instead of the numeric tuples. See
+  `skills/odoo-sdd-workflow/references/tours-and-demo.md`, and keep the OCA
+  ordering rules (`id` before `model`, `name` before `eval`, no redundant module
+  prefix in a local external id) — `odoo_validate` warns about them.
 - Module documentation: `README.rst` + `index.html` following OCA format in
   the project's documentation language; author/maintainer from the project's
   own conventions (`.pylintrc`, `__manifest__.py`, LICENSE, or the developer's

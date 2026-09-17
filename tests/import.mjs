@@ -272,6 +272,34 @@ console.log("== the session stays private ==");
 		check("an import cannot live in a discovery batch", fnMod.validateBatch(inDiscovery, "dev").some((f) => f.severity === "ERROR" && /discovery/.test(f.message)));
 		const noRecovery = { ...batch, operations: [{ ...batch.operations[0], recovery: undefined }] };
 		check("an import without recovery is rejected", fnMod.validateBatch(noRecovery, "dev").some((f) => f.severity === "ERROR" && /recovered/.test(f.message)));
+
+		// ---- sample data is DECLARED, never guessed -------------------------
+		// The plugin cannot tell a demo file from a customer list by reading it,
+		// and the asymmetry decides the rule: demo rows land in the same tables as
+		// real ones, and the journal does not undo a wrong dataset.
+		const withKind = (kind) => ({
+			...batch,
+			operations: [
+				{
+					...batch.operations[0],
+					import: { ...batch.operations[0].import, dataKind: kind },
+				},
+			],
+		});
+		const kindErrors = (b, env) => fnMod.validateBatch(b, env).filter((f) => f.severity === "ERROR" && /dataKind|sample/i.test(f.message));
+		const sampleWarning = (b, env) => fnMod.validateBatch(b, env).some((f) => f.severity === "WARN" && /sample/i.test(f.message));
+		const undeclared = { ...batch, operations: [{ ...batch.operations[0], import: { ...batch.operations[0].import } }] };
+		delete undeclared.operations[0].import.dataKind;
+
+		check("an undeclared import into production is refused", kindErrors(undeclared, "production").length === 1);
+		check("an undeclared import in dev is not noise", kindErrors(undeclared, "dev").length === 0);
+		check("real data in production passes", kindErrors(withKind("real"), "production").length === 0);
+		check("sample data in production is refused", kindErrors(withKind("sample"), "production").length === 1);
+		check(
+			"sample data in staging is a confirmation, not a block",
+			kindErrors(withKind("sample"), "staging").length === 0 && sampleWarning(withKind("sample"), "staging"),
+		);
+		check("an invented dataKind is rejected", kindErrors(withKind("fixture"), "dev").length === 1);
 	} finally {
 		globalThis.fetch = realFetch;
 	}

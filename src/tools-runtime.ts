@@ -8,7 +8,7 @@
  * @module dsh-odoo-sdd/tools-runtime
  */
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, lstatSync } from "node:fs";
 import { basename, join } from "node:path";
 import { resolveModuleDir } from "./paths.js";
 
@@ -397,22 +397,157 @@ export function registerRuntimeTools(
 			}
 
 			// ---- declared data files exist and parse -------------------------
-			const dataMatch = /'data'\s*:\s*\[([^\]]*)\]/.exec(manifestText);
-			const declaredXml: string[] = [];
-			if (dataMatch && dataMatch[1]!.trim() !== "") {
-				for (const tok of dataMatch[1]!.split(",")) {
+			/**
+			 * A declared file list (`data` or `demo`) must point at files that
+			 * exist and look like Odoo XML. `label` says which key declared it, so
+			 * a missing demo file does not read as a missing view.
+			 */
+			const checkDeclaredFiles = (key: string, label: string): string[] => {
+				const match = new RegExp(`['"]${key}['"]\\s*:\\s*\\[([^\\]]*)\\]`).exec(manifestText);
+				const found: string[] = [];
+				if (!match || match[1]!.trim() === "") return found;
+				for (const tok of match[1]!.split(",")) {
 					const rel = tok.replace(/['"\s]/g, "").trim();
-					if (rel === "" || !rel.endsWith(".xml")) continue;
-					const xmlPath = join(moduleDir, rel);
-					if (!existsSync(xmlPath)) {
-						findings.push({ severity: "ERROR", file: rel, message: "Declared data XML not found." });
+					if (rel === "") continue;
+					const filePath = join(moduleDir, rel);
+					if (!existsSync(filePath)) {
+						findings.push({
+							severity: "ERROR",
+							file: rel,
+							message: `Declared ${label} file not found.`,
+						});
 						continue;
 					}
-					declaredXml.push(rel);
-					const xmlText = readFileSync(xmlPath, "utf8");
-					if (!/\s*<(openerp|odoo|record)\b/.test(xmlText)) {
-						findings.push({ severity: "WARN", file: rel, message: "XML root not recognized." });
+					if (!rel.endsWith(".xml")) continue;
+					found.push(rel);
+					let xmlText = "";
+					try {
+						xmlText = readFileSync(filePath, "utf8");
+					} catch {
+						continue;
 					}
+					if (!/\s*<(openerp|odoo|record)\b/.test(xmlText)) {
+						findings.push({ severity: "WARN", file: rel, message: `XML root not recognized (declared as ${label}).` });
+					}
+					ocaXmlRules(rel, xmlText);
+				}
+				return found;
+			};
+			/**
+			 * The three OCA conventions that are mechanically checkable. They are
+			 * WARN: a reviewer can accept an exception, but a silent violation is
+			 * what makes a data file unreadable six months later. Both ordering
+			 * rules compare POSITIONS inside the tag — an attribute that is present
+			 * but late is exactly the case they exist for.
+			 */
+			const ocaXmlRules = (rel: string, xml: string): void => {
+				const lateRecordId = [...xml.matchAll(/<record\b[^>]*>/g)].some((m) => {
+					const tag = m[0];
+					const modelAt = tag.indexOf("model=");
+					if (modelAt === -1) return false;
+					const idAt = tag.indexOf("id=");
+					return idAt === -1 || idAt > modelAt;
+				});
+				if (lateRecordId) {
+					findings.push({
+						severity: "WARN",
+						file: rel,
+						message: "OCA: a <record> declares `model` before `id` — write `id` first so the record is identifiable at a glance.",
+					});
+				}
+				const lateFieldName = [...xml.matchAll(/<field\b[^>]*>/g)].some((m) => {
+					const tag = m[0];
+					const evalAt = tag.indexOf("eval=");
+					if (evalAt === -1) return false;
+					const nameAt = tag.indexOf("name=");
+					return nameAt === -1 || nameAt > evalAt;
+				});
+				if (lateFieldName) {
+					findings.push({
+						severity: "WARN",
+						file: rel,
+						message: "OCA: a <field> declares `eval` before `name` — write `name` first.",
+					});
+				}
+				// Inside its own module, `<record id="my_module.x">` is redundant: the
+				// module part is derived from the file's location.
+				const prefix = `${moduleName}.`;
+				for (const m of xml.matchAll(/<record[^>]*\bid=["']([^"']+)["']/g)) {
+					const id = m[1]!;
+					if (id.startsWith(prefix)) {
+						findings.push({
+							severity: "WARN",
+							file: rel,
+							message: `OCA: external id "${id}" repeats this module's own name — write id="${id.slice(prefix.length)}".`,
+						});
+						break;
+					}
+				}
+			};
+			const declaredXml: string[] = checkDeclaredFiles("data", "data");
+			const declaredDemo = checkDeclaredFiles("demo", "demo");
+
+			// ---- demo data: declared, or an orphan nobody loads ---------------
+			const demoDir = join(moduleDir, "demo");
+			if (existsSync(demoDir)) {
+				let demoFiles: string[] = [];
+				try {
+					demoFiles = readdirSync(demoDir).filter((f) => f.endsWith(".xml"));
+				} catch {
+					demoFiles = [];
+				}
+				const declaredBare = new Set(declaredDemo.map((rel) => rel.replace(/^demo\//, "")));
+				const orphans = demoFiles.filter((f) => !declaredBare.has(f));
+				if (orphans.length > 0) {
+					findings.push({
+						severity: "WARN",
+						file: `demo/${orphans[0]!}`,
+						message:
+							`${orphans.length} file(s) under demo/ are not declared in the manifest's "demo" key ` +
+							`(${orphans.slice(0, 3).join(", ")}) — nothing loads them.`,
+					});
+				}
+			}
+
+			// ---- a tour that no asset bundle loads never runs -----------------
+			const tourFiles: string[] = [];
+			const collectTours = (rel: string): void => {
+				const abs = join(moduleDir, rel);
+				if (!existsSync(abs)) return;
+				let stack = [abs];
+				while (stack.length > 0) {
+					const current = stack.pop()!;
+					let entries: string[] = [];
+					try {
+						entries = readdirSync(current);
+					} catch {
+						continue;
+					}
+					for (const entry of entries) {
+						const child = join(current, entry);
+						let isDir = false;
+						try {
+							isDir = lstatSync(child).isDirectory();
+						} catch {
+							continue;
+						}
+						if (isDir) stack.push(child);
+						else if (entry.endsWith(".js")) tourFiles.push(child.slice(moduleDir.length + 1));
+					}
+				}
+			};
+			collectTours(join("static", "src"));
+			collectTours(join("static", "tests"));
+			if (tourFiles.length > 0) {
+				const bundled = /assets_tests/.test(manifestText) || /"assets"\s*:/.test(manifestText) || /'assets'\s*:/.test(manifestText);
+				if (!bundled) {
+					findings.push({
+						severity: "WARN",
+						file: tourFiles[0]!,
+						message:
+							`${tourFiles.length} JS file(s) under static/ (e.g. ${tourFiles[0]}) but the manifest declares no ` +
+							'asset bundle — a tour outside "web.assets_tests" is never loaded by the test runner.',
+					});
 				}
 			}
 

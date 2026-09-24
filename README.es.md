@@ -159,12 +159,12 @@ bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
 
 - **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
 - Acepta cualquier spec de pnpm, así que podés fijar una versión:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.1.2`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.1.3`.
 
 ¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.1.2, publicada con attestation de provenance
+npm install dsh-odoo-sdd        # 0.1.3, publicada con attestation de provenance
 ```
 
 > [!IMPORTANT]

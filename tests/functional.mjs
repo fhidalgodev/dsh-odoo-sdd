@@ -50,6 +50,10 @@ mkdirSync(join(proj, ".sdd"), { recursive: true });
 let environment = "dev";
 let approveOutcome = "allowed-once";
 let rpcMode = "ok";
+/** Per-state answers for search_count, so a postcondition can be exercised. */
+let countByState = {};
+/** Business actions the operator allowed for this run. */
+let methodAllowlist = [];
 const calls = [];
 const grants = new Map();
 // The REAL grants module is used for the round-trip tests below: an in-memory
@@ -58,11 +62,17 @@ const grantsMod = await import(new URL("grants.js", libDir).href);
 const journaled = [];
 
 /** One recorded call as the executor sees the RPC result. */
-function respond(model, method) {
+function respond(model, method, args) {
 	if (rpcMode === "transport-fail" && method !== "read" && method !== "search_count" && method !== "fields_get") {
 		return { ok: false, error: "Request failed: socket hang up", errorKind: "transport" };
 	}
-	if (method === "search_count") return { ok: true, value: 42 };
+	if (method === "search_count") {
+		// A declared per-state answer lets a test exercise the postcondition: the
+		// real instance would answer differently once the state changed.
+		const state = /"state"\s*,\s*"="\s*,\s*"([a-z_]+)"/.exec(JSON.stringify(args?.[0] ?? []));
+		if (state !== null && countByState[state[1]] !== undefined) return { ok: true, value: countByState[state[1]] };
+		return { ok: true, value: 42 };
+	}
 	if (method === "create") return { ok: true, value: 501 };
 	if (method === "read") return { ok: true, value: [{ id: 7, name: "before" }] };
 	return { ok: true, value: true };
@@ -71,7 +81,7 @@ function respond(model, method) {
 const client = {
 	async executeKw(model, method, args, kwargs) {
 		calls.push({ model, method, args, kwargs });
-		return respond(model, method);
+		return respond(model, method, args);
 	},
 };
 
@@ -87,6 +97,7 @@ registerFunctionalTool(ctx, {
 		...(environment === undefined ? {} : { environment }),
 	}),
 	approve: async () => approveOutcome,
+	methodAllowlist: () => methodAllowlist,
 	hashes: (specId) => {
 		const dir = join(proj, "specs", specId);
 		const read = (name) => {
@@ -159,6 +170,31 @@ console.log("== plan: validation is fail-closed ==");
 {
 	const plan = await fn.execute({ operation: "plan", spec_id: specId, environment: "dev", batch: writableBatch() });
 	check("a well-formed batch is stored", plan.ok === true && plan.status === "planned", plan.detail);
+	// A mutation that cannot show the state it produced is the one that lies
+	// later: it is a WARN (existing plans keep running), never silent.
+	check(
+		"a mutation without a postcondition is warned about, not blocked",
+		(plan.findings ?? []).some((f) => f.severity === "WARN" && /no postcondition declared/.test(f.message)),
+		JSON.stringify((plan.findings ?? []).map((f) => f.message.slice(0, 60))),
+	);
+	const withPost = await fn.execute({
+		operation: "plan",
+		spec_id: specId,
+		environment: "dev",
+		batch: writableBatch({
+			id: "b-post",
+			operations: [
+				{
+					...writableBatch().operations[0],
+					postcondition: { domain: [["id", "=", 7], ["name", "=", "after"]], expect: "count", count: 1 },
+				},
+			],
+		}),
+	});
+	check(
+		"declaring the postcondition clears the warning",
+		withPost.ok === true && !(withPost.findings ?? []).some((f) => /no postcondition declared/.test(f.message)),
+	);
 	check("the plan landed under .sdd/functional", existsSync(join(functionalDir(proj, specId), "plan.json")));
 	check("nothing was sent to the instance while planning", calls.length === 0);
 
@@ -453,6 +489,128 @@ console.log("== audit: every functional operation leaves a trace ==");
 	check("an indeterminate operation is audited as such", audited.some((a) => a.state === "indeterminate" && typeof a.reason === "string"));
 	rpcMode = "ok";
 	check("the audit kind exists for functional entries", typeof auditMod.recordAudit === "function");
+}
+
+
+console.log("== business actions: allowlisted, guarded, and PROVEN ==");
+{
+	// A business action is not CRUD: its effect cannot be replayed from a
+	// pre-image, so it runs only with the exact pair allowlisted and only when it
+	// can prove the state it produced.
+	// `undefined` in an override REMOVES the key: the host validates tool
+	// arguments as lossless JSON, so an explicit undefined is refused before the
+	// plugin ever sees it.
+	const methodOp = (over = {}) => {
+		const op = {
+			kind: "method",
+			intent: "run the action on 3 records",
+			model: "example.model",
+			method: "action_run",
+			args: [[11, 12, 13]],
+			identity: [{ field: "id", value: 11 }],
+			precondition: { domain: [["id", "in", [11, 12, 13]], ["state", "=", "draft"]], expect: "count", count: 3 },
+			postcondition: { domain: [["id", "in", [11, 12, 13]], ["state", "=", "assigned"]], expect: "count", count: 3 },
+			recovery: { kind: "none", note: "confirming moves is not undone by the plugin" },
+		};
+		for (const [key, value] of Object.entries(over)) {
+			if (value === undefined) delete op[key];
+			else op[key] = value;
+		}
+		return op;
+	};
+	const methodBatch = (over = {}) => ({ ...writableBatch(), id: "b-method", operations: [methodOp(over)] });
+
+	// Denied without the allowlist, even with everything else declared.
+	methodAllowlist = [];
+	const denied = await fn.execute({ operation: "plan", spec_id: specId, environment: "dev", batch: methodBatch() });
+	check("a business action is refused when it is not allowlisted", denied.ok === false && /not allowlisted/.test(denied.detail), denied.detail);
+
+	// Allowed, but the guard and the proof are not optional.
+	methodAllowlist = ["example.model.action_run"];
+	const noPre = await fn.execute({ operation: "plan", spec_id: specId, environment: "dev", batch: methodBatch({ precondition: undefined }) });
+	check("a business action without a precondition is refused", noPre.ok === false && /must declare a precondition/.test(noPre.detail));
+	const noPost = await fn.execute({ operation: "plan", spec_id: specId, environment: "dev", batch: methodBatch({ postcondition: undefined }) });
+	check("a business action without a postcondition is refused", noPost.ok === false && /must declare a postcondition/.test(noPost.detail));
+	const fakeRecovery = await fn.execute({
+		operation: "plan",
+		spec_id: specId,
+		environment: "dev",
+		batch: methodBatch({ recovery: { kind: "restore_preimage" } }),
+	});
+	check("a business action cannot claim a pre-image recovery", fakeRecovery.ok === false && /cannot undo a business action/.test(fakeRecovery.detail));
+	const inDiscovery = await fn.execute({ operation: "plan", spec_id: specId, environment: "dev", batch: { ...methodBatch(), scope: "discovery" } });
+	check("a business action cannot live in a discovery batch", inDiscovery.ok === false && /discovery batch may only read/.test(inDiscovery.detail));
+
+	// The happy path: declared, approved, applied — and the state was read back.
+	const storable = methodBatch();
+	const planned = await fn.execute({ operation: "plan", spec_id: specId, environment: "dev", batch: storable });
+	check("an allowlisted business action is stored in the plan", planned.ok === true, planned.detail);
+	check("planning a business action sends nothing", calls.filter((c) => c.method === "action_run").length === 0);
+
+	await fn.execute({ operation: "approve", spec_id: specId, batch_id: "b-method", scope: "apply" });
+	const journalBefore = journaled.length;
+	countByState = { draft: 3, assigned: 3 };
+	const applied = await fn.execute({ operation: "apply", spec_id: specId, batch_id: "b-method", scope: "apply", confirm_destructive: true });
+	check("the business action is applied", applied.ok === true && applied.status === "applied", applied.detail);
+	check("the method WAS called on the recordset", calls.some((c) => c.method === "action_run" && Array.isArray(c.args?.[0]) && c.args[0].length === 3));
+	const runAfter = readRun(proj, specId);
+	const rec = runAfter.ops.find((o) => o.batchId === "b-method");
+	check("the postcondition result is persisted as evidence", typeof rec?.postcondition === "string" && /3 record/.test(rec.postcondition), JSON.stringify(rec?.postcondition));
+	check("a business action is NOT journaled (no pre-image exists for it)", journaled.length === journalBefore);
+
+	// The state is not reached: the whole point of the change.
+	countByState = { draft: 3, assigned: 0 };
+	const notReached = await fn.execute({ operation: "apply", spec_id: specId, batch_id: "b-method", scope: "apply", confirm_destructive: true });
+	check("a batch whose state was not reached fails", notReached.ok === false, notReached.detail);
+	const failedRun = readRun(proj, specId);
+	const failedOp = failedRun.ops.filter((o) => o.batchId === "b-method").pop();
+	check("the operation is recorded as failed, never applied", failedOp?.state === "failed");
+	check("the failure names the postcondition", /postcondition not met/.test(String(failedOp?.error)), String(failedOp?.error));
+	check(
+		"the stop message says the call WAS sent (so nobody retries blindly)",
+		/sent|partially changed/i.test(String(notReached.detail)),
+		notReached.detail,
+	);
+	check("the applied state did NOT overwrite the failed one", failedOp?.postcondition === undefined || /0 record/.test(String(failedOp?.postcondition)) === false);
+
+	// A timeout after sending it is INDETERMINATE, not a plain failure. The
+	// precondition is a READ, so it still answers while the mutation times out:
+	// that is exactly the shape of the real failure this guards against.
+	countByState = { draft: 3, assigned: 3 };
+	await fn.execute({ operation: "plan", spec_id: specId, environment: "dev", batch: methodBatch() });
+	await fn.execute({ operation: "approve", spec_id: specId, batch_id: "b-method", scope: "apply" });
+	rpcMode = "transport-fail";
+	const unknown = await fn.execute({ operation: "apply", spec_id: specId, batch_id: "b-method", scope: "apply", confirm_destructive: true });
+	rpcMode = "ok";
+	const unknownRun = readRun(proj, specId);
+	const unknownOp = unknownRun.ops.filter((o) => o.batchId === "b-method").pop();
+	check("a business action that never answered is INDETERMINATE", unknownOp?.state === "indeterminate", JSON.stringify(unknownOp?.state));
+	check("the indeterminate batch stops instead of retrying", unknown.ok === false);
+
+	// Compensation: it cannot undo it, and it says so.
+	const comp = await fn.execute({ operation: "compensate", spec_id: specId });
+	check("compensation reports the business action it cannot undo", /NOT compensable/.test(String(comp.detail)), comp.detail);
+	check("no compensation operation calls the business method again", !(comp.batch?.operations ?? []).some((o) => o.method === "action_run"));
+
+	// The mechanism is model-agnostic by design: the same declaration must work
+	// for ANY model, and the plugin must not know anything about the domain.
+	methodAllowlist = ["example.model.action_run", "another.model.button_go"];
+	const other = await fn.execute({
+		operation: "plan",
+		spec_id: specId,
+		environment: "dev",
+		batch: { ...writableBatch(), id: "b-other", operations: [{ ...methodOp(), model: "another.model", method: "button_go" }] },
+	});
+	check("a different model's method is equally declarable (no domain knowledge in the plugin)", other.ok === true, other.detail);
+	const offList = await fn.execute({
+		operation: "plan",
+		spec_id: specId,
+		environment: "dev",
+		batch: { ...writableBatch(), id: "b-off", operations: [{ ...methodOp(), model: "third.model", method: "button_go" }] },
+	});
+	check("the allowlist is per pair, not per method name", offList.ok === false && /not allowlisted/.test(offList.detail));
+	methodAllowlist = [];
+	countByState = {};
 }
 
 console.log(`\n${failures === 0 ? "ALL FUNCTIONAL CHECKS PASSED" : `${failures} CHECK(S) FAILED`}`);

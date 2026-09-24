@@ -49,7 +49,10 @@ When the spec configures or imports instead of shipping code, your evidence is
 different in kind — and so is the temptation to fake it:
 
 - `rpc` evidence: re-read the affected records and check the business result, not
-  only the count of rows created;
+  only the count of rows created. A business action (`kind: "method"`) is only
+  applied when its postcondition was read back: if the state it declared was not
+  reached, the operation FAILED even though the call was accepted — report that,
+  and never retry it blind (the instance may be half-changed);
 - `ui` evidence: a menu path and a field label are only verified if a browser
   session actually showed them. Without a browser, the row stays `pending` until
   a human confirms it — never mark it `pass` on the strength of the design;

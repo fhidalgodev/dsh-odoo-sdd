@@ -65,20 +65,19 @@ export interface RuntimeDeps {
 }
 
 /**
- * Methods that only read. Kept as an explicit set (not "anything that is not a
- * mutation") so adding a method to the tool enum forces a conscious
- * classification instead of silently inheriting read-only privileges.
+ * The read/mutating sets live in `method-classification.ts` — one source of
+ * truth shared with the batch executor, because two copies of the same policy
+ * drift. Re-exported here so this tool keeps its public shape.
  */
-export const READ_METHODS: ReadonlySet<string> = new Set([
-	"search_read",
-	"read",
-	"search_count",
-	"read_group",
-	"fields_get",
-]);
-
-/** Methods that write. These are the ones the allowlist, checkpoint and phase gates cover. */
-export const MUTATING_METHODS: ReadonlySet<string> = new Set(["create", "write", "unlink"]);
+export {
+	READ_METHODS,
+	MUTATING_METHODS,
+	CRUD_METHODS,
+	isReadMethod,
+	isCrudMutation,
+	isBusinessMethod,
+} from "./method-classification.js";
+import { READ_METHODS, MUTATING_METHODS } from "./method-classification.js";
 
 /** Build and register `odoo_execute` and `odoo_validate`. */
 export function registerRuntimeTools(
@@ -115,7 +114,12 @@ export function registerRuntimeTools(
 					"write",
 					"unlink",
 				],
-				description: "Method to call. Classified explicitly: unknown methods are refused.",
+				description:
+					"Method to call. Classified explicitly: unknown methods are refused. A BUSINESS ACTION " +
+					'(any method of any model that is neither a read nor create/write/unlink) is deliberately not here: it is not CRUD, its ' +
+					'effect cannot be replayed from a pre-image, and it needs a state guard and a state proof. Declare ' +
+					'it in a functional batch with kind: "method" and the pair in methodAllowlist, or record it as a ' +
+					"manual step in the runbook.",
 			},
 			// Odoo domains are lists of terms; a term is either a triple with a
 			// SCALAR value (`["state","=","draft"]`) or a bare logical operator

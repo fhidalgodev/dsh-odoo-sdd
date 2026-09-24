@@ -1675,6 +1675,7 @@ console.log("== transport details (log query, abort signal, web session) ==");
 console.log("== odoo_execute capability (context, read_group, fields_get) ==");
 {
 	const runtimeMod2 = await import(new URL("tools-runtime.js", libDir).href);
+	const clsMod = await import(new URL("method-classification.js", libDir).href);
 	const rtTools2 = new Map();
 	const rpcCalls = [];
 	const journaled = [];
@@ -1720,6 +1721,40 @@ console.log("== odoo_execute capability (context, read_group, fields_get) ==");
 		"the method sets stay disjoint and complete for the declared enum",
 		[...runtimeMod2.READ_METHODS].every((m) => !runtimeMod2.MUTATING_METHODS.has(m)) &&
 			runtimeMod2.READ_METHODS.size + runtimeMod2.MUTATING_METHODS.size === 8,
+	);
+	// One source of truth: the tool and the batch executor must not keep separate
+	// copies of the same policy, which is how they drift apart unnoticed.
+	check(
+		"the classification is shared with the batch executor",
+		clsMod.READ_METHODS === runtimeMod2.READ_METHODS && clsMod.MUTATING_METHODS === runtimeMod2.MUTATING_METHODS,
+	);
+	check(
+		"a business action is neither a read nor replayable CRUD",
+		clsMod.isBusinessMethod("action_run") && !clsMod.isBusinessMethod("write") && !clsMod.isBusinessMethod("read") && clsMod.isCrudMutation("unlink"),
+	);
+	check(
+		"a private or malformed method name can never be allowlisted",
+		!clsMod.isAllowedMethodShape("_action_done") && !clsMod.isAllowedMethodShape("Action Confirm") && clsMod.isAllowedMethodShape("button_go"),
+	);
+	// A business action is MUTATING for the indeterminate contract even though it
+	// is not CRUD: a timeout after sending one may mean the server acted.
+	check(
+		"an allowed business action is treated as a mutation, not as CRUD",
+		clsMod.isBusinessMethod("action_other") && !clsMod.isCrudMutation("action_assign"),
+	);
+	// The ad-hoc tool stays CRUD-only — the schema refuses a business action
+	// before the body runs. What changed is that the parameter now says WHERE such
+	// an action can run, instead of leaving the caller with a bare enum.
+	const methodSchema = rx.parameters?.properties?.method ?? {};
+	check(
+		"odoo_execute stays CRUD-only for business actions",
+		Array.isArray(methodSchema.enum) && !methodSchema.enum.includes("action_run"),
+		JSON.stringify(methodSchema.enum),
+	);
+	check(
+		"the refusal explains where a business action can run instead",
+		/kind: "method"/.test(String(methodSchema.description)) && /manual step/.test(String(methodSchema.description)),
+		String(methodSchema.description).slice(0, 120),
 	);
 
 	// context is forwarded verbatim as kwargs.context (multi-company).

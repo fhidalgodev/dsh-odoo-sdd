@@ -354,7 +354,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | `odoo_connect` | 探测实例：服务器版本 + 认证。报告经过掩码处理；区分 `NEEDS_SETUP` / `NEEDS_SECRET` / `DEFERRED` / `SKIPPED` 状态（从不在聊天中索要密钥）。 |
 | `odoo_setup` | 上手引导：`check`（级联 + gitignore + 委派模式）、`interactive`（不含密钥的 chmod 600 脚手架）、**`authorize`**（通过原生审批向开发者本人索要一个绑定当前 url/db/user 的连接授权）、**`revoke`**（撤销授权）、**`purge`**（先给出计划，然后在 `confirm_destructive=true` 加人工批准的前提下，只删除插件自己在 `.sdd/` 下的状态）、`later`、`skip`、`reset`、`autonomy`（supervised \| autonomous，需人工批准）。密钥永远不会作为参数被接受。 |
 | `odoo_module` | 对 `ir.module.module` 执行 `info` / `install` / `upgrade`（`button_immediate_*`）。原样返回服务器自己的输出或 traceback，并做脱敏 —— 这就是闭环反馈。 |
-| `odoo_execute` | 带 fail-closed 白名单的通用 CRUD/RPC（`execute_kw`）。方法被显式分类，未分类的方法会被拒绝：读操作（`search_read`、`read`、`search_count`、`read_group`、`fields_get`）允许执行，并可用 `fields`/`limit`/`order`/`offset` 做投影和分页（小数或负数的 `offset` 会被拒绝，绝不被截断）；变更操作（`create`/`write`/`unlink`）需要 `confirm_destructive=true` **且**模型在 `executeAllowlist` 中，并且会被记入日志，以便数据撤销时重放它们。`context` 原样转发 —— 在多公司实例上用 `allowed_company_ids`/`company_id` —— 服务器仍然会应用它自己的 ACL。判断是否拒绝不需要连接实例。 |
+| `odoo_execute` | 带 fail-closed 白名单的通用 CRUD/RPC（`execute_kw`）。方法被显式分类，未分类的方法会被拒绝：读操作（`search_read`、`read`、`search_count`、`read_group`、`fields_get`）允许执行，并可用 `fields`/`limit`/`order`/`offset` 做投影和分页（小数或负数的 `offset` 会被拒绝，绝不被截断）；变更操作（`create`/`write`/`unlink`）需要 `confirm_destructive=true` **且**模型在 `executeAllowlist` 中，并且会被记入日志，以便数据撤销时重放它们；**业务动作**（任意模型的、既不是读操作也不是 create/write/unlink 的方法）刻意**不能**在这里调用 —— 它以功能批次中的 `kind: "method"` 形式执行（白名单中的配对、状态前置条件、状态证明），或者作为 runbook 中的手动步骤。`context` 原样转发 —— 在多公司实例上用 `allowed_company_ids`/`company_id` —— 服务器仍然会应用它自己的 ACL。判断是否拒绝不需要连接实例。 |
 | `odoo_validate` | 本地、无需实例的模块结构检查：`__manifest__.py` 是否存在 + depends、声明的数据 XML 文件是否存在、有模型时是否有 `security/ir.model.access.csv`。返回 file:line 级别的发现，以及它解析出的 `module_dir` 和项目根目录（相对路径按会话所在文件夹解析，绝不按进程 cwd 解析）。 |
 | `odoo_errors` | 读取最近的 `ir.logging` 服务器错误 —— 相当于远程拉取环境日志。 |
 | `odoo_session` | 铸造一个无密码的 web 会话（`connect_as_user` 模式），存放在 `.sdd/session.json`（chmod 600），供 Playwright UI 测试使用。cookie 本身永远不会被返回。 |
@@ -365,7 +365,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | `sdd_handoff` | 在运行收尾时写入 `specs/<id>/handoff.md`（最终阶段、结论、决策、blockers、checkpoint、**完整的**按 spec 的数据日志、生效配置、下一步）。 |
 | `odoo_config` | 读取或更新持久化配置，并回答**"我现在在哪个项目里？"**：解析出的根目录、它的来源（会话 cwd / 已配置 / 进程 cwd）、specs 基础目录、生效的 spec 目录和正在使用的配置文件。 |
 | `odoo_import` | 通过 Odoo **自己的**导入器（`base_import`）准备 CSV/XLS/XLSX 导入，绝不使用本插件自己的解析器：`prepare` 用 web 会话和它自己的审批上传被授权的文件，`preview` 报告 Odoo 读到了什么（工作表、表头、有界样本、可导入字段），`map` 为每一列记录一个决定，`plan` 把它变成一个 `apply` 批次 —— 再由 `odoo_functional` 像其他批次一样批准并执行，所以这个工具自己永远不会应用导入。JSONP 应答会作为数据解析（绝不执行），会话 cookie 永不离开插件，不在已验证版本族内的版本会被拒绝并告知该调查什么。 |
-| `odoo_functional` | 功能路径的批次执行器：`plan`（以 fail-closed 方式校验并存储一个批次）、`approve`（绑定 spec、设计、计划和批次哈希的原生人工审批）、`apply`（一次一个操作地执行，并在调用前后持久化每个状态）、`inspect`（在其自身范围内的只读发现）、`status`、`reconcile`（裁决返回为未知的结果）、`verify`（按验收标准给出证据）和 `compensate`（从日志构建撤销批次）。声明的环境会为运行设门禁，生产环境还需要一份声明的备份；批次运行期间，所有其他变更路径都会被拒绝。 |
+| `odoo_functional` | 功能路径的批次执行器：`plan`（以 fail-closed 方式校验并存储一个批次）、`approve`（绑定 spec、设计、计划和批次哈希的原生人工审批）、`apply`（一次一个操作地执行，在调用前后持久化每个状态，并且**只有在回读该操作声明的状态之后**才记为已应用 —— 一个返回了应答却没有改变记录状态的调用是失败，不是成功）、`inspect`（在其自身范围内的只读发现）、`status`、`reconcile`（裁决返回为未知的结果）、`verify`（按验收标准给出证据）和 `compensate`（从日志构建撤销批次）。声明的环境会为运行设门禁，生产环境还需要一份声明的备份；批次运行期间，所有其他变更路径都会被拒绝。 |
 
 ---
 
@@ -554,6 +554,7 @@ DSH 能跑的地方插件就能跑，并声称支持 **Linux、macOS 和 Windows
         specsRoot: ''           # specsMode=central 时的绝对文件夹
         specsDir: specs         # specsMode=project 时项目内的文件夹
         executeAllowlist: []    # odoo_execute 可以 create/write/unlink 的模型
+        methodAllowlist: []     # 批次可调用的 "model.method" 对（任意模型）
         communityRepoUrl: https://github.com/odoo/odoo
         enterpriseRepoUrl: https://github.com/odoo/enterprise
         autonomy: supervised    # supervised | autonomous

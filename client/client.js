@@ -39,6 +39,9 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"enterprise": "Enterprise",
 		"allowlist": "Allowlist de mutaciones",
 		"allowlistHint": "Modelos que odoo_execute puede crear/modificar/borrar. Vacío = solo lectura.",
+		"methods": "Acciones de negocio",
+		"methodsHint": "Pares modelo.método que un lote funcional puede ejecutar: cualquier acción de cualquier modelo (la convención Odoo suele ser action_*, button_*, do_*). Cada par exige precondición y postcondición. Vacío = ninguna.",
+		"noMethods": "Ninguna acción de negocio permitida",
 		"repoCommunity": "Repositorio Odoo Community",
 		"repoEnterprise": "Repositorio Odoo Enterprise",
 		"repoHint": "Elige URL (git) o una ruta local del sistema operativo.",
@@ -104,6 +107,9 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"enterprise": "Enterprise",
 		"allowlist": "Mutation allowlist",
 		"allowlistHint": "Models odoo_execute may create/write/unlink. Empty = read-only.",
+		"methods": "Business actions",
+		"methodsHint": "model.method pairs a functional batch may call: any action of any model (Odoo convention is usually action_*, button_*, do_*). Each pair needs a precondition and a postcondition. Empty = none.",
+		"noMethods": "No business action allowed",
 		"repoCommunity": "Odoo Community repository",
 		"repoEnterprise": "Odoo Enterprise repository",
 		"repoHint": "Pick a git URL or a local operating-system path.",
@@ -266,6 +272,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			autonomy: asStr(s.autonomy, "supervised"),
 			licensed: lic,
 			executeAllowlist: asList(s.executeAllowlist),
+			methodAllowlist: asList(s.methodAllowlist),
 			projectRoot: asStr(s.projectRoot, ""),
 			specsMode: s.specsMode === "central" ? "central" : "project",
 			specsRoot: asStr(s.specsRoot, ""),
@@ -289,6 +296,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			autonomy: snap.autonomy,
 			licensed: snap.licensed,
 			allowlist: snap.executeAllowlist.join(", "),
+			methods: snap.methodAllowlist.join(", "),
 			communityUse: snap.communityRepoPath ? "path" : "url",
 			communityUrl: snap.communityRepoUrl,
 			specsMode: snap.specsMode,
@@ -426,6 +434,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 				autonomy: form.autonomy,
 				licensed: form.licensed,
 				executeAllowlist: parseList(form.allowlist),
+				methodAllowlist: parseList(form.methods),
 				communityRepoUrl: form.communityUse === "url" ? form.communityUrl : "",
 				// The project root is deliberately NOT written from the panel: it
 				// is resolved from the session's folder. Only the specs LAYOUT is
@@ -595,6 +604,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		};
 
 		var chips = String(form.allowlist || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+		var methodChips = String(form.methods || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean);
 		var status = h("div", {
 			className: "odoo-sdd-status" + (model.status === "saved" ? " odoo-sdd-status--ok" : model.status === "error" ? " odoo-sdd-status--err" : ""),
 			role: "status", "aria-live": "polite"
@@ -655,10 +665,18 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			h(SectionCard, { title: t("allowlist"), hint: t("allowlistHint") },
 				h("div", { className: "odoo-sdd-field" },
 					h("label", { className: "odoo-sdd-label", htmlFor: prefix + "-allow" }, t("allowlist")),
-					h("input", { id: prefix + "-allow", type: "text", className: "odoo-sdd-input odoo-sdd-input--mono", value: form.allowlist, disabled: !canWrite, onChange: onField("allowlist"), placeholder: "sale.order, stock.move", spellCheck: false, autoComplete: "off" })),
+					h("input", { id: prefix + "-allow", type: "text", className: "odoo-sdd-input odoo-sdd-input--mono", value: form.allowlist, disabled: !canWrite, onChange: onField("allowlist"), placeholder: "my.model, other.model", spellCheck: false, autoComplete: "off" })),
 				h("div", { className: "odoo-sdd-chips" },
 					chips.length ? chips.map(function (c) { return h("span", { className: "odoo-sdd-chip", key: c }, c); })
 						: h("span", { className: "odoo-sdd-sub" }, t("noModels")))),
+
+			h(SectionCard, { title: t("methods"), hint: t("methodsHint") },
+				h("div", { className: "odoo-sdd-field" },
+					h("label", { className: "odoo-sdd-label", htmlFor: prefix + "-methods" }, t("methods")),
+					h("input", { id: prefix + "-methods", type: "text", className: "odoo-sdd-input odoo-sdd-input--mono", value: form.methods, disabled: !canWrite, onChange: onField("methods"), placeholder: "my.model.my_method, other.model.other_method", spellCheck: false, autoComplete: "off" })),
+				h("div", { className: "odoo-sdd-chips" },
+					methodChips.length ? methodChips.map(function (c) { return h("span", { className: "odoo-sdd-chip", key: c }, c); })
+						: h("span", { className: "odoo-sdd-sub" }, t("noMethods")))),
 
 			h(SectionCard, { title: t("repoCommunity"), hint: t("repoHint") }, repo("community")),
 			h(SectionCard, { title: t("repoEnterprise"), hint: t("repoHint") }, repo("enterprise")),

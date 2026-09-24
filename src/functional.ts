@@ -21,6 +21,7 @@
  *
  * @module dsh-odoo-sdd/functional
  */
+import { READ_METHODS, MUTATING_METHODS, isBusinessMethod, businessMethodAllowed } from "./method-classification.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -33,11 +34,16 @@ import type { RpcErrorKind } from "./odoo-client.js";
 export type BatchScope = "discovery" | "import-prep" | "apply" | "compensate";
 
 /** Method classification, shared with odoo_execute (fail-closed elsewhere). */
-const READ_METHODS = new Set(["search_read", "read", "search_count", "read_group", "fields_get"]);
-const MUTATING_METHODS = new Set(["create", "write", "unlink"]);
 
-/** How an operation is carried out. */
-export type OperationKind = "execute" | "import";
+/**
+ * How an operation is carried out.
+ *
+ * `method` is a business action — any method of any model that is neither a read
+ * nor CRUD, and therefore not replayable from a pre-image. It runs only when the exact `model.method`
+ * pair is allowlisted and both a precondition and a postcondition are declared
+ * — see `validateBatch`.
+ */
+export type OperationKind = "execute" | "import" | "method";
 
 /** What kind of data an import carries: real business data, or a sample. */
 export type ImportDataKind = "real" | "sample";
@@ -91,10 +97,22 @@ export interface BatchOperation {
 	identity?: Array<{ field: string; value: unknown }>;
 	/** Read that must hold BEFORE the operation runs. */
 	precondition?: { domain: unknown[]; expect: "exists" | "missing" | "count"; count?: number };
+	/**
+	 * Read that must hold AFTER the operation ran, checked before it can be
+	 * recorded as applied. Without it, "applied" would only mean "the RPC
+	 * answered": an operation that returns `True` while leaving the records in
+	 * their previous state would be indistinguishable from one that worked.
+	 *
+	 * Same shape as `precondition` on purpose — same helper, same semantics.
+	 */
+	postcondition?: { domain: unknown[]; expect: "exists" | "missing" | "count"; count?: number };
 	/** What the operation is expected to produce. */
 	expect?: { kind: "created" | "updated" | "deleted" | "count"; count?: number };
-	/** How this operation is undone; `none` means "cannot be undone reliably". */
-	recovery?: { kind: "unlink_created" | "restore_preimage" | "none"; note?: string };
+	/**
+	 * How this operation is undone; `none` means "cannot be undone reliably" and
+	 * `manual` that a person reverses it following the runbook.
+	 */
+	recovery?: { kind: "unlink_created" | "restore_preimage" | "none" | "manual"; note?: string };
 }
 
 /** One approved unit of work. */
@@ -151,6 +169,8 @@ export interface OpRecord {
 	ids?: number[];
 	/** Pre-image rows captured before a write/unlink (for compensation). */
 	preImage?: Array<Record<string, unknown>>;
+	/** Result of the declared postcondition (evidence for verify and the runbook). */
+	postcondition?: string;
 	/** How it was resolved, when reconcile ran. */
 	resolution?: string;
 }
@@ -316,6 +336,12 @@ export interface PlanFinding {
 	message: string;
 }
 
+/** What the validator needs from the configuration to judge a batch. */
+export interface ValidateOptions {
+	/** Declared `"model.method"` pairs a business action may use. */
+	methodAllowlist?: readonly string[];
+}
+
 /**
  * Validate one batch fail-closed, BEFORE it can be approved.
  *
@@ -327,8 +353,9 @@ export interface PlanFinding {
  * @param environment - declared environment of the target.
  * @returns the findings (ERROR blocks approval).
  */
-export function validateBatch(batch: Batch, environment: TargetEnvironment): PlanFinding[] {
+export function validateBatch(batch: Batch, environment: TargetEnvironment, options: ValidateOptions = {}): PlanFinding[] {
 	const findings: PlanFinding[] = [];
+	const allowedMethods = options.methodAllowlist ?? [];
 	const where = `batch ${batch.id}`;
 	if (batch.operations.length === 0) findings.push({ severity: "ERROR", where, message: "the batch has no operations" });
 	if (batch.acceptance.length === 0) {
@@ -435,15 +462,86 @@ export function validateBatch(batch: Batch, environment: TargetEnvironment): Pla
 			}
 			return;
 		}
+		// ---- a business action (kind: "method") --------------------------
+		// It runs only when the operator allowlisted the exact pair, and only
+		// with a state guard and a state proof: the return value of a method is
+		// not evidence, and its effect cannot be replayed from a pre-image.
+		if (op.kind === "method") {
+			if (!businessMethodAllowed(allowedMethods, op.model, op.method)) {
+				findings.push({
+					severity: "ERROR",
+					where: at,
+					message:
+						`business action "${op.model}.${op.method}" is not allowlisted — declare it with odoo_config ` +
+						`mode=set methodAllowlist=["${op.model}.${op.method}"], or make it a manual step in the runbook`,
+				});
+			}
+			const ids = Array.isArray(op.args?.[0]) ? (op.args[0] as unknown[]) : [];
+			if (ids.length === 0) {
+				findings.push({
+					severity: "ERROR",
+					where: at,
+					message: "a business action needs the record ids as its first argument (Odoo dispatches the method on that recordset)",
+				});
+			}
+			if (op.precondition === undefined) {
+				findings.push({
+					severity: "ERROR",
+					where: at,
+					message:
+						"a business action must declare a precondition: most are not idempotent, and confirming an " +
+						"already-confirmed document is a different operation, not a retry",
+				});
+			}
+			if (op.postcondition === undefined) {
+				findings.push({
+					severity: "ERROR",
+					where: at,
+					message:
+						"a business action must declare a postcondition (the state that proves it worked): its return " +
+						"value is True/None/dict and proves nothing",
+				});
+			}
+			if (op.recovery?.kind === "restore_preimage" || op.recovery?.kind === "unlink_created") {
+				findings.push({
+					severity: "ERROR",
+					where: at,
+					message:
+						`recovery "${op.recovery.kind}" cannot undo a business action: the plugin never read the records it ` +
+						'changes. Use "none" or "manual" and write the reversal into the runbook',
+				});
+			}
+			if (batch.scope === "discovery") {
+				findings.push({ severity: "ERROR", where: at, message: "a discovery batch may only read" });
+			}
+			if (batch.scope !== "apply") {
+				findings.push({ severity: "ERROR", where: at, message: `a business action runs in an "apply" batch, not in a "${batch.scope}" one` });
+			}
+			return;
+		}
 		if (!READ_METHODS.has(op.method) && !MUTATING_METHODS.has(op.method)) {
 			findings.push({
 				severity: "ERROR",
 				where: at,
-				message: `method "${op.method}" is not classified; only ${[...READ_METHODS, ...MUTATING_METHODS].join(", ")} can run`,
+				message:
+					`method "${op.method}" is not classified; only ${[...READ_METHODS, ...MUTATING_METHODS].join(", ")} can run. ` +
+					`For a business action declare kind: "method" with ${op.model}.${op.method} in the methodAllowlist; ` +
+					"for something only a button does, declare it as a manual step",
 			});
 			return;
 		}
 		const mutating = MUTATING_METHODS.has(op.method);
+		if (mutating && op.postcondition === undefined) {
+			// A nudge, not a gate: existing plans keep running, but an operation
+			// that cannot show the state it produced is the one that lies later.
+			findings.push({
+				severity: "WARN",
+				where: at,
+				message:
+					"no postcondition declared: add the state that proves this operation worked " +
+					"({domain, expect, count}), so \"applied\" means the state was reached and not just that the RPC answered",
+			});
+		}
 		if (batch.scope === "discovery" && mutating) {
 			findings.push({ severity: "ERROR", where: at, message: "a discovery batch may only read" });
 		}
@@ -547,10 +645,44 @@ export async function executeOperation(
 	if (context !== undefined) kwargs["context"] = context;
 	const res = await client.executeKw<unknown>(op.model, op.method, op.args ?? [], kwargs);
 	if (res.ok) return { ok: true, value: res.value };
-	const mutating = MUTATING_METHODS.has(op.method);
+	// A business action is mutating even though it is not CRUD: a timeout after
+	// sending one may mean the server acted, and calling that a plain failure
+	// would invite a retry of something that already happened.
+	const mutating = MUTATING_METHODS.has(op.method) || isBusinessMethod(op.method);
 	const kind = res.errorKind;
 	const indeterminate = mutating && (kind === "transport" || kind === "protocol");
 	return { ok: false, indeterminate, error: res.error };
+}
+
+/**
+ * Evaluate a declared condition (a read) against the instance.
+ *
+ * One helper for both sides on purpose: `precondition` and `postcondition` are
+ * the same assertion — a domain and how many records it must match — asked at
+ * different moments. Two implementations would be two chances to disagree.
+ * @param client - RPC client.
+ * @param model - model the condition is about.
+ * @param condition - domain plus the expected match.
+ * @param context - batch context.
+ * @returns whether it holds, and why not when it does not.
+ */
+export async function checkCondition(
+	client: RpcLike,
+	model: string,
+	condition: { domain: unknown[]; expect: "exists" | "missing" | "count"; count?: number },
+	context: Record<string, unknown> | undefined,
+): Promise<{ ok: boolean; detail: string }> {
+	const kwargs: Record<string, unknown> = {};
+	if (context !== undefined) kwargs["context"] = context;
+	const res = await client.executeKw<number>(model, "search_count", [condition.domain], kwargs);
+	if (!res.ok) return { ok: false, detail: `the condition could not be checked: ${res.error}` };
+	const found = typeof res.value === "number" ? res.value : 0;
+	if (condition.expect === "exists" && found === 0) return { ok: false, detail: "expected at least one record and found none" };
+	if (condition.expect === "missing" && found > 0) return { ok: false, detail: `expected no records and found ${found}` };
+	if (condition.expect === "count" && typeof condition.count === "number" && found !== condition.count) {
+		return { ok: false, detail: `expected ${condition.count} record(s) and found ${found}` };
+	}
+	return { ok: true, detail: `${found} record(s)` };
 }
 
 /**
@@ -567,17 +699,30 @@ export async function checkPrecondition(
 ): Promise<{ ok: boolean; detail: string }> {
 	const pre = op.precondition;
 	if (pre === undefined) return { ok: true, detail: "no precondition declared" };
-	const kwargs: Record<string, unknown> = {};
-	if (context !== undefined) kwargs["context"] = context;
-	const res = await client.executeKw<number>(op.model, "search_count", [pre.domain], kwargs);
-	if (!res.ok) return { ok: false, detail: `the precondition could not be checked: ${res.error}` };
-	const found = typeof res.value === "number" ? res.value : 0;
-	if (pre.expect === "exists" && found === 0) return { ok: false, detail: "the precondition expected at least one record and found none" };
-	if (pre.expect === "missing" && found > 0) return { ok: false, detail: `the precondition expected no records and found ${found}` };
-	if (pre.expect === "count" && typeof pre.count === "number" && found !== pre.count) {
-		return { ok: false, detail: `the precondition expected ${pre.count} record(s) and found ${found}` };
-	}
-	return { ok: true, detail: `precondition holds (${found} record(s))` };
+	const checked = await checkCondition(client, op.model, pre, context);
+	if (!checked.ok) return checked;
+	return { ok: true, detail: `precondition holds (${checked.detail})` };
+}
+
+/**
+ * Evaluate the postcondition of an operation that has just run.
+ *
+ * A failure here is NOT a transport failure: the server answered, the call
+ * happened, and the state it promised was not reached. That is why the caller
+ * stops the batch and says so, instead of retrying something that already ran.
+ * @param client - RPC client.
+ * @param op - the operation carrying the postcondition.
+ * @param context - batch context.
+ * @returns whether it holds, and the evidence line for the run.
+ */
+export async function checkPostcondition(
+	client: RpcLike,
+	op: BatchOperation,
+	context: Record<string, unknown> | undefined,
+): Promise<{ ok: boolean; detail: string }> {
+	const post = op.postcondition;
+	if (post === undefined) return { ok: true, detail: "no postcondition declared" };
+	return checkCondition(client, op.model, post, context);
 }
 
 /** Everything `odoo_functional` needs from the registrant. */
@@ -590,6 +735,8 @@ export interface FunctionalDeps {
 	client(exec?: unknown): { client: RpcLike | null; report: string; target?: string; environment?: TargetEnvironment };
 	/** Ask the human through the host's native approval seam. */
 	approve(exec: unknown, reason: string): Promise<"allowed-once" | "rejected" | "cancelled" | "unavailable">;
+	/** Declared `"model.method"` pairs a business action may use (empty = none). */
+	methodAllowlist?(exec?: unknown): readonly string[];
 	/** Hashes of the spec and design documents the approval is bound to. */
 	hashes(specId: string, exec?: unknown): { specHash: string; designHash: string };
 	/**
@@ -715,7 +862,7 @@ export function registerFunctionalTool(
 				if (batch === undefined || typeof batch !== "object" || typeof batch.id !== "string") {
 					return { ...base, detail: "operation=plan requires a batch object with at least { id, scope, title, operations }." };
 				}
-				const findings = validateBatch(batch, args.environment);
+				const findings = validateBatch(batch, args.environment, { methodAllowlist: deps.methodAllowlist?.(exec) ?? [] });
 				const errors = findings.filter((f) => f.severity === "ERROR");
 				if (errors.length > 0) {
 					return {
@@ -1061,20 +1208,42 @@ export function registerFunctionalTool(
 						const outcome = await executeOperation(client, op, batch.context);
 						record.resultAt = new Date().toISOString();
 						if (outcome.ok) {
+							// The state it promised, read back BEFORE the operation can
+							// be called applied. Without this, "applied" only means the
+							// RPC answered: an operation that returns True while leaving
+							// the records untouched looks exactly like one that worked.
+							const post = await checkPostcondition(client, op, batch.context);
+							if (!post.ok) {
+								record.state = "failed";
+								record.error = `postcondition not met: ${post.detail}`;
+								deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "failed", index, reason: record.error });
+								writeRun(projectRoot, run);
+								results.push({ index, state: "failed", detail: record.error, value: jsonScalar(outcome.value) });
+								stopped =
+									`operation ${index + 1} ran but did not reach the state it declared (${post.detail}). ` +
+									"The call WAS sent, so the instance may be partially changed: inspect it before retrying.";
+								break;
+							}
+							if (op.postcondition !== undefined) record.postcondition = post.detail;
 							record.state = "applied";
 							deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "applied", index });
 							if (op.method === "create" && typeof outcome.value === "number") record.createdIds = [outcome.value];
-							deps.recordDataOp?.(
-								{
-									model: op.model,
-									method: op.method as "create" | "write" | "unlink",
-									ids: record.ids ?? [],
-									preImage: record.preImage ?? [],
-									createdIds: record.createdIds ?? [],
-									...(batch.context === undefined ? {} : { context: batch.context }),
-								},
-								exec,
-							);
+							// Only replayable CRUD goes to the journal: a business action
+							// changes records the plugin never read, so journaling it would
+							// promise an undo that cannot exist.
+							if (MUTATING_METHODS.has(op.method)) {
+								deps.recordDataOp?.(
+									{
+										model: op.model,
+										method: op.method as "create" | "write" | "unlink",
+										ids: record.ids ?? [],
+										preImage: record.preImage ?? [],
+										createdIds: record.createdIds ?? [],
+										...(batch.context === undefined ? {} : { context: batch.context }),
+									},
+									exec,
+								);
+							}
 							results.push({ index, state: "applied", value: jsonScalar(outcome.value) });
 						} else if (outcome.indeterminate === true) {
 							// Sent, no answer: the server may have committed. Never retry.
@@ -1182,8 +1351,13 @@ export function registerFunctionalTool(
 					const b = plan.batches.find((x) => x.id === batchId);
 					for (const ac of b?.acceptance ?? []) {
 						const onPlan = testPlan.includes(ac);
+						const ops = run.ops.filter((o) => o.batchId === batchId && o.state === "applied");
+						// The postcondition is the part that means something: "applied"
+						// alone says the RPC answered, not that the state was reached.
+						const proofs = ops.filter((o) => o.postcondition !== undefined).map((o) => `op ${o.index + 1}: ${o.postcondition}`);
 						evidence.push(
-							`${ac}: batch ${batchId} applied (${run.ops.filter((o) => o.batchId === batchId && o.state === "applied").length} op(s))` +
+							`${ac}: batch ${batchId} applied (${ops.length} op(s))` +
+								(proofs.length === 0 ? " — no postcondition declared, so 'applied' proves only that the call was accepted" : ` — ${proofs.join("; ")}`) +
 								(onPlan ? "" : " — WARNING: this criterion is not in test-plan.md"),
 						);
 					}
@@ -1206,6 +1380,15 @@ export function registerFunctionalTool(
 			if (args.operation === "compensate") {
 				const run = readRun(projectRoot, specId);
 				const applied = run.ops.filter((o) => o.state === "applied" && MUTATING_METHODS.has(o.method));
+				// A business action changed records the plugin never read: it is not
+				// compensated and, more importantly, it is not silently skipped.
+				const businessDone = run.ops.filter((o) => o.state === "applied" && isBusinessMethod(o.method));
+				const businessNote =
+					businessDone.length === 0
+						? ""
+						: `\nNOT compensable by the plugin (${businessDone.length} business action(s) ran): ` +
+							businessDone.map((o) => `${o.model}.${o.method}`).join(", ") +
+							". Its effect is not reversible from a pre-image: reverse it by hand following the runbook.";
 				if (applied.length === 0) {
 					return { ...base, status: "nothing-to-compensate", detail: "No applied mutation to compensate." };
 				}
@@ -1277,6 +1460,7 @@ export function registerFunctionalTool(
 						(notUndoable.length > 0
 							? `\nNOT undoable (${notUndoable.length}): ${notUndoable.join(", ")} — report this honestly.`
 							: "") +
+						businessNote +
 						"\nIt is a batch like any other: approve it (operation=approve) before applying it.",
 				};
 			}

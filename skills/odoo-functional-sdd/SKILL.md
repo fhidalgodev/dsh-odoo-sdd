@@ -31,14 +31,20 @@ the rules on facts vs hypotheses, fiscal data and production.
 4. **The environment is declared, never assumed.** `dev`, `staging` or
    `production`. Production additionally needs the declared backup, the impact
    review and its own approval; high-risk changes are proven in staging first.
-5. **No invented data.** Fiscal country, taxes, legal identity and inventory
+5. **You never trigger a business action by editing configuration.** Making Odoo
+   perform an action by temporarily changing an automation trigger, a server
+   action or any other setting is forbidden: it mutates configuration the run did
+   not declare and leaves the instance depending on something nobody reviewed.
+   The action goes through an allowlisted `kind: "method"` operation (state guard
+   plus state proof), or becomes a manual step with its exact button label.
+6. **No invented data.** Fiscal country, taxes, legal identity and inventory
    valuation come from a named human, never from a page you read.
-6. **Honest evidence.** Every acceptance criterion needs the layer that actually
+7. **Honest evidence.** Every acceptance criterion needs the layer that actually
    verified it (`rpc`, `ui`, `manual`) and a real result. `sdd_phase succeed`
    accepts only an explicit `pass` per row.
-7. **The runbook is the deliverable.** A configuration nobody can repeat by hand
+8. **The runbook is the deliverable.** A configuration nobody can repeat by hand
    is not delivered. `DONE` requires it, whatever the documentation policy says.
-8. **`stop.md` and the iteration ceiling stay armed**, exactly as in development.
+9. **`stop.md` and the iteration ceiling stay armed**, exactly as in development.
 
 ## Where files live
 
@@ -121,7 +127,11 @@ decisions are missing.
    plan and the batch, and to the destination and companies. Any change to any of
    them invalidates it.
 4. **Apply.** Execute in order, checking the hashes again before every operation.
-   Persist each operation's state before and after the call. Imports go through
+   Persist each operation's state before and after the call. An operation is
+   recorded as applied **only after reading back the state it declared in its
+   postcondition**: a call that answers while leaving the records untouched is a
+   failure, and the batch stops saying so — the call WAS sent, so the instance may
+   be half-changed and a blind retry is the wrong move. Imports go through
    the native Odoo importer (`odoo_import use=prepare` with its own approval,
    then `preview` to read the headers, sheets and importable fields, `map` for a
    decision per column and `plan` to obtain the batch; `odoo_functional` then
@@ -160,3 +170,9 @@ POS, manufacturing, projects, HR) — live in
 `references/functional-domains.md`. They are **checklists to investigate**, not
 payloads: never treat one as a universal recipe, and never derive fiscal data
 from them.
+
+Declaring and proving a **business action** — any model's method that is neither
+a read nor CRUD — has its own reference: `references/business-methods.md`. It is
+domain-neutral on purpose: how to find what a method really does in the source of
+the target version, how to declare it (allowlisted pair, state guard, state
+proof) and the traps that apply to every non-idempotent method.

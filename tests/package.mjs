@@ -171,6 +171,7 @@ for (const agent of [
 // (the functional reference resolves through the skill's resource base).
 for (const skillFile of [
 	"skills/odoo-functional-sdd/SKILL.md",
+	"skills/odoo-functional-sdd/references/business-methods.md",
 	"skills/odoo-functional-sdd/references/functional-domains.md",
 ]) {
 	required.push(skillFile);

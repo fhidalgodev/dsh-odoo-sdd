@@ -138,6 +138,7 @@ export const Config = z.object({
 	specsRoot: z.string(),
 	specsDir: z.string(),
 	executeAllowlist: z.array(z.string()),
+	methodAllowlist: z.array(z.string()),
 	communityRepoUrl: z.string(),
 	communityRepoPath: z.string(),
 	enterpriseRepoUrl: z.string(),
@@ -170,6 +171,8 @@ interface OdooSddConfig {
 	specsDir?: string;
 	/** Models permitted for MUTATING calls (create/write/unlink) on odoo_execute. Empty = denied. */
 	executeAllowlist?: string[];
+	/** Declared "model.method" pairs a functional batch may call as a business action. Empty = denied. */
+	methodAllowlist?: string[];
 	/** Odoo Community source: git URL or local path (empty when not set). */
 	communityRepoUrl?: string;
 	communityRepoPath?: string;
@@ -638,6 +641,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		specsRoot: config.specsRoot ?? "",
 		specsDir: config.specsDir ?? "specs",
 		executeAllowlist: config.executeAllowlist ?? [],
+		methodAllowlist: config.methodAllowlist ?? [],
 		communityRepoUrl: config.communityRepoUrl ?? "https://github.com/odoo/odoo",
 		communityRepoPath: config.communityRepoPath ?? "",
 		enterpriseRepoUrl: config.enterpriseRepoUrl ?? "https://github.com/odoo/enterprise",
@@ -1684,10 +1688,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		description:
 			"Read or update the persistent plugin configuration stored in <projectRoot>/.sdd/config.json. " +
 			"mode=read returns the current values (community/enterprise repository URL + OS path, specs layout, " +
-			"executeAllowlist) AND the project root this call resolved — with its provenance (session cwd, " +
-			"configured fallback or process cwd) and the effective spec directory — so 'which project am I in?' " +
-			"is answered, never guessed. mode=set updates them — provide only the fields to change. Singleton " +
-			"call for each repository source. Never accepts or returns secrets (those live in the .env).",
+			"executeAllowlist, methodAllowlist) AND the project root this call resolved — with its provenance " +
+			"(session cwd, configured fallback or process cwd) and the effective spec directory — so 'which " +
+			"project am I in?' is answered, never guessed. mode=set updates them — provide only the fields to " +
+			"change. Singleton call for each repository source. Never accepts or returns secrets (those live in " +
+			"the .env).",
 		parameters: {
 			mode: {
 				type: "string",
@@ -1735,6 +1740,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							specsRoot: { type: "string", required: true },
 							specsDir: { type: "string", required: true },
 							executeAllowlist: { type: "array", required: true, items: { type: "string" } },
+							methodAllowlist: { type: "array", items: { type: "string" } },
 							autonomy: { type: "string", required: true },
 							licensed: { type: "string", required: true },
 							requireCheckpointBeforeMutation: { type: "boolean", required: true },
@@ -1783,6 +1789,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			specsRoot?: string;
 			specsDir?: string;
 			executeAllowlist?: string[];
+			methodAllowlist?: string[];
 			autonomy?: string;
 			licensed?: string;
 			requireCheckpointBeforeMutation?: boolean;
@@ -1809,6 +1816,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					specsRoot: asString(data["specsRoot"], ""),
 					specsDir: asString(data["specsDir"], "specs"),
 					executeAllowlist: asList(data["executeAllowlist"]),
+					methodAllowlist: asList(data["methodAllowlist"]),
 					autonomy: asString(data["autonomy"], "supervised"),
 					licensed: asLicense(data["licensed"], "community"),
 					requireCheckpointBeforeMutation: typeof data["requireCheckpointBeforeMutation"] === "boolean" ? data["requireCheckpointBeforeMutation"] : true,
@@ -1905,6 +1913,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.specsRoot !== undefined) updates["specsRoot"] = args.specsRoot;
 			if (args.specsDir !== undefined) updates["specsDir"] = args.specsDir;
 			if (args.executeAllowlist !== undefined) updates["executeAllowlist"] = args.executeAllowlist;
+			if (args.methodAllowlist !== undefined) updates["methodAllowlist"] = args.methodAllowlist;
 			if (args.autonomy !== undefined) updates["autonomy"] = args.autonomy;
 			if (args.licensed !== undefined) updates["licensed"] = args.licensed;
 			if (args.requireCheckpointBeforeMutation !== undefined) updates["requireCheckpointBeforeMutation"] = args.requireCheckpointBeforeMutation;
@@ -2016,6 +2025,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			specsRoot: asString(merged["specsRoot"], config.specsRoot ?? ""),
 			specsDir: asString(merged["specsDir"], config.specsDir ?? "specs"),
 			executeAllowlist: Array.isArray(merged["executeAllowlist"]) ? asList(merged["executeAllowlist"]) : (config.executeAllowlist ?? []),
+			methodAllowlist: Array.isArray(merged["methodAllowlist"]) ? asList(merged["methodAllowlist"]) : (config.methodAllowlist ?? []),
 			communityRepoUrl: asString(merged["communityRepoUrl"], config.communityRepoUrl ?? "https://github.com/odoo/odoo"),
 			communityRepoPath: asString(merged["communityRepoPath"], config.communityRepoPath ?? ""),
 			enterpriseRepoUrl: asString(merged["enterpriseRepoUrl"], config.enterpriseRepoUrl ?? "https://github.com/odoo/enterprise"),
@@ -2643,6 +2653,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			lines.push(`- specs: ${describeSpecsLocation({ projectRoot: cfg.projectRoot, specsMode: cfg.specsMode, specsDir: cfg.specsDir, specsRoot: cfg.specsRoot })}`);
 			lines.push(`- autonomy=${cfg.autonomy} licensed=${cfg.licensed}`);
 			lines.push(`- allowlist=${JSON.stringify(cfg.executeAllowlist)}`);
+			if (cfg.methodAllowlist.length > 0) lines.push(`- method allowlist=${JSON.stringify(cfg.methodAllowlist)}`);
 			lines.push(`- communityRepo=${cfg.communityRepoPath || cfg.communityRepoUrl}`);
 			lines.push(`- enterpriseRepo=${cfg.enterpriseRepoPath || cfg.enterpriseRepoUrl}`);
 			lines.push(`- requireCheckpointBeforeMutation=${cfg.requireCheckpointBeforeMutation} securityReviewRequired=${cfg.securityReviewRequired} auditAllTools=${cfg.auditAllTools}`);
@@ -2973,6 +2984,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// ---------------------------------------------------------------------
 	registerFunctionalTool(ctx, {
 		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
+		// The business-action allowlist belongs to the batch executor: it is the
+		// surface with a precondition, a postcondition and a per-batch approval.
+		methodAllowlist: (exec) => effectiveConfig(exec).methodAllowlist,
 		specDir: (specId, exec) => {
 			const cfg = effectiveConfig(exec);
 			return specDirOf(cfg.projectRoot, cfg.specsDir, specId, {

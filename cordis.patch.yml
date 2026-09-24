@@ -26,6 +26,10 @@
         specsRoot: ''
         specsDir: 'specs'
         executeAllowlist: []
+        # Business actions a functional batch may call, as "model.method" (or
+        # "model:method"): action_confirm, action_assign, button_validate…
+        # Empty = no method beyond create/write/unlink can run.
+        methodAllowlist: []
         # Odoo source repositories: URL or local OS path (empty path = use URL).
         communityRepoUrl: 'https://github.com/odoo/odoo'
         communityRepoPath: ''

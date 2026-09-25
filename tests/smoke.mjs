@@ -1134,6 +1134,24 @@ console.log("== settings source drives the effective configuration ==");
 	);
 	rmSync(join(projSet, ".sdd", "config.json"), { force: true });
 	check("removing the file restores the panel's guard setting", /checkpoint/i.test(setGuard(mutCall) ?? ""));
+
+	// The same path for the CHANGE policy: a switch that only renders in the
+	// form is a lie, so the panel's value must reach the guard (and the project
+	// file must be able to relax it, like every other policy).
+	cpsMod.writeActiveState(projSet, { specId: "001-from-settings", phase: "DONE", checkpointId: "cp-any" });
+	const editCall = { name: "write", arguments: { file_path: join(projSet, "mod.py"), content: "x\n" } };
+	live = {};
+	hooks.onChange();
+	check("the change policy is armed by default in the guard", typeof setGuard(editCall) === "string");
+	live = { requireSpecForChanges: false };
+	hooks.onChange();
+	check("the panel's switch disarms it", setGuard(editCall) === undefined);
+	live = {};
+	hooks.onChange();
+	check("clearing the switch re-arms it", typeof setGuard(editCall) === "string");
+	writeFileSync(join(projSet, ".sdd", "config.json"), JSON.stringify({ requireSpecForChanges: false }, null, 2), { mode: 0o600 });
+	check("the project file can disarm it too", setGuard(editCall) === undefined);
+	rmSync(join(projSet, ".sdd", "config.json"), { force: true });
 }
 
 
@@ -1987,9 +2005,17 @@ mkdirSync(projGuard, { recursive: true });
 plugin.apply(fakeCtx, { projectRoot: projGuard });
 const guard = capturedGuards[capturedGuards.length - 1];
 check("policy guard registered with the host", typeof guard === "function");
+// No spec at all: the CHANGE gate fires before the checkpoint policy, because a
+// missing spec is the more fundamental problem and the message says how to fix
+// it (open one, continue the active one, or ask for a waiver).
 let gR = guard({ name: "odoo_execute", arguments: { method: "create" } });
-check("guard denies a mutation with no checkpoint", typeof gR === "string" && gR.includes("no checkpoint"));
+check("guard denies a mutation with no spec at all", typeof gR === "string" && /no spec for this project/.test(gR));
+check("the denial names the three ways out", /operation=init/.test(String(gR)) && /mode=bug/.test(String(gR)) && /operation=waive/.test(String(gR)));
 check("guard allows read-only tools", guard({ name: "odoo_connect", arguments: {} }) === undefined);
+// With a spec that authorizes writing, the checkpoint policy is what remains.
+cps.writeActiveState(projGuard, { specId: "001-guard", phase: "WRITE_CODE" });
+gR = guard({ name: "odoo_execute", arguments: { method: "create" } });
+check("guard denies a mutation with no checkpoint", typeof gR === "string" && gR.includes("no checkpoint"));
 const guardCp = registered.get("sdd_checkpoint");
 const gcR = await guardCp.execute({ operation: "create", label: "guard", dirs: ["."] });
 check("checkpoint tool created one for the guard", gcR.ok === true);
@@ -2022,6 +2048,9 @@ check("guard allows the mutation after a checkpoint exists", gR === undefined);
 	idle.state = "idle";
 	delete idle.lock;
 	writeFileSync(join(runDir, "run.json"), JSON.stringify(idle));
+	// Back under a writing spec: the functional rule is what is being tested here,
+	// not the change policy.
+	cps.writeActiveState(projGuard, { specId: "001-guard", phase: "WRITE_CODE" });
 	check("an idle functional run does not block anything", guard({ name: "odoo_execute", arguments: { method: "create" } }) === undefined);
 }
 cps.writeActiveState(projGuard, { phase: "READ_SPEC" });
@@ -2033,6 +2062,128 @@ writeFileSync(join(projGuard, ".sdd", "stop.md"), "operator halt\n", { mode: 0o6
 gR = guard({ name: "odoo_connect", arguments: {} });
 check("guard halts every tool on stop.md", typeof gR === "string" && gR.includes("stop.md"));
 rmSync(join(projGuard, ".sdd", "stop.md"));
+
+// ---- change policy: every change needs a spec, or a waiver ---------------
+// "Now also change X" in the SAME chat is a new change: without a spec in an
+// authorizing phase, both an instance mutation and a source edit are refused,
+// and the refusal names the three ways out. bash stays the documented hole.
+console.log("== change policy (spec, waiver, escape hatches) ==");
+{
+	const projChange = join(dir, "projChange");
+	mkdirSync(join(projChange, "mod"), { recursive: true });
+	plugin.apply(fakeCtx, { projectRoot: projChange });
+	const guardC = capturedGuards[capturedGuards.length - 1];
+	const phaseC = registered.get("sdd_phase");
+	const cpC = registered.get("sdd_checkpoint");
+	const handoffC = registered.get("sdd_handoff");
+	const execC = { agent: { id: "session-change" }, callId: "call-change" };
+	const execOther = { agent: { id: "session-other" }, callId: "call-other" };
+	const srcFile = join(projChange, "mod", "a.py");
+	const srcEdit = { file_path: srcFile, content: "print(1)\n" };
+
+	// 1) No spec at all: nothing authorizes the edit.
+	let d = guardC({ name: "write", arguments: srcEdit, ...execC });
+	check("an edit without any spec is denied", typeof d === "string" && /no spec for this project/.test(d));
+	d = guardC({ name: "edit", arguments: { file_path: srcFile, old_string: "1", new_string: "2" }, ...execC });
+	check("the edit tool is gated too", typeof d === "string" && /no spec for this project/.test(d));
+	// The artifacts that DO authorize work are never blocked by the policy, or the
+	// escape hatch (write the spec) would itself be blocked.
+	check("writing inside specs/ is always allowed", guardC({ name: "write", arguments: { file_path: join(projChange, "specs", "001-x", "spec.md"), content: "s\n" }, ...execC }) === undefined);
+	check("writing inside .sdd/ is always allowed", guardC({ name: "write", arguments: { file_path: join(projChange, ".sdd", "notes.md"), content: "n\n" }, ...execC }) === undefined);
+	check("a file outside the project is not this project's policy", guardC({ name: "write", arguments: { file_path: join(dir, "outside.txt"), content: "o\n" }, ...execC }) === undefined);
+	check("a relative path resolves against the project, not the cwd", typeof guardC({ name: "write", arguments: { file_path: "mod/b.py", content: "b\n" }, ...execC }) === "string");
+	check("reads are never gated", guardC({ name: "read", arguments: { file_path: srcFile }, ...execC }) === undefined);
+
+	// 2) A spec that is not writing does not authorize anything either: what
+	// authorizes is the PHASE, not the existence of a folder.
+	const initC = await phaseC.execute({ operation: "init", spec_id: "001-chg" }, execC);
+	check("a small change gets its own spec", initC.ok === true && initC.phase === "CLARIFY");
+	d = guardC({ name: "write", arguments: srcEdit, ...execC });
+	check("CLARIFY does not authorize the edit", typeof d === "string" && /001-chg is in CLARIFY/.test(d));
+	d = guardC({ name: "odoo_execute", arguments: { method: "create" }, ...execC });
+	check("CLARIFY does not authorize a mutation either", typeof d === "string" && /001-chg is in CLARIFY/.test(d));
+	// A finished spec has answered its question: the next request is a NEW one.
+	cps.writeActiveState(projChange, { phase: "DONE" });
+	d = guardC({ name: "write", arguments: srcEdit, ...execC });
+	check("a DONE spec does not authorize new changes", typeof d === "string" && /001-chg is in DONE/.test(d));
+
+	// 3) Writing phase: the edit passes, and only the checkpoint policy remains
+	// for things that mutate the instance.
+	cps.writeActiveState(projChange, { phase: "WRITE_CODE" });
+	check("WRITE_CODE authorizes the edit", guardC({ name: "write", arguments: srcEdit, ...execC }) === undefined);
+	d = guardC({ name: "odoo_import", arguments: { use: "prepare" }, ...execC });
+	check("an import prepare is a mutation: it needs a checkpoint", typeof d === "string" && /no checkpoint/.test(d));
+	const cpC1 = await cpC.execute({ operation: "create", label: "change", dirs: ["mod"] }, execC);
+	check("checkpoint created for the change", cpC1.ok === true);
+	check("...and then the import prepare passes", guardC({ name: "odoo_import", arguments: { use: "prepare" }, ...execC }) === undefined);
+	check("an import preview is a read: never gated", guardC({ name: "odoo_import", arguments: { use: "preview" }, ...execC }) === undefined);
+
+	// 4) "Leave it to your judgement": an explicit, approved, SESSION-scoped
+	// waiver. A policy the model can exempt itself from is not a policy, so the
+	// refusal is tested before the grant.
+	cps.writeActiveState(projChange, { phase: "DONE" });
+	const savedOutcomeW = approvalOutcome;
+	approvalOutcome = "rejected";
+	let w = await phaseC.execute({ operation: "waive", spec_id: "001-chg", detail: "dejalo a tu criterio" }, execC);
+	check("a refused waiver is not granted", w.ok === false && !existsSync(join(projChange, ".sdd", "waiver.json")));
+	check("...and the session stays under the policy", typeof guardC({ name: "write", arguments: srcEdit, ...execC }) === "string");
+	approvalOutcome = "allowed-once";
+	w = await phaseC.execute({ operation: "waive", spec_id: "001-chg", detail: "   " }, execC);
+	check("a waiver without a reason is refused", w.ok === false && /needs `detail`/.test(String(w.detail)));
+	w = await phaseC.execute({ operation: "waive", spec_id: "001-chg", detail: "x" }, { callId: "no-session" });
+	check("a waiver without a session id is refused", w.ok === false && /session id/i.test(String(w.detail)));
+	w = await phaseC.execute({ operation: "waive", spec_id: "001-chg", detail: "dejalo a tu criterio" }, execC);
+	check("an approved waiver is recorded", w.ok === true && existsSync(join(projChange, ".sdd", "waiver.json")));
+	const waiver = JSON.parse(readFileSync(join(projChange, ".sdd", "waiver.json"), "utf8"));
+	check("the waiver belongs to THIS session and keeps the reason verbatim", waiver.sessionId === "session-change" && waiver.reason === "dejalo a tu criterio");
+	check("the waiver is still a KB decision", JSON.parse(readFileSync(join(projChange, "specs", "001-chg", "kb.json"), "utf8")).some((n) => n.kind === "decision" && /dejalo a tu criterio/.test(n.summary)));
+	check("the approval request says who it covers", approvalRequests.some((r) => r.toolName === "sdd_phase" && /this chat only/.test(String(r.reason))));
+	check("the waiver unblocks this session", guardC({ name: "write", arguments: srcEdit, ...execC }) === undefined);
+	d = guardC({ name: "write", arguments: srcEdit, ...execOther });
+	check("...and does NOT unblock another session", typeof d === "string" && /001-chg is in DONE/.test(d));
+	// A waiver answers the SPEC question, never the rollback one.
+	d = guardC({ name: "odoo_execute", arguments: { method: "create" }, ...execOther });
+	check("another session is still stopped for mutations", typeof d === "string");
+	const stray = await cpC.execute({ operation: "create", label: "two", dirs: ["mod"] }, execC);
+	check("a second checkpoint exists", stray.ok === true);
+	cps.writeActiveState(projChange, { checkpointId: null });
+	d = guardC({ name: "odoo_execute", arguments: { method: "create" }, ...execC });
+	check("the waiver does not excuse a missing checkpoint", typeof d === "string" && /no checkpoint/.test(d));
+	cps.writeActiveState(projChange, { checkpointId: cpC1.activeCheckpoint });
+	check("with a checkpoint, the waived session may mutate in a DONE spec", guardC({ name: "odoo_execute", arguments: { method: "create" }, ...execC }) === undefined);
+	// status and the handoff must both SURFACE it: a silent exception is how a
+	// policy rots.
+	const stC = await phaseC.execute({ operation: "status", spec_id: "001-chg" }, execC);
+	check("status reports the waiver", /Waiver/i.test(String(stC.detail)) && /session-change/.test(String(stC.detail)));
+	check("status states the spec policy in effect", /Spec policy: a spec in a writing phase/.test(String(stC.detail)));
+	const hC = await handoffC.execute({ spec_id: "001-chg", summary: "cambio sin spec" }, execC);
+	check("handoff written for the waived spec", hC.ok === true);
+	const hCText = readFileSync(join(projChange, "specs", "001-chg", "handoff.md"), "utf8");
+	check("the handoff records work done without a spec", hCText.includes("## Waivers (work done without a spec)") && hCText.includes("dejalo a tu criterio"));
+	check("the handoff states the change policy that was in effect", hCText.includes("requireSpecForChanges=true"));
+	// Revoking needs no approval: tightening a policy is always allowed.
+	const rv = await phaseC.execute({ operation: "waive", spec_id: "001-chg", revoke: true }, execC);
+	check("revoke clears the waiver", rv.ok === true && !existsSync(join(projChange, ".sdd", "waiver.json")));
+	d = guardC({ name: "write", arguments: srcEdit, ...execC });
+	check("...and the session is back under the policy", typeof d === "string" && /001-chg/.test(d));
+	// `status` re-syncs the active phase from the spec's OWN state, so an active
+	// phase poked into place by hand cannot linger and lie to the next session.
+	check("status re-synced the active phase from the spec state", cps.readActiveState(projChange).phase === "CLARIFY");
+	const rv2 = await phaseC.execute({ operation: "waive", spec_id: "001-chg", revoke: true }, execC);
+	check("revoking twice is honest, not an error", rv2.ok === true && /No waiver/.test(String(rv2.detail)));
+	approvalOutcome = savedOutcomeW;
+
+	// 5) The human off-switch: the policy is configurable, and with it off a
+	// change needs neither a spec nor a waiver.
+	const projOff = join(dir, "projPolicyOff");
+	mkdirSync(projOff, { recursive: true });
+	plugin.apply(fakeCtx, { projectRoot: projOff, requireSpecForChanges: false });
+	const guardOff = capturedGuards[capturedGuards.length - 1];
+	cps.writeActiveState(projOff, { specId: "001-off", phase: "DONE" });
+	check("policy OFF lets the edit through", guardOff({ name: "write", arguments: { file_path: join(projOff, "a.py"), content: "x\n" }, ...execC }) === undefined);
+	d = guardOff({ name: "odoo_execute", arguments: { method: "create" }, ...execC });
+	check("policy OFF still requires a checkpoint for mutations", typeof d === "string" && /no checkpoint/.test(d));
+}
 
 // Fail-CLOSED: an internal guard failure must deny, never allow (lote 2).
 {

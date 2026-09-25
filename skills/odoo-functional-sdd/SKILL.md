@@ -140,7 +140,11 @@ decisions are missing.
    means the importer stopped mid-file, and neither case is a licence to re-send
    the rows that already landed.
 5. **Checkpoint first.** The policy guard blocks mutations until a checkpoint
-   exists; a checkpoint is also what makes the data undo possible.
+   exists; a checkpoint is also what makes the data undo possible. The same
+   guard also requires a spec in a writing phase (`APPLY_CONFIG` for this path)
+   or a waiver approved for this session, and a follow-up request after the run
+   closed is a NEW spec — `odoo_import use=prepare` counts as a mutation, while
+   `preview`/`map` only read.
 6. **Compensate** with an approved compensation batch built from the journal, and
    report what cannot be restored (new ids, installed modules, external effects).
 

@@ -57,6 +57,10 @@
   fail-closed，连续三次失败会强制做根因诊断，verify/fix 迭代次数有上限，
   `stop.md` 会中止一切，而且结论是诚实的：失败的验证会持久化为 FAILED，
   永远不可能被报告成成功。
+- **没有 spec 就没有变更** —— 在流水线关闭*之后*才到来的请求是一次新的变更，
+  哪怕它出现在同一个对话里（"顺便把 X 也改了"）：它要么得到自己的（小份）spec，
+  要么得到你显式的 waive。这道守卫对实例变更和源码编辑一视同仁，并且会说明三条
+  出路里哪一条可用，而不是悄悄改掉。
 
 > [!NOTE]
 > **它不是什么：** 不是基础设施编排器，不是通过聊天管理凭据的管家，也不是
@@ -358,7 +362,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | `odoo_validate` | 本地、无需实例的模块结构检查：`__manifest__.py` 是否存在 + depends、声明的数据 XML 文件是否存在、有模型时是否有 `security/ir.model.access.csv`。返回 file:line 级别的发现，以及它解析出的 `module_dir` 和项目根目录（相对路径按会话所在文件夹解析，绝不按进程 cwd 解析）。 |
 | `odoo_errors` | 读取最近的 `ir.logging` 服务器错误 —— 相当于远程拉取环境日志。 |
 | `odoo_session` | 铸造一个无密码的 web 会话（`connect_as_user` 模式），存放在 `.sdd/session.json`（chmod 600），供 Playwright UI 测试使用。cookie 本身永远不会被返回。 |
-| `sdd_phase` | 阶段状态机：`init`、`status`（logbook 摘要、spec 目录和 specs 位置）、`mark_spec_loaded`、`advance`（fail-closed 门禁 + `approval_source` 来源记录）、`fail`（失败阶梯 + FAILED 结论）、`succeed`（PASSED 结论；除非 `test-plan.md` 中每一行 AC 都明确写着 `pass`，否则拒绝）、`rollback`（恢复 checkpoint 并回到 WRITE_CODE）、`diagnose`。 |
+| `sdd_phase` | 阶段状态机：`init`、`status`（logbook 摘要、spec 目录和 specs 位置）、`mark_spec_loaded`、`advance`（fail-closed 门禁 + `approval_source` 来源记录）、`fail`（失败阶梯 + FAILED 结论）、`succeed`（PASSED 结论；除非 `test-plan.md` 中每一行 AC 都明确写着 `pass`，否则拒绝）、`rollback`（恢复 checkpoint 并回到 WRITE_CODE）、`diagnose`、`waive`（记录 —— 在原生审批下 —— **本会话**可以在没有 spec 的情况下工作：开发者那句"你自己看着办"会原样保存在 `.sdd/waiver.json` 里，由 `status` 和 handoff 报告；`revoke: true` 会删除它，且不需要审批）。 |
 | `sdd_checkpoint` | 回滚面：`create`（对工作区做快照，成为活动 checkpoint）、`list`、`restore`（恢复文件，并在 `restore_data=true` 和 `confirm_destructive=true` 时恢复已记录的数据变更：撤销会在该变更用过的公司上下文中运行，把读取形态转换成写入值，标记每个操作以免重试时重复补偿它，拒绝来自其他目标的日志，并报告每一个它无法恢复的字段；它**总是报告** checkpoint 之后创建的文件，且只有 `remove_created=true` 才会删除它们）、`drop`、`journal`。 |
 | `odoo_docs` | 模块文档，可**独立使用**（不需要 spec、阶段、checkpoint 或实例），因此一个已有模块也能直接被文档化：`check`（把 OCA 片段映射到 Diátaxis、版本方案、changelog、`index.html`、docstring、xpath 注释、OWL 指令 → 带 `file:line` 的 ERROR/WARN）、`plan`、`scaffold`（只创建、绝不覆盖的骨架）和 `report`（持久化 `docs-report.md`；只有当不存在仍是骨架的片段时才是 APPROVED）。对已发布模块的任何改动都必须写 changelog 条目。 |
 | `odoo_security_scan` | 本地静态安全审查（不需要实例）：拼接式原生 SQL、`eval`/`exec`/`pickle`、硬编码密钥、没有理由的 `sudo()`、`auth="none"`、被关闭的 CSRF、QWeb `t-raw`。发现项带有 `file:line` + 修复提示；任何 ERROR 都会阻止 `DONE`。 |
@@ -418,6 +422,19 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
   没有回答者，所以运行会报告 `NOT AUTHORIZED` 并挂起 —— 这正是重点。
 - **模型无法放松自己的策略。** 修改白名单或策略守卫（`odoo_config mode=set`）
   以及切换委派模式（`odoo_setup mode=autonomy`），每一项都需要原生审批。
+- **没有 spec，就没有变更 —— 除非你显式 waive。** 无论请求是什么，哪怕它就是
+  同一个对话里的"顺便把 X 也改了"，一次变更都需要处于写作阶段的 spec
+  （`WRITE_CODE`、`VERIFY`、`FIX_LOOP`、`APPLY_CONFIG`），或者一个你为*本次*
+  会话批准的 waiver。这道门禁覆盖两个面：实例变更（`odoo_execute`、
+  `odoo_module`、`odoo_import prepare`）以及通过宿主 `write`/`edit` 工具做的源码
+  编辑。写 spec 文档本身（`specs/`、`.sdd/`）永远不会被挡 —— 否则那条出路也会被
+  挡住。小改动就是小 spec：`mode=bug`、一条验收标准、没有设计访谈。如果你不想
+  为它写 spec，也可以用 `sdd_phase
+  operation=waive detail="..."`：它会把你的话记录下来、需要你的审批，并且只覆盖
+  本次会话：下一次对话会重新回到这条策略之下，而在它之下做的每一项变更仍然会
+  作为决策记入 KB。`requireSpecForChanges: false` 是人的关闭开关。
+  **诚实的漏洞：** 守卫看到的是宿主工具调用，所以通过 `bash` 做的变更
+  （heredoc、`sed -i`）不受门禁 —— 流水线是路径，不是监狱。
 - **变更前先 checkpoint。** 在 `requireCheckpointBeforeMutation` 开启时（默认），
   `odoo_execute` 的变更会被拒绝，直到 `sdd_checkpoint create` 已对活动 spec 做过
   快照 —— 并且在 `WRITE_CODE` 之前直接被拒绝。快照会跳过符号链接（`lstat`），
@@ -560,6 +577,7 @@ DSH 能跑的地方插件就能跑，并声称支持 **Linux、macOS 和 Windows
         autonomy: supervised    # supervised | autonomous
         licensed: community     # community | enterprise（OCA 总会被搜索）
         requireCheckpointBeforeMutation: true
+        requireSpecForChanges: true     # 每一项变更都需要处于写作阶段的 spec（或 waiver）
         securityReviewRequired: true
         securityInterviewRequired: true
         auditAllTools: true
@@ -604,6 +622,10 @@ traceback、门禁拒绝理由和补救说明。
 - **静态安全扫描的范围** —— `odoo_security_scan` 是基于规则的源码文本检查
   （没有 AST，没有污点追踪），所以它能抓住常见的 Odoo 错误，但不是全部；它补充
   人工审查，绝不替代人工审查。
+- **变更策略管的是工具调用，不是 shell** —— `write`/`edit` 和 Odoo 工具会受门禁
+  约束；而通过 `bash` 写入的文件（heredoc、`sed -i`）不会，因为宿主不会事后检查
+  一条 shell 命令写了什么。这条策略让流水线成为阻力最小的路径、让例外保持可见；
+  它不是沙箱。
 - **多实例** —— 每个项目一个目标（`.env`）。待办：具名实例配置
   （`dev`、`staging`）。
 - **面板中仅作信息的字段** —— `autonomy` 和 `securityInterviewRequired` 会被

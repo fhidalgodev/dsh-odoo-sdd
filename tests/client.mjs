@@ -308,6 +308,16 @@ check("a writable scope reports editable", textsOf(tree).includes("Editable"));
 
 // ---- the persisted shape the panel writes (persist() target keys).
 const source = readFileSync(join(root, "client", "client.js"), "utf8");
+// The change policy is a first-class switch, not a hidden default: it must
+// render, and the form must round-trip it in BOTH directions — a save that
+// forgot to persist it would silently reset the policy to its default.
+check(
+	"the panel offers the spec-required switch",
+	textsOf(tree).some((s) => s.includes("Require a spec for every change")),
+	textsOf(tree).join(" | ").slice(0, 200),
+);
+check("the panel reads the switch from the snapshot", /requireSpecForChanges:\s*asBool\(s\.requireSpecForChanges/.test(source));
+check("the panel persists the switch", /requireSpecForChanges:\s*form\.requireSpecForChanges\s*===/.test(source));
 check("the panel writes specsMode", /specsMode:\s*form\.specsMode/.test(source));
 check("the panel never writes projectRoot", !/projectRoot:\s*form\.projectRoot/.test(source));
 check("the panel keeps the specs dir key for compatibility", /specsDir:\s*form\.specsDir/.test(source));

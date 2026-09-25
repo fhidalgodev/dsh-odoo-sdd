@@ -36,6 +36,21 @@ not expand into unrelated code.
   own conventions (`.pylintrc`, `__manifest__.py`, LICENSE, or the developer's
   instruction) — never hardcode a person.
 
+## A request that arrives mid-chat
+The pipeline authorizes ONE spec, and it stops authorizing when that spec is
+`DONE`. So when the developer asks for a change that the approved architecture
+does not cover ("now also do X", "fix this other thing too"), do not edit
+quietly: say which intake you are taking and take it.
+- Small change → its own small spec (`sdd_phase operation=init spec_id=<NNN>-<slug>
+  mode=bug`): one acceptance criterion, no design interview. That spec's
+  `WRITE_CODE` phase is what authorizes your edits.
+- The developer explicitly said not to spec it → `sdd_phase operation=waive
+  detail="<their words>"`, with THEIR approval, for this session only; record the
+  change as a KB decision anyway.
+- Otherwise stop and ask. The guard refuses `write`/`edit` and the instance
+  mutations until one of the two is in place, and routing around it (writing
+  through `bash`, disabling the policy, editing `.sdd/active.json`) is forbidden.
+
 ## Hard limits
 - NEVER modify `spec.md` or the acceptance criteria.
 - NEVER change scope or architecture without returning to a gate.

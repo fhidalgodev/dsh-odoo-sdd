@@ -309,6 +309,79 @@ export function checkpointsDir(projectRoot: string): string {
 	return join(sddDir(projectRoot), "checkpoints");
 }
 
+/**
+ * A developer's explicit decision to let this session work without a spec.
+ *
+ * WHY IT IS SESSION-SCOPED
+ * "Leave it to your judgement" is a decision about ONE conversation: the next
+ * chat is a new session and starts under the policy again. Scoping it to the
+ * session id (the host's `agent.id`) is what makes that exact, instead of a
+ * timer that would either expire mid-thought or outlive the conversation.
+ */
+export interface Waiver {
+	/** Session that owns the waiver (the host agent/session id). */
+	sessionId: string;
+	/** What the developer said, kept verbatim. */
+	reason: string;
+	/** When it was granted (ISO). */
+	at: string;
+	/** Spec that was active when it was granted, when there was one. */
+	specId?: string;
+}
+
+const WAIVER_FILE = "waiver.json";
+
+/** Read the recorded waiver, or null when there is none (or it is unreadable). */
+export function readWaiver(projectRoot: string): Waiver | null {
+	const file = join(sddDir(projectRoot), WAIVER_FILE);
+	if (!existsSync(file)) return null;
+	try {
+		const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<Waiver>;
+		if (typeof parsed.sessionId !== "string" || parsed.sessionId === "") return null;
+		return {
+			sessionId: parsed.sessionId,
+			reason: typeof parsed.reason === "string" ? parsed.reason : "",
+			at: typeof parsed.at === "string" ? parsed.at : "",
+			...(typeof parsed.specId === "string" ? { specId: parsed.specId } : {}),
+		};
+	} catch {
+		// An unreadable waiver is NO waiver: the policy must not be bypassed by
+		// corrupting the file.
+		return null;
+	}
+}
+
+/**
+ * Whether a session may change things without a spec.
+ * @param projectRoot - project holding the state.
+ * @param sessionId - the calling session's id.
+ * @returns true only for the session the developer granted it to.
+ */
+export function waiverCovers(projectRoot: string, sessionId: string | undefined): Waiver | null {
+	if (sessionId === undefined || sessionId === "") return null;
+	const waiver = readWaiver(projectRoot);
+	return waiver !== null && waiver.sessionId === sessionId ? waiver : null;
+}
+
+/** Record a waiver for one session. */
+export function writeWaiver(projectRoot: string, waiver: Waiver): void {
+	const dir = sddDir(projectRoot);
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	writeFileAtomic(join(dir, WAIVER_FILE), JSON.stringify(waiver, null, 2));
+}
+
+/** Drop the recorded waiver. Returns whether there was one. */
+export function clearWaiver(projectRoot: string): boolean {
+	const file = join(sddDir(projectRoot), WAIVER_FILE);
+	if (!existsSync(file)) return false;
+	try {
+		rmSync(file, { force: true });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /** Slugify a label for use inside a checkpoint id. */
 function slug(label: string): string {
 	return (label || "checkpoint").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "checkpoint";

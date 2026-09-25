@@ -130,6 +130,15 @@ Run `sdd_phase status`. The pipeline starts in `CLARIFY` and **cannot leave it
 until `mode` and `licensed` are confirmed** (the `sdd_phase clarify` gate is
 fail-closed — in SUPERVISED mode it never auto-advances).
 
+**Intake first: is this a new change?** With a spec already active, decide
+whether the request is part of it (same acceptance criteria → continue it) or a
+NEW change — a follow-up edit, a second bug, "now also do X". A new change gets
+its OWN spec (`sdd_phase operation=init spec_id=<NNN>-<slug>`, `mode=bug` for a
+small one: one acceptance criterion, no design interview). Only a spec in a
+writing phase authorizes changes, and a `DONE` spec never does; the developer's
+"leave it to your judgement" is the waiver (`sdd_phase operation=waive`). See
+"A new request after the run closed" below.
+
 1. **Mode** — what is this run for?
    - `create` — build a new module from a spec.
    - `bug` — resolve a defect on an existing module. Record the bug, locate the
@@ -354,7 +363,10 @@ Once clarified: `sdd_phase advance next_phase=READ_SPEC`.
    true) the policy guard REFUSES any `odoo_execute` mutation or
    `odoo_module install|upgrade` until a checkpoint exists. Re-create it before
    each new risky change; `sdd_checkpoint operation=journal` shows what has
-   been applied since.
+   been applied since. With `requireSpecForChanges` (default true) the guard
+   ALSO refuses any source edit (`write`/`edit`) and every instance mutation
+   unless a spec is in a writing phase — or the developer waived the spec for
+   this session. Writing `specs/` and `.sdd/` is always allowed.
 7. `sdd_phase advance next_phase=VERIFY`.
 
 ## Phase 4 — VERIFY (closed feedback loop)
@@ -456,6 +468,37 @@ Verification pyramid, ALWAYS in ascending order:
 6. `BLOCKED` or ceiling reached ⇒ stop and hand to the developer: KB state,
    last FAILED verdict and diagnosis.
 
+## A new request after the run closed (the intake rule)
+
+A request that arrives AFTER the pipeline closed ("now also change X") is a NEW
+change: the spec you finished does not authorize it, and with
+`requireSpecForChanges` (default true) the guard refuses the Odoo tools AND the
+file editors until something does. "Leave it to your judgement" is a decision
+too — that is the waiver — but the default answer is a spec.
+
+Decide the intake in one line BEFORE touching anything, and say which one you
+took:
+
+1. **It does not fit the closed spec.** Do not reopen it: `DONE` stays the
+   honest verdict of what was verified. A follow-up is its own spec.
+2. **Small change** (a bug, a tweak, one behaviour): open a SMALL spec —
+   `sdd_phase operation=init spec_id=<NNN>-<slug> mode=bug`. A `bug` spec is
+   short by construction: one acceptance criterion, no design interview, no
+   architecture ceremony. One line of "what changes" and one of "how I will
+   check it" in `spec.md`, then `mark_spec_loaded` → `advance` to `WRITE_CODE`.
+3. **The developer said not to spec it** ("do it your way", "no spec for this"):
+   take the waiver — `sdd_phase operation=waive detail="<their exact words>"`.
+   It needs THEIR approval, it covers THIS session only, and you still record
+   every change as a KB decision with how it was verified.
+4. **The policy is off** (`requireSpecForChanges: false`, set by the developer):
+   only then change things with neither spec nor waiver.
+
+Never route around a refusal — no writing files through `bash`, no flipping the
+policy yourself, no editing `.sdd/active.json`. The refusal names the three ways
+out; take one, or ask. Whatever the intake, the rest of the rules still hold: a
+checkpoint before mutating the instance, an honest verdict, and the handoff
+updated (`sdd_handoff` copies the waiver, if any, into `handoff.md`).
+
 ## Closing the run (DONE or BLOCKED)
 
 Before you stop, ALWAYS write the handoff:
@@ -482,6 +525,7 @@ specs/<NNN>-<slug>/
 Outside the spec directory (plugin-owned, shared by the run):
 .sdd/config.json        # persisted config (repos, allowlist, policy flags)
 .sdd/active.json        # active spec + phase + active checkpoint (policy input)
+.sdd/waiver.json        # developer-approved exemption from the spec policy (THIS session only)
 .sdd/checkpoints/<id>/  # file snapshots + data journal (rollback surface)
 .sdd/audit.jsonl        # append-only record of EVERY tool call (append-only)
 ```

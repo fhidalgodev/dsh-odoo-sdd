@@ -40,6 +40,10 @@
         licensed: 'community'
         # Fail-closed policy guards (edited in Settings too).
         requireCheckpointBeforeMutation: true
+        # Nothing changes without a spec that authorizes it (a writing phase) or
+        # a waiver the developer approved for THIS session. Covers instance
+        # mutations and edits of project files alike.
+        requireSpecForChanges: true
         securityReviewRequired: true
         securityInterviewRequired: true
         auditAllTools: true

@@ -59,6 +59,11 @@ guiado por especificación (SDD). Dos ideas lo sostienen:
   un diagnóstico de causa raíz, las iteraciones verify/fix están acotadas,
   `stop.md` detiene todo, y los veredictos son honestos: una verificación fallida
   persiste como FAILED y nunca puede reportarse como éxito.
+- **Sin cambio sin spec** — una petición que llega *después* de que el pipeline
+  cerró ("ahora cambiá también X" en el mismo chat) es un cambio nuevo, así que
+  tiene su propia spec (pequeña) o un waiver explícito de tu parte. El guard cubre
+  por igual las mutaciones de instancia y las ediciones de código, y dice cuál de
+  las tres salidas está disponible en vez de editar en silencio.
 
 > [!NOTE]
 > **Lo que NO es:** un orquestador de infraestructura, un gestor de credenciales
@@ -387,7 +392,7 @@ filas que contó no se reenvían. La cookie de sesión queda en `.sdd/session.js
 | `odoo_validate` | Validación LOCAL del módulo sin instancia: `__manifest__.py` + depends, los XML declarados existen, `security/ir.model.access.csv` cuando hay modelos. Devuelve findings file:line, más el `module_dir` y la raíz del proyecto que resolvió (una ruta relativa se resuelve contra la carpeta de la sesión, nunca contra el cwd del proceso). |
 | `odoo_errors` | Lee errores recientes del servidor (`ir.logging`) — el equivalente remoto de obtener los logs del entorno. |
 | `odoo_session` | Mintea una sesión web sin contraseña (patrón `connect_as_user`) guardada en `.sdd/session.json` (chmod 600) para pruebas UI con Playwright. La cookie nunca se devuelve. |
-| `sdd_phase` | Máquina de fases: `init`, `clarify`, `status` (resumen del logbook, directorio del spec y ubicación de los specs), `mark_spec_loaded`, `advance` (gates fail-closed + provenance `approval_source`), `fail` (escalera de fallos + veredicto FAILED), `succeed` (veredicto PASSED; se rechaza salvo que cada fila de AC en `test-plan.md` lea un `pass` explícito), `rollback` (restaura un checkpoint y vuelve a WRITE_CODE), `diagnose`. |
+| `sdd_phase` | Máquina de fases: `init`, `clarify`, `status` (resumen del logbook, directorio del spec y ubicación de los specs), `mark_spec_loaded`, `advance` (gates fail-closed + provenance `approval_source`), `fail` (escalera de fallos + veredicto FAILED), `succeed` (veredicto PASSED; se rechaza salvo que cada fila de AC en `test-plan.md` lea un `pass` explícito), `rollback` (restaura un checkpoint y vuelve a WRITE_CODE), `diagnose`, `waive` (registra — con aprobación nativa — que ESTA sesión puede trabajar sin spec: el "dejalo a tu criterio" del desarrollador, guardado textual en `.sdd/waiver.json`, reportado por `status` y por el handoff; `revoke: true` lo elimina y no necesita aprobación). |
 | `sdd_checkpoint` | La superficie de rollback: `create` (snapshot del workspace, queda activo), `list`, `restore` (archivos y, con `restore_data=true` + `confirm_destructive=true`, las mutaciones de datos registradas: el undo corre bajo el contexto de compañía que usó la mutación, convierte formas de lectura en valores de escritura, marca cada operación para que un reintento no la compense dos veces, rechaza un journal de otro destino y reporta cada campo que no pudo restaurar; **siempre reporta** los archivos creados después del checkpoint y los borra solo con `remove_created=true`), `drop`, `journal`. |
 | `odoo_docs` | Documentación de un módulo, usable **por sí sola** (sin spec, fase, checkpoint ni instancia), así que un módulo existente se puede documentar sin más: `check` (fragmentos OCA mapeados a Diátaxis, esquema de versión, changelog, `index.html`, docstrings, comentarios xpath, directiva OWL → ERROR/WARN con `file:line`), `plan`, `scaffold` (esqueletos create-only, nunca sobrescribe) y `report` (persiste `docs-report.md`; APPROVED solo si nada quedó en esqueleto). La entrada de changelog es obligatoria para cualquier cambio a un módulo ya publicado. |
 | `odoo_security_scan` | Revisión de seguridad estática local (sin instancia): SQL concatenado, `eval`/`exec`/`pickle`, secretos hardcodeados, `sudo()` sin justificar, `auth="none"`, CSRF desactivado, `t-raw` en QWeb. Hallazgos con `file:line` + sugerencia; cualquier ERROR bloquea `DONE`. |
@@ -451,6 +456,23 @@ camino de mutación tiene vuelta atrás y forma de probar qué pasó.
 - **El modelo no puede relajar su propia política.** Cambiar la allowlist o las
   guardas (`odoo_config mode=set`) y cambiar el modo de delegación
   (`odoo_setup mode=autonomy`) exigen aprobación nativa cada uno.
+- **Sin cambio sin spec — o tu waiver explícito.** Sea cual sea la petición
+  ("ahora cambiá también X" en el mismo chat), un cambio necesita una spec en una
+  fase de escritura (`WRITE_CODE`, `VERIFY`, `FIX_LOOP`, `APPLY_CONFIG`) o un
+  waiver que hayas aprobado para ESA sesión. La compuerta cubre ambas
+  superficies: las mutaciones de instancia (`odoo_execute`, `odoo_module`,
+  `odoo_import prepare`) y las ediciones de código a través de las tools
+  `write`/`edit` del host. Escribir los propios documentos de spec (`specs/`,
+  `.sdd/`) nunca se bloquea — si no, la salida también quedaría bloqueada. Un
+  cambio pequeño es una spec pequeña: `mode=bug`, un criterio de aceptación, sin
+  entrevista de diseño. Si preferís no especificarlo, `sdd_phase
+  operation=waive detail="..."` registra tus palabras, exige tu aprobación y
+  cubre solo esta sesión: el próximo chat arranca otra vez bajo la política, y
+  cada cambio hecho bajo ella igual queda en la KB como decisión.
+  `requireSpecForChanges: false` es el interruptor humano. **Agujero honesto:** el
+  guard ve las llamadas a las tools del host, así que un cambio hecho a través de
+  `bash` (un heredoc, `sed -i`) no queda gateado — el pipeline es el camino, no
+  una cárcel.
 - **Checkpoint antes de mutar.** Con `requireCheckpointBeforeMutation` activo
   (default), las mutaciones de `odoo_execute` se deniegan hasta que
   `sdd_checkpoint create` haya hecho snapshot de la spec activa — y se deniegan
@@ -614,6 +636,7 @@ presets para copiar y pegar donde los necesites.
         autonomy: supervised    # supervised | autonomous
         licensed: community     # community | enterprise (OCA se busca siempre)
         requireCheckpointBeforeMutation: true
+        requireSpecForChanges: true     # todo cambio necesita una spec en una fase de escritura (o un waiver)
         securityReviewRequired: true
         securityInterviewRequired: true
         auditAllTools: true
@@ -662,6 +685,12 @@ solo resúmenes) o cuando escribís `/odoo-sdd-workflow`.
 - **Alcance del scan de seguridad** — `odoo_security_scan` es basado en reglas
   sobre el texto fuente (sin AST ni taint tracking), así que atrapa los errores
   típicos de Odoo, no todos; complementa la revisión humana, no la reemplaza.
+- **La política de cambios cubre las llamadas a tools, no el shell** —
+  `write`/`edit` y las tools de Odoo quedan gateadas; un archivo escrito a
+  través de `bash` (un heredoc, `sed -i`) no, porque el host no expone ninguna
+  inspección posterior de lo que escribió un comando de shell. La política hace
+  que el pipeline sea el camino de menor resistencia y la excepción visible; no
+  es un sandbox.
 - **Multi-instancia** — un solo target por proyecto (`.env`). Pendiente: perfiles
   de instancia con nombre (`dev`, `staging`).
 - **Campos del panel que son informativos** — `autonomy` y

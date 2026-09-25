@@ -74,6 +74,10 @@ import { appendAuditLine, recordAudit } from "./audit.js";
 import {
 	readActiveState,
 	writeActiveState,
+	readWaiver,
+	writeWaiver,
+	clearWaiver,
+	waiverCovers,
 	createCheckpoint,
 	listCheckpoints,
 	restoreCheckpointFiles,
@@ -146,6 +150,7 @@ export const Config = z.object({
 	autonomy: z.string(),
 	licensed: z.string(),
 	requireCheckpointBeforeMutation: z.boolean(),
+	requireSpecForChanges: z.boolean(),
 	securityReviewRequired: z.boolean(),
 	securityInterviewRequired: z.boolean(),
 	auditAllTools: z.boolean(),
@@ -183,6 +188,8 @@ interface OdooSddConfig {
 	autonomy?: string;
 	/** Default licensing strategy: community | enterprise. */
 	licensed?: string;
+	/** No change — instance mutation or project file edit — without a spec that authorizes it, or a session waiver. */
+	requireSpecForChanges?: boolean;
 	/** Refuse mutating calls until a checkpoint exists (fail-closed). */
 	requireCheckpointBeforeMutation?: boolean;
 	/** Require a clean security review before DONE. */
@@ -649,6 +656,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		autonomy: config.autonomy ?? "supervised",
 		licensed: config.licensed ?? "community",
 		requireCheckpointBeforeMutation: config.requireCheckpointBeforeMutation ?? true,
+		requireSpecForChanges: config.requireSpecForChanges ?? true,
 		securityReviewRequired: config.securityReviewRequired ?? true,
 		securityInterviewRequired: config.securityInterviewRequired ?? true,
 		auditAllTools: config.auditAllTools ?? true,
@@ -1321,7 +1329,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			operation: {
 				type: "string",
 				required: true,
-				enum: ["init", "clarify", "status", "mark_spec_loaded", "advance", "fail", "succeed", "rollback", "diagnose"],
+				enum: ["init", "clarify", "status", "mark_spec_loaded", "advance", "fail", "succeed", "rollback", "diagnose", "waive"],
 				description: "State-machine operation to perform.",
 			},
 			spec_id: {
@@ -1359,7 +1367,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 			detail: {
 				type: "string",
-				description: "Note/verdict/error summary recorded in the KB graph.",
+				description: "Note/verdict/error summary recorded in the KB graph. Required for operation=waive: it carries what the developer said.",
+			},
+			revoke: {
+				type: "boolean",
+				description: "operation=waive only: drop the recorded waiver (tightening the policy needs no approval).",
 			},
 		},
 		output: {
@@ -1381,7 +1393,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 		},
 		async execute(args: {
-			operation: "init" | "clarify" | "status" | "mark_spec_loaded" | "advance" | "fail" | "succeed" | "rollback" | "diagnose";
+			operation: "init" | "clarify" | "status" | "mark_spec_loaded" | "advance" | "fail" | "succeed" | "rollback" | "diagnose" | "waive";
 			spec_id: string;
 			mode?: PipelineMode;
 			licensed?: "community" | "enterprise";
@@ -1390,6 +1402,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			approval_source?: "human" | "human-proxy";
 			checkpoint_id?: string;
 			detail?: string;
+			revoke?: boolean;
 		}, exec?: unknown) {
 			// The root comes from the CALLING SESSION: two open projects must
 			// never read or write each other's spec state.
@@ -1508,9 +1521,79 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				};
 			}
 			const state = loadState(specDir);
+			if (args.operation === "waive") {
+				// The developer's "leave it to your judgement" for THIS session.
+				// It needs their approval: a policy the model can exempt itself
+				// from is not a policy.
+				if (args.revoke === true) {
+					const dropped = clearWaiver(projectRoot);
+					return {
+						operation: "waive" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
+						summary: summarize(state),
+						detail: dropped
+							? "Waiver revoked: this session is back under the spec policy."
+							: "No waiver was recorded for this project.",
+					};
+				}
+				const reason = (args.detail ?? "").trim();
+				if (reason === "") {
+					return {
+						operation: "waive" as string, phase: state.phase as string, ok: false, requireDiagnosis: false,
+						summary: summarize(state),
+						detail:
+							"operation=waive needs `detail` with what the developer said (\"leave it to your judgement\", " +
+							"\"no spec for this one\"…). The reason is recorded: it is the only memory of why a change " +
+							"happened outside the pipeline.",
+					};
+				}
+				const active = readActiveState(projectRoot);
+				const sessionId = sessionIdOf(exec);
+				if (sessionId === undefined) {
+					return {
+						operation: "waive" as string, phase: state.phase as string, ok: false, requireDiagnosis: false,
+						summary: summarize(state),
+						detail:
+							"No session id in this call, so a waiver cannot be scoped: it would either apply to nobody or " +
+							"to everybody. Run it from an interactive session.",
+					};
+				}
+				const outcome = await requestNativeApproval(
+					ctx,
+					exec,
+					"sdd_phase",
+					`Allow THIS session to change the project without a spec.\n` +
+						`Reason given by the developer: ${reason}\n` +
+						`Scope: this chat only (session ${sessionId}); the next session starts under the policy again. ` +
+						`Every change made under it still has to be recorded as a KB decision.`,
+				);
+				if (outcome !== "allowed-once") {
+					return {
+						operation: "waive" as string, phase: state.phase as string, ok: false, requireDiagnosis: false,
+						summary: summarize(state),
+						detail: `Waiver not granted (${outcome}). The spec policy stays armed for this session.`,
+					};
+				}
+				writeWaiver(projectRoot, {
+					sessionId,
+					reason,
+					at: new Date().toISOString(),
+					...(active.specId === null ? {} : { specId: active.specId }),
+				});
+				kbAppend(state, "decision", `no spec for this session: ${reason.slice(0, 200)}`);
+				return {
+					operation: "waive" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
+					summary: summarize(state),
+					detail:
+						`Waiver recorded for session ${sessionId} (approved by the developer).\n` +
+						"Nothing else changes: the change still has to be recorded as a KB decision with how it was " +
+						"verified, and this waiver does not survive into the next chat.",
+				};
+			}
 			if (args.operation === "status") {
 				const kb = kbRead(specDir);
 				const active = readActiveState(projectRoot);
+				const waiver = readWaiver(projectRoot);
+				const sameSession = waiver !== null && waiver.sessionId === sessionIdOf(exec);
 				writeActiveState(projectRoot, { specId: args.spec_id, phase: state.phase });
 				return {
 					operation: "status" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
@@ -1518,6 +1601,14 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					detail:
 						`KB nodes: ${kb.length}. Last: ${kb.length > 0 ? kb[kb.length - 1]!.summary : "none"}` +
 						`\nCheckpoint: ${active.checkpointId ?? "none (mutations are blocked while the policy requires one)"}` +
+						`\nSpec policy: ${cfgPhase.requireSpecForChanges ? "a spec in a writing phase (or a waiver) is required for every change" : "OFF — changes are not gated by the spec policy"}` +
+						(state.phase === "DONE"
+							? "\nThis spec is DONE: a new request needs a NEW spec (mode=bug for a small change) or a waiver."
+							: "") +
+						(waiver === null
+							? ""
+							: `\nWaiver: granted ${waiver.at} for session ${waiver.sessionId}` +
+								`${sameSession ? " (this one)" : " (a different session)"} — reason: ${waiver.reason.slice(0, 120)}`) +
 						`\nSpec directory: ${displayPath(specDir)}` +
 						`\nSpecs location: ${describeSpecsLocation({ projectRoot, specsMode: cfgPhase.specsMode, specsDir: cfgPhase.specsDir, specsRoot: cfgPhase.specsRoot })}` +
 						`\n${rootNote(root)}`,
@@ -1744,6 +1835,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							autonomy: { type: "string", required: true },
 							licensed: { type: "string", required: true },
 							requireCheckpointBeforeMutation: { type: "boolean", required: true },
+							requireSpecForChanges: { type: "boolean" },
 							securityReviewRequired: { type: "boolean", required: true },
 							securityInterviewRequired: { type: "boolean", required: true },
 							auditAllTools: { type: "boolean", required: true },
@@ -1793,6 +1885,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			autonomy?: string;
 			licensed?: string;
 			requireCheckpointBeforeMutation?: boolean;
+			requireSpecForChanges?: boolean;
 			securityReviewRequired?: boolean;
 			securityInterviewRequired?: boolean;
 			auditAllTools?: boolean;
@@ -1820,6 +1913,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					autonomy: asString(data["autonomy"], "supervised"),
 					licensed: asLicense(data["licensed"], "community"),
 					requireCheckpointBeforeMutation: typeof data["requireCheckpointBeforeMutation"] === "boolean" ? data["requireCheckpointBeforeMutation"] : true,
+					requireSpecForChanges: typeof data["requireSpecForChanges"] === "boolean" ? data["requireSpecForChanges"] : true,
 					securityReviewRequired: typeof data["securityReviewRequired"] === "boolean" ? data["securityReviewRequired"] : true,
 					securityInterviewRequired: typeof data["securityInterviewRequired"] === "boolean" ? data["securityInterviewRequired"] : true,
 					auditAllTools: typeof data["auditAllTools"] === "boolean" ? data["auditAllTools"] : true,
@@ -1917,6 +2011,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.autonomy !== undefined) updates["autonomy"] = args.autonomy;
 			if (args.licensed !== undefined) updates["licensed"] = args.licensed;
 			if (args.requireCheckpointBeforeMutation !== undefined) updates["requireCheckpointBeforeMutation"] = args.requireCheckpointBeforeMutation;
+			if (args.requireSpecForChanges !== undefined) updates["requireSpecForChanges"] = args.requireSpecForChanges;
 			if (args.securityReviewRequired !== undefined) updates["securityReviewRequired"] = args.securityReviewRequired;
 			if (args.securityInterviewRequired !== undefined) updates["securityInterviewRequired"] = args.securityInterviewRequired;
 			if (args.auditAllTools !== undefined) updates["auditAllTools"] = args.auditAllTools;
@@ -2033,6 +2128,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			autonomy: asString(merged["autonomy"], config.autonomy ?? "supervised"),
 			licensed: ((v: unknown, fb: string): string => (asString(v, fb) === "enterprise" ? "enterprise" : "community"))(merged["licensed"], config.licensed ?? "community"),
 			requireCheckpointBeforeMutation: asBool(merged["requireCheckpointBeforeMutation"], config.requireCheckpointBeforeMutation ?? true),
+			requireSpecForChanges: asBool(merged["requireSpecForChanges"], config.requireSpecForChanges ?? true),
 			securityReviewRequired: asBool(merged["securityReviewRequired"], config.securityReviewRequired ?? true),
 			securityInterviewRequired: asBool(merged["securityInterviewRequired"], config.securityInterviewRequired ?? true),
 			auditAllTools: asBool(merged["auditAllTools"], config.auditAllTools ?? true),
@@ -2652,12 +2748,25 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			lines.push(`- projectRoot=${cfg.projectRoot} (source: ${cfg.rootSource})`);
 			lines.push(`- specs: ${describeSpecsLocation({ projectRoot: cfg.projectRoot, specsMode: cfg.specsMode, specsDir: cfg.specsDir, specsRoot: cfg.specsRoot })}`);
 			lines.push(`- autonomy=${cfg.autonomy} licensed=${cfg.licensed}`);
+			lines.push(`- requireSpecForChanges=${cfg.requireSpecForChanges}`);
 			lines.push(`- allowlist=${JSON.stringify(cfg.executeAllowlist)}`);
 			if (cfg.methodAllowlist.length > 0) lines.push(`- method allowlist=${JSON.stringify(cfg.methodAllowlist)}`);
 			lines.push(`- communityRepo=${cfg.communityRepoPath || cfg.communityRepoUrl}`);
 			lines.push(`- enterpriseRepo=${cfg.enterpriseRepoPath || cfg.enterpriseRepoUrl}`);
 			lines.push(`- requireCheckpointBeforeMutation=${cfg.requireCheckpointBeforeMutation} securityReviewRequired=${cfg.securityReviewRequired} auditAllTools=${cfg.auditAllTools}`);
 			lines.push("");
+			// A waiver is the one thing that lets work happen outside the pipeline:
+			// the closing document has to carry it, with the reason the developer
+			// gave, or the run reads as if every change had a spec.
+			const handoffWaiver = readWaiver(cfg.projectRoot);
+			if (handoffWaiver !== null) {
+				lines.push("## Waivers (work done without a spec)");
+				lines.push(
+					`- Session ${handoffWaiver.sessionId}, granted ${handoffWaiver.at}` +
+						`${handoffWaiver.specId === undefined ? "" : ` (spec ${handoffWaiver.specId} was active)`} — reason: ${handoffWaiver.reason}`,
+				);
+				lines.push("");
+			}
 			lines.push("## Checkpoints");
 			lines.push(checkpoints.length === 0 ? "- (none)" : checkpoints.map((c) => `- ${c.id} — ${c.label} (${c.files.length} file(s))`).join("\n"));
 			lines.push("");
@@ -2776,7 +2885,81 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const op = String(args["operation"] ?? "");
 			return op === "install" || op === "upgrade";
 		}
+		if (name === "odoo_import" && String(args["use"] ?? "") === "prepare") {
+			// The upload writes a temporary importer record on the instance: it is
+			// the one mutating step of the import flow (preview/map/plan are local).
+			return true;
+		}
 		return false;
+	};
+
+	/**
+	 * Whether a call EDITS a file of the project.
+	 *
+	 * The host's own editors are the normal way a change lands on disk, and
+	 * without this the pipeline could be bypassed entirely: the instance
+	 * mutations were gated while the module source was not. The spec documents
+	 * and the plugin's own state are always writable — the pipeline itself
+	 * writes them — and anything outside the project is none of the plugin's
+	 * business.
+	 * @param name - tool name.
+	 * @param args - tool arguments.
+	 * @param cfg - the session's effective configuration.
+	 * @returns true when the call edits a project file that a spec must authorize.
+	 */
+	const isSourceEdit = (name: string, args: Record<string, unknown>, cfg: ReturnType<typeof effectiveConfig>): boolean => {
+		if (name !== "write" && name !== "edit") return false;
+		const raw = args["file_path"];
+		if (typeof raw !== "string" || raw.trim() === "") return false;
+		let abs: string;
+		try {
+			abs = isAbsolute(raw) ? resolve(raw) : resolve(cfg.projectRoot, raw);
+		} catch {
+			return false;
+		}
+		if (!isWithinRoot(cfg.projectRoot, abs)) return false;
+		try {
+			const specsBase = specsBaseFor({
+				specsMode: cfg.specsMode,
+				specsRoot: cfg.specsRoot,
+				specsDir: cfg.specsDir,
+				projectRoot: cfg.projectRoot,
+			});
+			if (isWithinRoot(specsBase, abs)) return false;
+		} catch {
+			// An unresolvable specs base must not open the gate: fall through and
+			// let the .sdd check decide.
+		}
+		return !isWithinRoot(join(cfg.projectRoot, ".sdd"), abs);
+	};
+
+	/** Session id of a tool call (the host's `agent.id` IS the session id). */
+	const sessionIdOf = (exec: unknown): string | undefined => {
+		const e = (exec ?? {}) as { agent?: { id?: unknown } };
+		return typeof e.agent?.id === "string" && e.agent.id !== "" ? e.agent.id : undefined;
+	};
+
+	/**
+	 * What a change must satisfy: a spec in an authorizing phase, or a waiver.
+	 * @param waived - whether the developer already waived the spec requirement
+	 * for this session, so the answer is known before the message is built.
+	 */
+	const changeGate = (
+		cfg: ReturnType<typeof effectiveConfig>,
+		active: ReturnType<typeof readActiveState>,
+		waived: boolean,
+	): string | undefined => {
+		if (!cfg.requireSpecForChanges || waived) return undefined;
+		const authorizedPhases = ["WRITE_CODE", "VERIFY", "FIX_LOOP", "APPLY_CONFIG"];
+		if (active.phase !== null && authorizedPhases.includes(active.phase)) return undefined;
+		const where = active.specId === null ? "there is no spec for this project" : `the active spec ${active.specId} is in ${String(active.phase)}`;
+		return (
+			`Change blocked by policy: ${where}, so nothing authorizes it. Three ways out: ` +
+			"(1) open a small spec for THIS change (sdd_phase operation=init spec_id=<NNN-slug>, then clarify mode=bug) " +
+			"and advance it to WRITE_CODE, (2) if the change is one of the active spec's acceptance criteria, continue " +
+			"that spec, or (3) ask the developer to let this session work without a spec (sdd_phase operation=waive " +
+			'detail="<what they said>") — that needs their approval and covers this session only.'
+		);
 	};
 
 	const denyWithAudit = (name: string, args: Record<string, unknown>, reason: string, exec?: unknown): string => {
@@ -2856,7 +3039,24 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						}
 					}
 
-					// 3) Mutation policy (checkpoint + phase).
+					// 3) Change policy: nothing changes without a spec that authorizes
+					// it (a phase of writing) or a waiver the developer approved for
+					// THIS session. Instance mutations and file edits are the same
+					// question asked of two different surfaces.
+					const waived = waiverCovers(cfg.projectRoot, sessionIdOf(execution)) !== null;
+					const editsSource = isSourceEdit(name, args, cfg);
+					if (isMutatingCall(name, args) || editsSource) {
+						const gate = changeGate(cfg, active, waived);
+						if (gate !== undefined) return denyWithAudit(name, args, gate, execution);
+					}
+
+					// 4) Mutation policy (checkpoint + phase). A checkpoint covers
+					// instance mutations: a rollback needs the pre-image the journal
+					// stores, while a file edit is not undone by it. The phase rule
+					// belongs to the SPEC question, so the same two answers that open
+					// the change gate (policy off, waiver for this session) open it
+					// too; the checkpoint rule is its own policy and stays armed —
+					// "no spec for this" was never "no rollback needed".
 					if (isMutatingCall(name, args)) {
 						if (cfg.requireCheckpointBeforeMutation && active.checkpointId === null) {
 							return denyWithAudit(
@@ -2867,8 +3067,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 								execution,
 							);
 						}
-						const allowedPhases = ["WRITE_CODE", "VERIFY", "FIX_LOOP"];
-						if (active.phase !== null && !allowedPhases.includes(active.phase)) {
+						const allowedPhases = ["WRITE_CODE", "VERIFY", "FIX_LOOP", "APPLY_CONFIG"];
+						if (cfg.requireSpecForChanges && !waived && active.phase !== null && !allowedPhases.includes(active.phase)) {
 							return denyWithAudit(
 								name,
 								args,

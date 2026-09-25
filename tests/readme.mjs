@@ -271,6 +271,18 @@ for (const doc of docs) {
 	for (const name of toolNames) {
 		check(`${doc.file}: documents and names ${name}`, doc.text.includes(`\`${name}\``));
 	}
+
+	// The change policy is a headline feature, not a footnote: every language
+	// must document the switch, the waiver and the honest shell hole. A
+	// translation that quietly omits them describes a plugin that gates
+	// nothing, and no reader of that language would know.
+	for (const token of ["requireSpecForChanges", ".sdd/waiver.json", "mode=bug", "sed -i"]) {
+		check(`${doc.file}: documents ${token}`, doc.text.includes(token));
+	}
+	check(
+		`${doc.file}: the waiver is an OPERATION of sdd_phase, not a promise`,
+		/`waive`/.test(doc.text) && /`sdd_phase`/.test(doc.text),
+	);
 }
 
 // ---- every README must stay in step with the others. These used to compare

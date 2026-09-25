@@ -358,7 +358,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | `odoo_connect` | 探测实例：服务器版本 + 认证。报告经过掩码处理；区分 `NEEDS_SETUP` / `NEEDS_SECRET` / `DEFERRED` / `SKIPPED` 状态（从不在聊天中索要密钥）。 |
 | `odoo_setup` | 上手引导：`check`（级联 + gitignore + 委派模式）、`interactive`（不含密钥的 chmod 600 脚手架）、**`authorize`**（通过原生审批向开发者本人索要一个绑定当前 url/db/user 的连接授权）、**`revoke`**（撤销授权）、**`purge`**（先给出计划，然后在 `confirm_destructive=true` 加人工批准的前提下，只删除插件自己在 `.sdd/` 下的状态）、`later`、`skip`、`reset`、`autonomy`（supervised \| autonomous，需人工批准）。密钥永远不会作为参数被接受。 |
 | `odoo_module` | 对 `ir.module.module` 执行 `info` / `install` / `upgrade`（`button_immediate_*`）。原样返回服务器自己的输出或 traceback，并做脱敏 —— 这就是闭环反馈。 |
-| `odoo_execute` | 带 fail-closed 白名单的通用 CRUD/RPC（`execute_kw`）。方法被显式分类，未分类的方法会被拒绝：读操作（`search_read`、`read`、`search_count`、`read_group`、`fields_get`）允许执行，并可用 `fields`/`limit`/`order`/`offset` 做投影和分页（小数或负数的 `offset` 会被拒绝，绝不被截断）；变更操作（`create`/`write`/`unlink`）需要 `confirm_destructive=true` **且**模型在 `executeAllowlist` 中，并且会被记入日志，以便数据撤销时重放它们；**业务动作**（任意模型的、既不是读操作也不是 create/write/unlink 的方法）刻意**不能**在这里调用 —— 它以功能批次中的 `kind: "method"` 形式执行（白名单中的配对、状态前置条件、状态证明），或者作为 runbook 中的手动步骤。`context` 原样转发 —— 在多公司实例上用 `allowed_company_ids`/`company_id` —— 服务器仍然会应用它自己的 ACL。判断是否拒绝不需要连接实例。 |
+| `odoo_execute` | 针对实例的通用 RPC（`execute_kw`）：**任意模型的任何公共方法都可调用**，而它需要什么由它是什么决定。读操作（`search`、`search_read`、`search_count`、`read`、`read_group`、`fields_get`、`name_get`、`name_search`、`default_get`、`exists`、`check_access_rights`、`check_access_rule`）可自由执行，并可用 `fields`/`limit`/`order`/`offset` 做投影和分页（小数或负数的 `offset` 会被拒绝，绝不被截断）；CRUD 变更操作（`create`/`write`/`unlink`）需要 `confirm_destructive=true` **且**模型在 `executeAllowlist` 中，并且会被记入日志，以便数据撤销时重放它们；每一个**业务动作**（`action_*`、`button_*`、`do_*`……，例如确认一张订单）都需要 `confirm_destructive=true` 且**无需白名单**，因为插件无法重放它的效果 —— 它永远不会被记入日志，对它不存在撤销，而超时会报告为一个 **INDETERMINATE** 结果，而不是普通的失败。声明 `precondition`/`postcondition`（与批次使用的形状相同：`{domain, expect, count}`），在调用之前带上状态守卫、在调用之后带上状态证明：如果前置条件失败，什么都不会发出；如果后置条件失败，应答会说明调用**确实已发出**、实例可能只改了一半；没有它们时，`OK` 只意味着服务器接受了这次调用。**私有方法**（`_name`）会被拒绝，而这堵墙是 Odoo 自己的：`execute_kw` 通过 `get_public_method` 分发，后者对 `_…`、`init`、`@api.private` 和内部属性名会回答 `AccessError` —— 所以要在源码里读该模型（原生/自定义仓库由 `odoo_config mode=read` 报告），并调用包装它的公共按钮或动作（`sale.order._create_invoices` 是私有的；`sale.advance.payment.inv` 向导暴露了公共的 `create_invoices()`）。要执行多个操作，或者希望每次运行都有人工审批时，请使用带 `kind: "method"` 的功能批次。`context` 原样转发 —— 在多公司实例上用 `allowed_company_ids`/`company_id` —— 服务器仍然会应用它自己的 ACL。 |
 | `odoo_validate` | 本地、无需实例的模块结构检查：`__manifest__.py` 是否存在 + depends、声明的数据 XML 文件是否存在、有模型时是否有 `security/ir.model.access.csv`。返回 file:line 级别的发现，以及它解析出的 `module_dir` 和项目根目录（相对路径按会话所在文件夹解析，绝不按进程 cwd 解析）。 |
 | `odoo_errors` | 读取最近的 `ir.logging` 服务器错误 —— 相当于远程拉取环境日志。 |
 | `odoo_session` | 铸造一个无密码的 web 会话（`connect_as_user` 模式），存放在 `.sdd/session.json`（chmod 600），供 Playwright UI 测试使用。cookie 本身永远不会被返回。 |
@@ -571,7 +571,8 @@ DSH 能跑的地方插件就能跑，并声称支持 **Linux、macOS 和 Windows
         specsRoot: ''           # specsMode=central 时的绝对文件夹
         specsDir: specs         # specsMode=project 时项目内的文件夹
         executeAllowlist: []    # odoo_execute 可以 create/write/unlink 的模型
-        methodAllowlist: []     # 批次可调用的 "model.method" 对（任意模型）
+        methodAllowlist: []     # 功能批次可调用的 "model.method" 对（任意模型）
+                                # 即席 RPC 不需要列表：任意公共方法 + confirm_destructive
         communityRepoUrl: https://github.com/odoo/odoo
         enterpriseRepoUrl: https://github.com/odoo/enterprise
         autonomy: supervised    # supervised | autonomous

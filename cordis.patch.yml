@@ -26,9 +26,10 @@
         specsRoot: ''
         specsDir: 'specs'
         executeAllowlist: []
-        # Business actions a functional batch may call, as "model.method" (or
+        # Business actions a functional BATCH may call, as "model.method" (or
         # "model:method"): action_confirm, action_assign, button_validate…
-        # Empty = no method beyond create/write/unlink can run.
+        # Empty = no method runs in a batch. The ad-hoc RPC needs no list at all:
+        # any public method runs there with confirm_destructive=true.
         methodAllowlist: []
         # Odoo source repositories: URL or local OS path (empty path = use URL).
         communityRepoUrl: 'https://github.com/odoo/odoo'

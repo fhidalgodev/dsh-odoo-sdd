@@ -1722,6 +1722,9 @@ console.log("== odoo_execute capability (context, read_group, fields_get) ==");
 	// The classification is explicit and fail-closed.
 	check("read methods are classified as reads", runtimeMod2.READ_METHODS.has("search_read") && runtimeMod2.READ_METHODS.has("read_group") && runtimeMod2.READ_METHODS.has("fields_get"));
 	check("mutating methods are classified separately", runtimeMod2.MUTATING_METHODS.has("create") && !runtimeMod2.READ_METHODS.has("create"));
+	// THE SURFACE IS NOT HANDCUFFED: an unknown-but-public method name is accepted
+	// by the schema and classified in the body as a business action. The enum that
+	// used to cut it before the handler is gone on purpose.
 	let rr = await (async () => {
 		try {
 			return await rx.execute({ model: "sale.order", method: "totally_bogus_method" });
@@ -1730,15 +1733,23 @@ console.log("== odoo_execute capability (context, read_group, fields_get) ==");
 		}
 	})();
 	check(
-		"an unknown method is refused by the tool schema",
-		rr.denied === true && /must be one of/i.test(rr.reason) && /read_group/.test(rr.reason),
+		"the schema no longer blocks a method by name",
+		!/must be one of/i.test(String(rr.reason)) && /confirm_destructive/.test(String(rr.reason)),
+		String(rr.reason).slice(0, 140),
 	);
-	// Defence in depth: the in-body classification refuses an unclassified
-	// method even if one is ever added to the enum without a decision.
+	const readList = [...runtimeMod2.READ_METHODS];
+	check("read methods are classified as reads", readList.includes("search") && readList.includes("name_get") && readList.includes("search_read"));
+	// Disjoint by construction: the classification decides which branch runs, and a
+	// method in both sets would silently pick one of them.
 	check(
-		"the method sets stay disjoint and complete for the declared enum",
-		[...runtimeMod2.READ_METHODS].every((m) => !runtimeMod2.MUTATING_METHODS.has(m)) &&
-			runtimeMod2.READ_METHODS.size + runtimeMod2.MUTATING_METHODS.size === 8,
+		"the method sets stay disjoint, and CRUD stays exactly three",
+		readList.every((m) => !runtimeMod2.MUTATING_METHODS.has(m)) && runtimeMod2.MUTATING_METHODS.size === 3,
+	);
+	check(
+		"the read set covers the public read API of the ORM",
+		["search", "search_read", "search_count", "read", "read_group", "fields_get", "name_get", "name_search", "default_get", "exists", "check_access_rights", "check_access_rule"].every(
+			(m) => runtimeMod2.READ_METHODS.has(m),
+		),
 	);
 	// One source of truth: the tool and the batch executor must not keep separate
 	// copies of the same policy, which is how they drift apart unnoticed.
@@ -1760,19 +1771,22 @@ console.log("== odoo_execute capability (context, read_group, fields_get) ==");
 		"an allowed business action is treated as a mutation, not as CRUD",
 		clsMod.isBusinessMethod("action_other") && !clsMod.isCrudMutation("action_assign"),
 	);
-	// The ad-hoc tool stays CRUD-only — the schema refuses a business action
-	// before the body runs. What changed is that the parameter now says WHERE such
-	// an action can run, instead of leaving the caller with a bare enum.
+	// The parameter is free text now, and the tool DESCRIPTION carries the policy:
+	// one registration-time list, so the reads it names cannot drift from the code.
 	const methodSchema = rx.parameters?.properties?.method ?? {};
+	check("the method parameter is free text", methodSchema.enum === undefined && methodSchema.type === "string");
+	const toolDescription = String(rx.description ?? "");
 	check(
-		"odoo_execute stays CRUD-only for business actions",
-		Array.isArray(methodSchema.enum) && !methodSchema.enum.includes("action_run"),
-		JSON.stringify(methodSchema.enum),
+		"the tool description lists every read method from the code",
+		readList.every((m) => toolDescription.includes(m)),
 	);
 	check(
-		"the refusal explains where a business action can run instead",
-		/kind: "method"/.test(String(methodSchema.description)) && /manual step/.test(String(methodSchema.description)),
-		String(methodSchema.description).slice(0, 120),
+		"the tool description says what a business action requires and where the batch path is",
+		/confirm_destructive=true and NO allowlist/.test(toolDescription) && /kind: "method"/.test(toolDescription),
+	);
+	check(
+		"the tool description states the private-method wall and the source-reading path",
+		/PRIVATE methods/.test(toolDescription) && /Odoo's own dispatch/.test(toolDescription) && /odoo_config mode=read/.test(toolDescription),
 	);
 
 	// context is forwarded verbatim as kwargs.context (multi-company).
@@ -1963,6 +1977,214 @@ check(
 	missingScan.findings.some((f) => f.rule === "path-not-found" && f.severity === "ERROR"),
 );
 
+// ---- business actions over the ad-hoc RPC -------------------------------
+// The RPC is not handcuffed: any PUBLIC method of any model runs, with an
+// explicit confirmation instead of an allowlist, because nothing in the plugin
+// can replay or undo what a business action does. The one wall kept is Odoo's
+// own (a private name is not callable over RPC at all).
+console.log("== business actions over the RPC (no allowlist, explicit confirmation) ==");
+{
+	const runtimeMod3 = await import(new URL("tools-runtime.js", libDir).href);
+	const tools3 = new Map();
+	const calls = [];
+	const journal3 = [];
+	const audits = [];
+	// The stub answers WHATEVER the test scripted for the next call, so a single
+	// sequence can cover the method call and the condition reads around it.
+	let respond = () => ({ ok: true, value: 42 });
+	runtimeMod3.registerRuntimeTools(
+		{ tools: { register: (t) => tools3.set(t.name, t) } },
+		{
+			client: () => ({
+				client: {
+					executeKw: async (model, method, args, kwargs) => {
+						const call = { model, method, args, kwargs };
+						calls.push(call);
+						return respond(call);
+					},
+				},
+				report: "stub",
+			}),
+			status: () => ({ detail: "stub" }),
+			projectRoot: dir,
+			// Deliberately EMPTY: a business action must not need a model allowlist.
+			allowlist: () => [],
+			display: (v) => v,
+			recordDataOp: (op) => journal3.push(op),
+			auditFailure: (info) => audits.push(info),
+		},
+	);
+	const bx = tools3.get("odoo_execute");
+
+	// 1) A business action runs with the confirmation and nothing else.
+	let b = await bx.execute({ model: "sale.order", method: "action_confirm", ids: [7], confirm_destructive: true });
+	check("a business action runs without any allowlist", b.denied === false && calls.length === 1, b.reason);
+	check("the recordset goes as args[0] (Odoo dispatches on it)", JSON.stringify(calls[0].args) === "[[7]]", JSON.stringify(calls[0].args));
+	check("it is NOT journaled (no pre-image exists for it)", journal3.length === 0);
+	check("the result says there is no undo", /NOT journaled/.test(b.reason), b.reason);
+	check("...and that a missing postcondition proves nothing", /no postcondition declared/.test(b.reason));
+	check("...and that the starting state was not confirmed", /no precondition declared/.test(b.reason));
+
+	// 2) Without the confirmation nothing is sent at all.
+	const beforeDenied = calls.length;
+	b = await bx.execute({ model: "sale.order", method: "action_confirm", ids: [7] });
+	check("a business action without confirm_destructive is denied", b.denied === true && /confirm_destructive/.test(b.reason));
+	check("...and nothing was sent", calls.length === beforeDenied);
+	check(
+		"...and the refusal still names the batch path",
+		/kind: "method"/.test(b.reason) && /precondition/.test(b.reason),
+		String(b.reason).slice(0, 140),
+	);
+
+	// 3) The method's own signature, passed explicitly: positionals after the ids,
+	// keywords in `kwargs` — never guessed from `values`.
+	calls.length = 0;
+	b = await bx.execute({
+		model: "account.move",
+		method: "action_post",
+		ids: [3, 4],
+		args: ["2026-01-01", 2],
+		kwargs: { grouped: true },
+		context: { lang: "es_VE" },
+		confirm_destructive: true,
+	});
+	check("extra positionals are forwarded after the ids", JSON.stringify(calls[0].args) === '[[3,4],"2026-01-01",2]', JSON.stringify(calls[0].args));
+	check("kwargs are forwarded verbatim", calls[0].kwargs.grouped === true);
+	check("the context is merged into the same kwargs", JSON.stringify(calls[0].kwargs.context) === JSON.stringify({ lang: "es_VE" }));
+
+	// 4) No ids means an empty recordset (some public methods are called on the
+	// model itself), and the result says so instead of pretending.
+	calls.length = 0;
+	b = await bx.execute({ model: "account.move", method: "action_post", confirm_destructive: true });
+	check("an empty recordset is allowed, and reported", JSON.stringify(calls[0].args) === "[[]]" && /empty recordset/.test(b.reason), b.reason);
+
+	// 5) The read/CRUD parameters are refused, not silently ignored.
+	calls.length = 0;
+	b = await bx.execute({ model: "sale.order", method: "action_confirm", ids: [7], values: { x: 1 }, confirm_destructive: true });
+	check("a CRUD parameter on a business action is refused", b.denied === true && /belong to the classified/.test(b.reason), b.reason);
+	check("...and nothing was sent", calls.length === 0);
+	// The host schema catches a malformed `args`/`kwargs` first; the body re-checks
+	// anyway, because the tool must stay safe when it is driven without the host's
+	// validation (the suites and any library use do exactly that).
+	for (const [label, extra] of [["args", { args: "not-an-array" }], ["kwargs", { kwargs: ["nope"] }]]) {
+		let refused = false;
+		try {
+			await bx.execute({ model: "sale.order", method: "action_confirm", ids: [7], confirm_destructive: true, ...extra });
+		} catch (err) {
+			const message = String((err && err.message) || err);
+			refused = String(err && err.code) === "INVALID_ARGS" && message.includes(label) && /must be/.test(message);
+		}
+		check(`a malformed \`${label}\` is refused by the schema`, refused);
+	}
+
+	// 6) The state guard runs BEFORE anything is sent.
+	calls.length = 0;
+	respond = () => ({ ok: true, value: 0 });
+	b = await bx.execute({
+		model: "sale.order",
+		method: "action_confirm",
+		ids: [7],
+		precondition: { domain: [["state", "=", "draft"]], expect: "exists" },
+		confirm_destructive: true,
+	});
+	check("a failing precondition denies the call", b.denied === true && /Precondition not met/.test(b.reason), b.reason);
+	check("...and NOTHING was sent (only the condition read happened)", calls.length === 1 && calls[0].method === "search_count", JSON.stringify(calls.map((c) => c.method)));
+
+	// 7) Conditions are validated locally: a malformed one denies, never skips.
+	// The schema catches the shape it can describe; the body catches the rest
+	// (a domain cannot be described by it). Either way: refused, never skipped.
+	for (const [label, condition] of [
+		["a non-object condition", "draft"],
+		["a missing domain", { expect: "exists" }],
+		["an invented expect", { domain: [], expect: "sometimes" }],
+		["a count that is not a number", { domain: [], expect: "count", count: "two" }],
+	]) {
+		let refusal = "";
+		try {
+			const out = await bx.execute({ model: "sale.order", method: "action_confirm", ids: [7], precondition: condition, confirm_destructive: true });
+			if (out.denied === true) refusal = String(out.reason);
+		} catch (err) {
+			refusal = String((err && err.message) || err);
+		}
+		check(`${label} is refused`, /precondition/i.test(refusal), refusal.slice(0, 120));
+	}
+
+	// 8) Precondition met, postcondition met: the call is OK and the proof is in.
+	calls.length = 0;
+	respond = (c) => (c.method === "search_count" ? { ok: true, value: 1 } : { ok: true, value: true });
+	b = await bx.execute({
+		model: "sale.order",
+		method: "action_confirm",
+		ids: [7],
+		precondition: { domain: [["state", "=", "draft"]], expect: "count", count: 1 },
+		postcondition: { domain: [["state", "=", "sale"]], expect: "exists" },
+		confirm_destructive: true,
+	});
+	check("with both conditions the call runs", b.denied === false);
+	check("the guard read BEFORE and the proof read AFTER", calls.map((c) => c.method).join(",") === "search_count,action_confirm,search_count", calls.map((c) => c.method).join(","));
+	check("the result reports the postcondition it proves", /postcondition holds/.test(b.reason), b.reason);
+
+	// 9) A postcondition that does not hold is NOT a silent OK: the call WAS sent.
+	calls.length = 0;
+	let answer = 0;
+	respond = (c) => {
+		if (c.method !== "search_count") return { ok: true, value: 1 };
+		answer++;
+		return { ok: true, value: answer === 1 ? 1 : 0 };
+	};
+	b = await bx.execute({
+		model: "sale.order",
+		method: "action_confirm",
+		ids: [7],
+		precondition: { domain: [["state", "=", "draft"]], expect: "exists" },
+		postcondition: { domain: [["state", "=", "sale"]], expect: "exists" },
+		confirm_destructive: true,
+	});
+	check("a failed postcondition is not reported as OK", b.denied === false && /POSTCONDITION NOT MET/.test(b.reason), String(b.reason).slice(0, 140));
+	check("...and it says the call WAS sent", /WAS sent/.test(b.reason) && /inspect it/.test(b.reason));
+	check("...and the payload is still returned", String(b.result).includes("1"));
+
+	// 10) A business action that never answered is INDETERMINATE, while the same
+	// failure on a read is a plain error: one rule, both surfaces.
+	calls.length = 0;
+	audits.length = 0;
+	respond = () => ({ ok: false, error: "socket hang up", errorKind: "transport" });
+	b = await bx.execute({ model: "sale.order", method: "action_confirm", ids: [7], confirm_destructive: true });
+	check("a business action lost mid-flight is INDETERMINATE", /INDETERMINATE/.test(b.reason) && /NOT retried/.test(b.reason), String(b.reason).slice(0, 140));
+	check("...and the audit records it as INDETERMINATE, not as a server error", /^INDETERMINATE:/.test(String(audits[audits.length - 1]?.reason)), String(audits[audits.length - 1]?.reason).slice(0, 80));
+	calls.length = 0;
+	b = await bx.execute({ model: "sale.order", method: "search_read", domain: [] });
+	check("the same failure on a read is a plain server error", /SERVER ERROR/.test(b.reason) && !/INDETERMINATE/.test(b.reason));
+
+	// 11) The wall that is Odoo's: private methods are not callable over RPC, so
+	// the refusal says so and points at the public wrapper in the source.
+	calls.length = 0;
+	respond = () => ({ ok: true, value: 42 });
+	for (const method of ["_create_invoices", "_action_done", "init"]) {
+		b = await bx.execute({ model: "sale.order", method, ids: [7], confirm_destructive: true });
+		check(`"${method}" is refused before any RPC`, b.denied === true && calls.length === 0, String(b.reason).slice(0, 120));
+	}
+	check(
+		"the refusal names Odoo's own rule and the public-wrapper path",
+		/get_public_method/.test(b.reason) && /AccessError/.test(b.reason) && /public button or action/.test(b.reason) && /sale.advance.payment.inv/.test(b.reason),
+		String(b.reason).slice(0, 200),
+	);
+	check(
+		"...and it says where to read the model",
+		/odoo_config mode=read/.test(b.reason),
+	);
+
+	// 12) Reads need no confirmation and no allowlist; CRUD keeps both gates.
+	calls.length = 0;
+	b = await bx.execute({ model: "res.partner", method: "name_get", ids: [1] });
+	check("an extended read needs no confirmation", b.denied === false && calls.length === 1, b.reason);
+	b = await bx.execute({ model: "res.partner", method: "create", values: { name: "x" }, confirm_destructive: true });
+	check("CRUD still requires the model allowlist", b.denied === true && /not allowlisted/.test(b.reason));
+	b = await bx.execute({ model: "res.partner", method: "unlink", ids: [1], confirm_destructive: true });
+	check("so does unlink (the destructive case)", b.denied === true && /not allowlisted/.test(b.reason));
+	check("...and neither was sent", calls.length === 1, JSON.stringify(calls.map((c) => c.method)));
+}
+
 // ---- odoo_validate: ACL coherence --------------------------------------
 const aclMod = join(dir, "mod_acl");
 mkdirSync(join(aclMod, "models"), { recursive: true });
@@ -2102,6 +2324,17 @@ console.log("== change policy (spec, waiver, escape hatches) ==");
 	check("CLARIFY does not authorize the edit", typeof d === "string" && /001-chg is in CLARIFY/.test(d));
 	d = guardC({ name: "odoo_execute", arguments: { method: "create" }, ...execC });
 	check("CLARIFY does not authorize a mutation either", typeof d === "string" && /001-chg is in CLARIFY/.test(d));
+	// A business action mutates as far as the guard is concerned (the plugin cannot
+	// replay it, which makes the checkpoint more valuable, not less). A read is not
+	// a mutation, and a private name is refused by the TOOL before anything is
+	// sent, so the guard leaves it to the tool's own (more precise) message.
+	d = guardC({ name: "odoo_execute", arguments: { model: "sale.order", method: "action_confirm", confirm_destructive: true }, ...execC });
+	check("a business action is a mutation for the guard", typeof d === "string" && /001-chg is in CLARIFY/.test(d));
+	check("an extended read is not", guardC({ name: "odoo_execute", arguments: { model: "sale.order", method: "search" }, ...execC }) === undefined);
+	check(
+		"a private name is left to the tool's own refusal",
+		guardC({ name: "odoo_execute", arguments: { model: "sale.order", method: "_create_invoices" }, ...execC }) === undefined,
+	);
 	// A finished spec has answered its question: the next request is a NEW one.
 	cps.writeActiveState(projChange, { phase: "DONE" });
 	d = guardC({ name: "write", arguments: srcEdit, ...execC });

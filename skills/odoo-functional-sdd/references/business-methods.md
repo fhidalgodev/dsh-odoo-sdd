@@ -9,18 +9,30 @@ should be read as a recipe for one.
 
 Every RPC method falls into exactly three kinds:
 
-- **read** — a query (`search_read`, `read`, `search_count`, `read_group`,
-  `fields_get`). Safe in a discovery batch.
+- **read** — a query: `search`, `search_read`, `search_count`, `read`,
+  `read_group`, `fields_get`, `name_get`, `name_search`, `default_get`,
+  `exists`, `check_access_rights`, `check_access_rule`. Safe in a discovery
+  batch, and free of confirmation on the RPC.
 - **CRUD** — `create`, `write`, `unlink`. The plugin can read a pre-image and
   replay it, which is why the data journal and `compensate` cover them.
 - **business** — everything else: the methods a model exposes to *do* something
-  (`action_*`, `button_*`, `do_*`, `_action_*`… the naming convention varies by
-  version and model). They run code the plugin cannot replay: the records they
-  change are usually not the ones you passed in.
+  (`action_*`, `button_*`, `do_*`… the naming convention varies by version and
+  model). They run code the plugin cannot replay: the records they change are
+  usually not the ones you passed in.
 
-A business method runs in a functional batch under `kind: "method"`, only when
-the exact `model.method` pair is allowlisted by the operator, and only with a
-state guard and a state proof.
+## Two ways to run one
+
+| | Functional batch (`kind: "method"`) | Ad-hoc RPC (`odoo_execute`) |
+| --- | --- | --- |
+| Authorization | the exact `model.method` pair in `methodAllowlist`, decided once by a human | `confirm_destructive=true` on each call |
+| Approval | the batch is approved (hashes bound to the spec/design) before it runs | none beyond the confirmation |
+| State guard / proof | `precondition` and `postcondition` are **required** | both optional; a missing postcondition is warned about |
+| Journal / undo | never journaled, never auto-compensated | same — the result says no undo exists |
+| Indeterminate outcome | `indeterminate`, reconciled against the instance | reported as INDETERMINATE, never retried |
+| Best for | several operations, a production target, a runbook a person repeats | one call, on a disposable dev/staging database, while you are reading the code |
+
+Either way, the plugin never journals a business method and never pretends it can
+undo one.
 
 ## Finding out what a method does — before declaring it
 
@@ -46,6 +58,29 @@ worst moment. In order of reliability:
 
 Never declare a method you have not read: an invented name is refused by the
 executor, and a real name with the wrong expectations is worse — it runs.
+
+### Private methods are not callable, and that is Odoo's rule
+
+A name starting with `_` cannot be called over RPC at all. `execute_kw`
+dispatches through `get_public_method` (`odoo/service/model.py`), which answers
+`AccessError: Private methods (such as 'model._name') cannot be called remotely.`
+for a leading underscore, for `init`, for methods decorated with `@api.private`
+(17+) and for the internal attribute names; an inexistent method answers
+`AttributeError` instead. Older series (10–13) checked the same thing inside
+`execute_kw`. The plugin refuses it first so you get the reason locally, but no
+amount of confirming changes the server's answer.
+
+So when the source shows the work being done by a private method, read one step
+outwards and call the public entry point that wraps it:
+
+- a **wizard** method: `sale.order._create_invoices()` is private, while
+  `create_invoices()` on the `sale.advance.payment.inv` wizard is public and
+  takes the orders in its context;
+- a **button/action** on the model: `action_*`/`button_*`, which is what the
+  form view calls anyway (and what a batch's `args[0]` recordset targets);
+- when only the private path exists and no public wrapper does, the honest answer
+  is a **manual step** in the runbook with its exact button label — the
+  postcondition read is still the evidence.
 
 ## Declaring the operation
 
@@ -73,6 +108,35 @@ Rules the validator enforces, and why each one exists:
 | `postcondition` is required | `applied` must mean the state was reached. See below. |
 | `recovery` is `none` or `manual` | `restore_preimage` is refused: the plugin never read the records the method changes, so it cannot promise that undo. |
 | `apply` scope only | A business method is a mutation: it cannot live in a discovery batch. |
+
+## Calling it from the RPC
+
+```json
+{
+  "model": "<model>",
+  "method": "<method>",
+  "ids": [1, 2, 3],
+  "args": ["<extra positional after the ids>"],
+  "kwargs": { "<method keyword>": "<value>" },
+  "precondition":  { "domain": [["state", "=", "<before>"]], "expect": "count", "count": 3 },
+  "postcondition": { "domain": [["state", "=", "<after>"]], "expect": "count", "count": 3 },
+  "confirm_destructive": true
+}
+```
+
+- `args[0]` is the recordset (Odoo dispatches on it); `args` carries the
+  positionals after it and `kwargs` the keywords. The read/CRUD parameters
+  (`values`, `domain`, `fields`…) are **refused** here rather than ignored.
+- No `ids` means an empty recordset. Some methods are called on the model itself;
+  the result says so, so "I forgot the ids" cannot look like a success.
+- The confirmation is the gate: without `confirm_destructive=true` nothing is
+  sent at all.
+- The state guard runs **before** the call (a failed precondition sends nothing)
+  and the proof is read back **after** it (a failed postcondition is reported as
+  "the call WAS sent", never as OK).
+- A transport/protocol failure after sending one is reported as
+  **INDETERMINATE**: the call may have happened. Read the records before doing
+  anything else — never "run it again to see".
 
 ## The return value is not evidence
 
@@ -115,9 +179,11 @@ Choose the assertion by asking "what would be different if this had NOT worked?"
 - **Irreversibility.** When the state change cannot be reversed, declare
   `recovery: "none"` and, in production, give the operation its own batch with
   its own approval.
-- **A button that only exists in the UI.** Some flows advance through a screen
-  action with no clean RPC path. Declare it as a **manual step** with the exact
-  label, and take the postcondition read as the evidence, naming who ran it.
+- **A button that only exists in the UI, or only inside a private method.** Some
+  flows advance through a screen action with no clean RPC path, and some work is
+  done by a `_private` method that `execute_kw` refuses to reach (see above).
+  Declare it as a **manual step** with the exact label, and take the
+  postcondition read as the evidence, naming who ran it.
 - **Editing configuration to make Odoo do it.** Changing an automation trigger,
   a server action or any other setting so the instance performs the action is
   forbidden: it mutates configuration the run never declared. Use the

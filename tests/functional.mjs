@@ -24,6 +24,7 @@ import { join } from "node:path";
 
 const libDir = new URL("../lib/", import.meta.url);
 const { registerFunctionalTool, functionalDir, readRun, readPlan } = await import(new URL("functional.js", libDir).href);
+const clsMod = await import(new URL("method-classification.js", libDir).href);
 const { sha256 } = await import(new URL("functional.js", libDir).href);
 
 let failures = 0;
@@ -491,6 +492,25 @@ console.log("== audit: every functional operation leaves a trace ==");
 	check("the audit kind exists for functional entries", typeof auditMod.recordAudit === "function");
 }
 
+
+// One rule for the ad-hoc RPC and the batch executor: a mutation that never
+// answered is INDETERMINATE, and a business action counts as a mutation even
+// though it is not CRUD. Two copies of this would drift into a retry of
+// something that already happened on one surface and not on the other.
+check(
+	"the indeterminate rule is shared with the ad-hoc RPC",
+	clsMod.isIndeterminateFor("action_run", "transport") === true &&
+		clsMod.isIndeterminateFor("write", "protocol") === true &&
+		clsMod.isIndeterminateFor("action_run", "server") === false &&
+		clsMod.isIndeterminateFor("search_read", "transport") === false,
+);
+check(
+	"a private name is not callable on any surface (Odoo refuses it over RPC)",
+	clsMod.isCallableMethodName("action_confirm") === true &&
+		clsMod.isCallableMethodName("_create_invoices") === false &&
+		clsMod.isCallableMethodName("init") === false &&
+		clsMod.isCallableMethodName("Action Confirm") === false,
+);
 
 console.log("== business actions: allowlisted, guarded, and PROVEN ==");
 {

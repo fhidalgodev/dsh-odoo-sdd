@@ -1,9 +1,10 @@
 /**
- * Runtime tools of dsh-odoo-sdd: `odoo_execute` (generic CRUD/RPC with a
- * fail-closed allowlist) and `odoo_validate` (local, instance-free module
- * checks). Built here as functions that receive the registrant context plus
- * live dependencies, so the plugin entry stays thin and these layers remain
- * individually testable. Registration happens from src/index.ts.
+ * Runtime tools of dsh-odoo-sdd: `odoo_execute` (generic RPC — reads, CRUD on an
+ * allowlist, and any public business method behind an explicit confirmation) and
+ * `odoo_validate` (local, instance-free module checks). Built here as functions
+ * that receive the registrant context plus live dependencies, so the plugin entry
+ * stays thin and these layers remain individually testable. Registration happens
+ * from src/index.ts.
  *
  * @module dsh-odoo-sdd/tools-runtime
  */
@@ -11,6 +12,7 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 import { existsSync, readFileSync, readdirSync, lstatSync } from "node:fs";
 import { basename, join } from "node:path";
 import { resolveModuleDir } from "./paths.js";
+import type { RpcErrorKind } from "./odoo-client.js";
 
 /** Live dependencies provided by the registrant. */
 export interface RuntimeDeps {
@@ -29,7 +31,11 @@ export interface RuntimeDeps {
 				kwargs: Record<string, unknown>,
 				timeoutMs?: number,
 				signal?: AbortSignal,
-			): Promise<{ ok: true; value: T } | { ok: false; error: string }>;
+				// `errorKind` is what tells a domain error (the server answered and
+				// refused) from a transport/protocol failure (the outcome is UNKNOWN).
+				// Without it in the type, odoo_execute could not report that
+				// distinction for a business action.
+			): Promise<{ ok: true; value: T } | { ok: false; error: string; errorKind?: RpcErrorKind }>;
 		} | null;
 		report: string;
 	};
@@ -76,8 +82,18 @@ export {
 	isReadMethod,
 	isCrudMutation,
 	isBusinessMethod,
+	isCallableMethodName,
+	isIndeterminateFor,
 } from "./method-classification.js";
-import { READ_METHODS, MUTATING_METHODS } from "./method-classification.js";
+import {
+	READ_METHODS,
+	MUTATING_METHODS,
+	isReadMethod,
+	isCallableMethodName,
+	isBusinessMethod,
+	isIndeterminateFor,
+} from "./method-classification.js";
+import { checkCondition } from "./functional.js";
 
 /** Build and register `odoo_execute` and `odoo_validate`. */
 export function registerRuntimeTools(
@@ -90,36 +106,30 @@ export function registerRuntimeTools(
 	ctx.tools.register(defineTool({
 		name: "odoo_execute",
 		description:
-			"Execute a JSON-RPC call against the connected instance with a fail-closed " +
-			"allowlist. READ calls (search_read/read/search_count/read_group/fields_get) are " +
-			"allowed; MUTATING calls (create/write/unlink) are denied unless BOTH " +
-			"confirm_destructive=true AND the model is in the mutation allowlist, and they are " +
-			"journaled so sdd_checkpoint can undo them. `context` is forwarded verbatim (use it " +
-			"for allowed_company_ids/company_id on multi-company instances, lang or tz); the " +
-			"server still applies its own ACL. Parameters are explicit " +
-			"(domain/ids/values/fields/groupby) to avoid guessing argument shapes. Output is " +
-			"redacted. Target must be a disposable dev/staging DB.",
+			"Execute a JSON-RPC call (execute_kw) against the connected instance. ANY public method of the model is " +
+			"callable, and what it needs is decided by what it is. " +
+			`READS (${[...READ_METHODS].join(", ")}) run freely. ` +
+			`CRUD mutations (${[...MUTATING_METHODS].join(", ")}) require confirm_destructive=true AND the model in ` +
+			"executeAllowlist, and are journaled so sdd_checkpoint can undo them. Every OTHER method is a BUSINESS " +
+			'ACTION (action_*, button_*, do_*…): it runs with confirm_destructive=true and NO allowlist, because the ' +
+			"plugin cannot replay its effect — it is never journaled, no undo exists for it, and a timeout is " +
+			"reported as an INDETERMINATE outcome instead of a plain failure. Declare `precondition` (checked before " +
+			"the call) and `postcondition` (checked after) to carry a state guard and a state proof; without the " +
+			"postcondition the result only means the server accepted the call. PRIVATE methods (`_name`) are refused: " +
+			"Odoo's own dispatch does not allow them over RPC, so read the model in the source (the native/custom " +
+			"repositories are reported by odoo_config mode=read) and call the public button or action that wraps it. " +
+			'For several operations, or when a human approval per run is wanted, use a functional batch with kind: "method". ' +
+			"`context` is forwarded verbatim (use it for allowed_company_ids/company_id on multi-company instances, " +
+			"lang or tz); the server still applies its own ACL. Parameters are explicit to avoid guessing argument " +
+			"shapes. Output is redacted. Target must be a disposable dev/staging DB.",
 		parameters: {
 			model: { type: "string", required: true, description: "Odoo model name." },
 			method: {
 				type: "string",
 				required: true,
-				enum: [
-					"search_read",
-					"read",
-					"search_count",
-					"read_group",
-					"fields_get",
-					"create",
-					"write",
-					"unlink",
-				],
 				description:
-					"Method to call. Classified explicitly: unknown methods are refused. A BUSINESS ACTION " +
-					'(any method of any model that is neither a read nor create/write/unlink) is deliberately not here: it is not CRUD, its ' +
-					'effect cannot be replayed from a pre-image, and it needs a state guard and a state proof. Declare ' +
-					'it in a functional batch with kind: "method" and the pair in methodAllowlist, or record it as a ' +
-					"manual step in the runbook.",
+					"Method to call: any public method name of the model (see the tool description for what each kind " +
+					"requires). A leading underscore is refused — Odoo does not allow private methods over RPC.",
 			},
 			// Odoo domains are lists of terms; a term is either a triple with a
 			// SCALAR value (`["state","=","draft"]`) or a bare logical operator
@@ -134,6 +144,16 @@ export function registerRuntimeTools(
 			limit: { type: "number", description: "Row cap for reads (default 10)." },
 			offset: { type: "number", description: "Rows to skip before the window (search_read/read_group/search_count), so a large model can be paged instead of relying on one truncated response." },
 			groupby: { type: "array", items: { type: "string" }, description: "read_group: fields to group by, e.g. [\"state\"]." },
+			// A business action takes the recordset as its first argument (Odoo
+			// dispatches on `args[0]`), then whatever the method declares. `args`
+			// carries the positionals AFTER the ids, `kwargs` the keywords, so
+			// neither is guessed from `values`.
+			args: { type: "array", description: "Business action: extra POSITIONAL arguments after the record ids (the recordset is always args[0])." },
+			kwargs: { type: "object", additionalProperties: true, description: "Business action: keyword arguments of the method (forwarded verbatim, like `context`)." },
+			// The same shape a batch operation declares, evaluated with the same
+			// helper: a state guard before the call and a state proof after it.
+			precondition: { type: "object", additionalProperties: true, description: "Read that must hold BEFORE the call: {domain, expect: exists|missing|count, count}. If it fails, nothing is sent." },
+			postcondition: { type: "object", additionalProperties: true, description: "Read that must hold AFTER the call (the state that proves it worked): {domain, expect: exists|missing|count, count}. Without it, OK only means the server accepted the call." },
 			attributes: { type: "array", items: { type: "string" }, description: "fields_get: attributes to return, e.g. [\"type\",\"string\",\"required\"]." },
 			context: { type: "object", additionalProperties: true, description: "Odoo context forwarded verbatim as kwargs.context (allowed_company_ids, company_id, lang, tz)." },
 		},
@@ -172,6 +192,10 @@ export function registerRuntimeTools(
 				groupby?: string[];
 				attributes?: string[];
 				context?: Record<string, unknown>;
+				args?: unknown[];
+				kwargs?: Record<string, unknown>;
+				precondition?: unknown;
+				postcondition?: unknown;
 			};
 			const model = a.model.trim();
 			const method = a.method;
@@ -185,19 +209,30 @@ export function registerRuntimeTools(
 					result: "",
 				};
 			}
-			// Explicit classification (fail-closed): a method in neither set is
-			// refused rather than silently treated as a read.
-			if (!READ_METHODS.has(method) && !MUTATING_METHODS.has(method)) {
-				return {
-					denied: true,
-					reason:
-						`Method "${method}" is not classified as a read or a mutation. ` +
-						`Allowed reads: ${[...READ_METHODS].join(", ")}. ` +
-						`Allowed mutations: ${[...MUTATING_METHODS].join(", ")}.`,
-					result: "",
-				};
+			// Classification (fail-closed). Two kinds are known by name, and
+			// everything else is a business action — which the RPC CAN run, because
+			// refusing it is what left the surface handcuffed. The only wall kept is
+			// Odoo's own: a private name is not callable remotely at all, so refusing
+			// it here turns a guaranteed server AccessError into an instruction.
+			const isRead = isReadMethod(method);
+			const isCrud = MUTATING_METHODS.has(method);
+			let isBusiness = false;
+			if (!isRead && !isCrud) {
+				if (!isCallableMethodName(method)) {
+					return {
+						denied: true,
+						reason:
+							`Method "${method}" cannot be called over RPC. Odoo's own dispatch (get_public_method) refuses ` +
+							"private names (`_…`), `init`, methods decorated `@api.private` and the internal attribute names — " +
+							"the server would answer with an AccessError. Read the model's source (the native and custom " +
+							"repositories are reported by `odoo_config mode=read`) and call the public button or action that " +
+							"wraps it: `sale.order._create_invoices` is private, the `sale.advance.payment.inv` wizard exposes " +
+							"the public `create_invoices()`.",
+						result: "",
+					};
+				}
+				isBusiness = true;
 			}
-			const isMutating = MUTATING_METHODS.has(method);
 
 			// ---- context (multi-company / lang / tz) -------------------------
 			// Forwarded verbatim; the server still applies its own ACL and record
@@ -210,8 +245,8 @@ export function registerRuntimeTools(
 				callContext = a.context;
 			}
 
-			// ---- policy (allowlist + explicit confirmation) ------------------
-			if (isMutating) {
+			// ---- policy (explicit confirmation, and the CRUD allowlist) ------
+			if (isCrud) {
 				if (a.confirm_destructive !== true) {
 					return { denied: true, reason: "Mutating call requires confirm_destructive=true.", result: "" };
 				}
@@ -219,6 +254,20 @@ export function registerRuntimeTools(
 					return {
 						denied: true,
 						reason: `Model "${model}" is not allowlisted for mutations — add it via odoo_config mode=set executeAllowlist=[...] or run read-only.`,
+						result: "",
+					};
+				}
+			} else if (isBusiness) {
+				// No allowlist: any public method runs. The confirmation IS the gate,
+				// because nothing here can replay or undo what the call does.
+				if (a.confirm_destructive !== true) {
+					return {
+						denied: true,
+						reason:
+							`"${model}.${method}" is neither a read nor CRUD: it runs code the plugin cannot replay, so it ` +
+							"requires confirm_destructive=true. Declare `precondition` (checked before the call) and " +
+							"`postcondition` (checked after) to carry a state guard and a state proof, or run it as a " +
+							'functional batch with kind: "method" when an allowlisted pair and a human approval per run are wanted.',
 						result: "",
 					};
 				}
@@ -270,13 +319,79 @@ export function registerRuntimeTools(
 					return { denied: true, reason: "write requires a `values` object.", result: "" };
 				}
 				callArgs = [a.ids, a.values];
-			} else {
-				// unlink
+			} else if (method === "unlink") {
 				if (!Array.isArray(a.ids) || a.ids.length === 0) {
 					return { denied: true, reason: "unlink requires a non-empty `ids` array.", result: "" };
 				}
 				callArgs = [a.ids];
+			} else if (isBusiness || isRead) {
+				// Everything else is called ON the recordset, with its own signature:
+				// the public reads that the five ORM queries above do not cover
+				// (`name_get`, `exists`, `check_access_rights`…) and every business
+				// action. Odoo dispatches the method on the recordset built from
+				// `args[0]` and then passes the rest, so the caller's positionals go
+				// in `args` and the keywords in `kwargs` — never guessed from
+				// `values`/`domain`, which would be silently ignored.
+				const misplaced = (["values", "domain", "fields", "order", "groupby", "attributes"] as const).filter(
+					(key) => (a as unknown as Record<string, unknown>)[key] !== undefined,
+				);
+				if (misplaced.length > 0) {
+					return {
+						denied: true,
+						reason:
+							`\`${misplaced.join("`, `")}\` belong to the classified read/CRUD calls (${[...READ_METHODS].concat([...MUTATING_METHODS]).join(", ")}), ` +
+							`and "${method}" is called on the recordset with its own signature: pass its arguments positionally ` +
+							"in `args` (after the ids) and its keywords in `kwargs`, so nothing is silently ignored.",
+						result: "",
+					};
+				}
+				if (a.args !== undefined && !Array.isArray(a.args)) {
+					return { denied: true, reason: "`args` must be an array of positional arguments.", result: "" };
+				}
+				if (a.kwargs !== undefined && (a.kwargs === null || typeof a.kwargs !== "object" || Array.isArray(a.kwargs))) {
+					return { denied: true, reason: "`kwargs` must be a plain JSON object.", result: "" };
+				}
+				// No `ids` means an empty recordset: some public methods are called on
+				// the model itself, and the result says which one this was.
+				callArgs = [Array.isArray(a.ids) ? a.ids : [], ...(Array.isArray(a.args) ? a.args : [])];
+				if (a.kwargs !== undefined) callKwargs = { ...(a.kwargs as Record<string, unknown>) };
+			} else {
+				// Unreachable: the classification above denied every other name.
+				return { denied: true, reason: `Method "${method}" was not classified.`, result: "" };
 			}
+
+			// ---- declared state guard / state proof (both optional) -----------
+			// The same shape a batch declares. The schema cannot describe a domain
+			// (its items are triples or bare operators), so it is validated here:
+			// a malformed condition denies, it is never skipped.
+			type Condition = { domain: unknown[]; expect: "exists" | "missing" | "count"; count?: number };
+			const conditions: Record<"precondition" | "postcondition", Condition | undefined> = {
+				precondition: undefined,
+				postcondition: undefined,
+			};
+			for (const label of ["precondition", "postcondition"] as const) {
+				const raw = label === "precondition" ? a.precondition : a.postcondition;
+				if (raw === undefined) continue;
+				if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+					return { denied: true, reason: `\`${label}\` must be an object: {domain, expect, count}.`, result: "" };
+				}
+				const raw2 = raw as { domain?: unknown; expect?: unknown; count?: unknown };
+				if (!Array.isArray(raw2.domain)) {
+					return { denied: true, reason: `\`${label}.domain\` must be an Odoo domain array, e.g. [["state","=","draft"]].`, result: "" };
+				}
+				if (raw2.expect !== "exists" && raw2.expect !== "missing" && raw2.expect !== "count") {
+					return { denied: true, reason: `\`${label}.expect\` must be "exists", "missing" or "count".`, result: "" };
+				}
+				if (raw2.expect === "count" && (!Number.isInteger(raw2.count) || (raw2.count as number) < 0)) {
+					return { denied: true, reason: `\`${label}.count\` must be a non-negative integer when expect="count".`, result: "" };
+				}
+				conditions[label] = {
+					domain: raw2.domain,
+					expect: raw2.expect,
+					...(raw2.expect === "count" ? { count: raw2.count as number } : {}),
+				};
+			}
+			const { precondition, postcondition } = conditions;
 
 			if (callContext !== undefined) callKwargs["context"] = callContext;
 			const { client, report } = deps.client(exec);
@@ -284,6 +399,15 @@ export function registerRuntimeTools(
 				// `report` carries the real reason: NOT CONFIGURED (missing
 				// credentials) or NOT AUTHORIZED (no live human grant).
 				return { denied: true, reason: report, result: "" };
+			}
+
+			// The state guard runs BEFORE anything is sent: a declared precondition
+			// that does not hold is a refusal with no side effect at all.
+			if (precondition !== undefined) {
+				const pre = await checkCondition(client, model, precondition, callContext);
+				if (!pre.ok) {
+					return { denied: true, reason: `Precondition not met (${pre.detail}): nothing was sent.`, result: "" };
+				}
 			}
 
 			// ---- pre-image capture (for the rollback journal) ----------------
@@ -294,7 +418,7 @@ export function registerRuntimeTools(
 			const withCallContext = (kwargs: Record<string, unknown>): Record<string, unknown> =>
 				callContext === undefined ? kwargs : { ...kwargs, context: callContext };
 			let preImage: Array<Record<string, unknown>> = [];
-			if (isMutating && deps.recordDataOp) {
+			if (isCrud && deps.recordDataOp) {
 				const ids = Array.isArray(a.ids) ? a.ids : [];
 				if (method === "write" && ids.length > 0) {
 					const fields = Object.keys(a.values ?? {});
@@ -314,6 +438,10 @@ export function registerRuntimeTools(
 			// ---- execute ----------------------------------------------------
 			const rpc = await client.executeKw<unknown>(model, method, callArgs, callKwargs, undefined, exec?.signal as AbortSignal | undefined);
 			if (!rpc.ok) {
+				// A business action that never answered is an UNKNOWN outcome, not a
+				// failure: the call was sent and the server may have acted, so a retry
+				// is the wrong move. (One rule, shared with the batch executor.)
+				const unknownOutcome = isBusiness && isIndeterminateFor(method, rpc.errorKind);
 				// Domain failure over a successful transport: keep `denied:false`
 				// (this is NOT a policy denial) but mark it unmistakably so the
 				// model, the renderer and any text consumer never read it as OK,
@@ -322,13 +450,42 @@ export function registerRuntimeTools(
 					tool: "odoo_execute",
 					op: `${model}.${method}`,
 					...(typeof exec?.callId === "string" ? { callId: exec.callId } : {}),
-					reason: `SERVER ERROR: ${String(rpc.error).slice(0, 500)}`,
+					reason: `${unknownOutcome ? "INDETERMINATE" : "SERVER ERROR"}: ${String(rpc.error).slice(0, 500)}`,
 				}, exec);
+				if (unknownOutcome) {
+					return {
+						denied: false,
+						reason:
+							`INDETERMINATE: "${model}.${method}" was sent and its outcome is UNKNOWN (transport/protocol ` +
+							"failure, not a refusal). It was NOT retried: read the records it acts on before doing anything else.",
+						result: rpc.error,
+					};
+				}
 				return { denied: false, reason: "SERVER ERROR — RPC call failed", result: rpc.error };
 			}
 
+			// The state proof is read back BEFORE the call can be reported as OK:
+			// without it, "OK" only means the server accepted the call.
+			let proof: string | null = null;
+			if (postcondition !== undefined) {
+				const post = await checkCondition(client, model, postcondition, callContext);
+				if (!post.ok) {
+					return {
+						denied: false,
+						reason:
+							`POSTCONDITION NOT MET: "${model}.${method}" ran, but the state it promised was not reached ` +
+							`(${post.detail}). The call WAS sent, so the instance may be partially changed: inspect it ` +
+							"before retrying anything.",
+						result: JSON.stringify(rpc.value).slice(0, 4000),
+					};
+				}
+				proof = post.detail;
+			}
+
 			// ---- journal the applied mutation (best-effort undo) ------------
-			if (isMutating && deps.recordDataOp) {
+			// CRUD only: a business action changes records the plugin never read, so
+			// journaling it would promise an undo that cannot exist.
+			if (isCrud && deps.recordDataOp) {
 				const ids = Array.isArray(a.ids) ? a.ids : [];
 				const createdIds = method === "create" && typeof rpc.value === "number" ? [rpc.value] : [];
 				deps.recordDataOp({
@@ -341,7 +498,25 @@ export function registerRuntimeTools(
 				}, exec);
 			}
 
-			return { denied: false, reason: `${model}.${method} OK`, result: JSON.stringify(rpc.value).slice(0, 4000) };
+			// What this call did NOT have is part of the answer: an agent that reads
+			// "OK" for a business action must know there is no undo, no confirmation
+			// of the starting state and no proof of the result.
+			const notes: string[] = [];
+			if (isBusiness) {
+				notes.push("business action: NOT journaled, so no undo exists for this call");
+				if (precondition === undefined) {
+					notes.push("no precondition declared: the starting state was not confirmed (most business actions are not idempotent)");
+				}
+				if (postcondition === undefined) {
+					notes.push("no postcondition declared: OK here only means the server accepted the call — declare `postcondition` to read back the state it promised");
+				}
+				if (!Array.isArray(a.ids) || a.ids.length === 0) {
+					notes.push("no `ids` given: the method was called on an empty recordset");
+				}
+			}
+			if (proof !== null) notes.push(`postcondition holds (${proof})`);
+			const suffix = notes.length === 0 ? "" : "\n" + notes.map((n) => `- ${n}`).join("\n");
+			return { denied: false, reason: `${model}.${method} OK${suffix}`, result: JSON.stringify(rpc.value).slice(0, 4000) };
 		},
 	}));
 

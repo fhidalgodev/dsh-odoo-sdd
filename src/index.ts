@@ -64,6 +64,7 @@ import {
 import { purgeOwnedState, purgePlan, PRESERVED } from "./lifecycle.js";
 import { withAudit } from "./audit.js";
 import { registerRuntimeTools } from "./tools-runtime.js";
+import { isReadMethod, isCallableMethodName } from "./method-classification.js";
 import { registerDocsTool } from "./docs-tool.js";
 import { registerFunctionalTool, activeFunctionalRun, functionalDir, readPlan, readRun, countOps } from "./functional.js";
 import { registerImportTool, readWebSession, capabilitiesFor, readImportOutcome, reportAppliedImport } from "./odoo-import.js";
@@ -2870,8 +2871,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// and no later listener can turn the denial back into a permission. It
 	// enforces, fail-closed:
 	//   - stop.md halts every tool;
-	//   - mutating calls need a checkpoint when the policy requires one;
-	//   - mutating calls are refused before WRITE_CODE.
+	//   - mutating calls (CRUD and business actions alike) need a checkpoint when
+	//     the policy requires one;
+	//   - they are refused before WRITE_CODE and without an authorizing spec.
 	// The `tools/result` listener records EVERY tool call of the run (ours and
 	// foreign), so the activity is reconstructable from .sdd/audit.jsonl.
 	// Both are best-effort: a policy bug must never brick the tool surface.
@@ -2879,7 +2881,14 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	const isMutatingCall = (name: string, args: Record<string, unknown>): boolean => {
 		if (name === "odoo_execute") {
 			const method = String(args["method"] ?? "");
-			return method === "create" || method === "write" || method === "unlink";
+			// A read is not a mutation. A name the RPC cannot call (private, `init`)
+			// is refused by the tool before anything is sent, so it cannot mutate
+			// either — leaving it "not mutating" here is what lets the tool give its
+			// precise reason instead of the checkpoint message. Everything else —
+			// CRUD AND every business action — mutates: the checkpoint policy, the
+			// change policy and the phase rule apply to it like any other write.
+			if (method === "") return false;
+			return !isReadMethod(method) && isCallableMethodName(method);
 		}
 		if (name === "odoo_module") {
 			const op = String(args["operation"] ?? "");

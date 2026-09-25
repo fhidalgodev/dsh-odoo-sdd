@@ -26,8 +26,9 @@ approve, an **executable plan of batches** with their risks and recovery, and an
 4. **You never fire a business action by editing configuration.** Temporarily
    changing an automation trigger, a server action or any setting so Odoo performs
    the action is forbidden: it mutates configuration the run never declared. Use
-   an allowlisted `kind: "method"` operation (state guard plus state proof), or
-   declare a manual step with the exact button label.
+   an allowlisted `kind: "method"` operation (state guard plus state proof), the
+   RPC with `confirm_destructive=true` for a single call on a disposable database,
+   or a declared manual step with the exact button label.
 5. **You do not touch production by inference.** The environment is declared, and
    a production batch needs the declared backup, the impact review and its own
    approval. Never fold a delete, a fiscal change or a validation into a

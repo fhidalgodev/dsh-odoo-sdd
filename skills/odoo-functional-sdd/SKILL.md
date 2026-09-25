@@ -36,7 +36,9 @@ the rules on facts vs hypotheses, fiscal data and production.
    action or any other setting is forbidden: it mutates configuration the run did
    not declare and leaves the instance depending on something nobody reviewed.
    The action goes through an allowlisted `kind: "method"` operation (state guard
-   plus state proof), or becomes a manual step with its exact button label.
+   plus state proof), through the RPC with `confirm_destructive=true` when it is a
+   single call on a disposable database, or it becomes a manual step with its
+   exact button label.
 6. **No invented data.** Fiscal country, taxes, legal identity and inventory
    valuation come from a named human, never from a page you read.
 7. **Honest evidence.** Every acceptance criterion needs the layer that actually

@@ -16,9 +16,21 @@
  *   (`action_*`, `button_*`, `do_*`…, the convention varies). It changes state
  *   through code the plugin cannot replay:
  *   its effect lands on records that were never read, so it is NEVER journaled
- *   and never auto-compensated. It runs only when the operator lists the exact
- *   `model.method` pair, and only with a precondition and a postcondition
- *   (see `validateBatch`).
+ *   and never auto-compensated.
+ *
+ * A business method has two surfaces, with different contracts:
+ * - a **functional batch** (`kind: "method"`) requires the exact `model.method`
+ *   pair in the allowlist AND a precondition AND a postcondition (see
+ *   `validateBatch`);
+ * - the **ad-hoc RPC** (`odoo_execute`) runs it with the operator's explicit
+ *   `confirm_destructive`, no allowlist — the state guard and the state proof are
+ *   offered as optional parameters, and a missing postcondition is warned about.
+ *
+ * What NO surface can call is a private method, and the wall is Odoo's, not this
+ * plugin's: `execute_kw` dispatches through `service/model.py::
+ * get_public_method`, which refuses `_(...)` names, `@api.private` and the
+ * `_UNSAFE_ATTRIBUTES` names with an `AccessError`. See
+ * `isCallableMethodName` below.
  *
  * This module has no host dependency on purpose: `functional.ts` is imported by
  * tests without a running DSH, so it must not pull `@deepseek-ai/dsh-tools` in.
@@ -26,13 +38,27 @@
  * @module dsh-odoo-sdd/method-classification
  */
 
-/** Methods that only read. */
+/**
+ * Methods that only read.
+ *
+ * A read is what a discovery batch may run and what needs no confirmation on the
+ * ad-hoc surface. The list is the well-known public read API, not every method
+ * that happens to have no side effect: an unknown name is treated as a business
+ * method (confirmable, never silently trusted).
+ */
 export const READ_METHODS: ReadonlySet<string> = new Set([
+	"search",
 	"search_read",
-	"read",
 	"search_count",
+	"read",
 	"read_group",
 	"fields_get",
+	"name_get",
+	"name_search",
+	"default_get",
+	"exists",
+	"check_access_rights",
+	"check_access_rule",
 ]);
 
 /** The mutations the journal can replay: pre-image in, restore out. */
@@ -71,6 +97,43 @@ export function isAllowedMethodShape(method: string): boolean {
 	// A leading underscore is a private/ORM-internal name (`_compute_x`,
 	// `_action_done`): calling one bypasses the public flow it belongs to.
 	return /^[a-z][a-z0-9_]*$/.test(method);
+}
+
+/**
+ * Whether the RPC could call this method name at all.
+ *
+ * Mirrors Odoo's own rule instead of inventing one: `execute_kw` dispatches
+ * through `get_public_method`, which refuses any name matching Odoo's
+ * `regex_private = r'^(_.*|init)$'` — a leading underscore, the ORM initializer
+ * `init`, `@api.private` methods (17+) and the `_UNSAFE_ATTRIBUTES` names. A
+ * private method is therefore NOT callable remotely in any supported version
+ * (10-13 checked it in `execute_kw`, 14+ in `service/model.py`), so refusing it
+ * here saves a round trip and a red traceback, and the refusal can say where the
+ * public wrapper is instead.
+ *
+ * `@api.private` cannot be detected from a name: that one is left to the server,
+ * which reports it as an `AccessError` of its own.
+ * @param method - the method name.
+ * @returns true when the name is a candidate for a remote call.
+ */
+export function isCallableMethodName(method: string): boolean {
+	return isAllowedMethodShape(method) && method !== "init";
+}
+
+/**
+ * Whether a failed call must be treated as an UNKNOWN outcome.
+ *
+ * A transport or protocol failure after sending a mutation means the server may
+ * have acted: reporting it as a plain failure would invite a retry of something
+ * that already happened. Business methods are included because they mutate too —
+ * they are simply not replayable.
+ * @param method - the method that was sent.
+ * @param errorKind - how the RPC failed.
+ * @returns true when the outcome is indeterminate.
+ */
+export function isIndeterminateFor(method: string, errorKind: string | undefined): boolean {
+	const sent = CRUD_METHODS.has(method) || isBusinessMethod(method);
+	return sent && (errorKind === "transport" || errorKind === "protocol");
 }
 
 /**

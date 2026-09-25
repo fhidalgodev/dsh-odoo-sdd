@@ -397,9 +397,12 @@ Verification pyramid, ALWAYS in ascending order:
    - Traceback ⇒ `odoo_errors` for the full server log ⇒ `sdd_phase fail`
      with the concrete error ⇒ go to phase 5.
 3. **Layer 3 (data/RPC)**: exercise business logic via `odoo_execute` reads
-   (search_read/read/search_count/read_group/fields_get) and, only for
-   allowlisted models with `confirm_destructive=true`, the mutations the
-   test-plan needs. Compare results against each AC.
+   (the public read API: search/search_read/read/search_count/read_group/
+   fields_get/name_get/exists…) and, with `confirm_destructive=true`, the
+   mutations the test-plan needs — CRUD on allowlisted models, and any public
+   **business action** (`action_*`, `button_*`) with a precondition and a
+   postcondition, since it is never journaled and has no undo. Compare results
+   against each AC.
    - Use `fields_get` to discover the real field names/types before asserting on
      them instead of guessing, and `read_group` for aggregations.
    - On a multi-company instance pass `context` (e.g.

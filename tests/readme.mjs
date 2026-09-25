@@ -283,6 +283,21 @@ for (const doc of docs) {
 		`${doc.file}: the waiver is an OPERATION of sdd_phase, not a promise`,
 		/`waive`/.test(doc.text) && /`sdd_phase`/.test(doc.text),
 	);
+	// The tool table is the contract a reader quotes, and it is ONE line per tool:
+	// the odoo_execute row has to carry what the RPC can now do — a business action
+	// behind confirm_destructive, the batch as the auditable path, and the wall
+	// that belongs to Odoo (private methods are not callable over RPC).
+	const execRow = doc.raw.split("\n").find((line) => line.startsWith("| `odoo_execute` |")) ?? "";
+	check(
+		`${doc.file}: the odoo_execute row states the business-action confirmation`,
+		execRow.includes("confirm_destructive") && /kind: "method"/.test(execRow),
+		execRow.slice(0, 120),
+	);
+	check(
+		`${doc.file}: the odoo_execute row states Odoo's private-method wall`,
+		execRow.includes("get_public_method"),
+		execRow.slice(0, 120),
+	);
 }
 
 // ---- every README must stay in step with the others. These used to compare

@@ -21,7 +21,13 @@
  *
  * @module dsh-odoo-sdd/functional
  */
-import { READ_METHODS, MUTATING_METHODS, isBusinessMethod, businessMethodAllowed } from "./method-classification.js";
+import {
+	READ_METHODS,
+	MUTATING_METHODS,
+	isBusinessMethod,
+	businessMethodAllowed,
+	isIndeterminateFor,
+} from "./method-classification.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -645,12 +651,10 @@ export async function executeOperation(
 	if (context !== undefined) kwargs["context"] = context;
 	const res = await client.executeKw<unknown>(op.model, op.method, op.args ?? [], kwargs);
 	if (res.ok) return { ok: true, value: res.value };
-	// A business action is mutating even though it is not CRUD: a timeout after
-	// sending one may mean the server acted, and calling that a plain failure
-	// would invite a retry of something that already happened.
-	const mutating = MUTATING_METHODS.has(op.method) || isBusinessMethod(op.method);
-	const kind = res.errorKind;
-	const indeterminate = mutating && (kind === "transport" || kind === "protocol");
+	// One rule for both surfaces: a timeout after sending a mutation means the
+	// server may have acted, and calling that a plain failure would invite a retry
+	// of something that already happened.
+	const indeterminate = isIndeterminateFor(op.method, res.errorKind);
 	return { ok: false, indeterminate, error: res.error };
 }
 

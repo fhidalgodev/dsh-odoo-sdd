@@ -62,6 +62,9 @@ const grants = new Map();
 const grantsMod = await import(new URL("grants.js", libDir).href);
 const journaled = [];
 
+/** Runs once after the next mutating send, so a test can tamper mid-batch. */
+let tamperAfterSend = null;
+
 /** One recorded call as the executor sees the RPC result. */
 function respond(model, method, args) {
 	if (rpcMode === "transport-fail" && method !== "read" && method !== "search_count" && method !== "fields_get") {
@@ -82,7 +85,13 @@ function respond(model, method, args) {
 const client = {
 	async executeKw(model, method, args, kwargs) {
 		calls.push({ model, method, args, kwargs });
-		return respond(model, method, args);
+		const result = respond(model, method, args);
+		if (tamperAfterSend !== null && method !== "read" && method !== "search_count" && method !== "fields_get") {
+			const run = tamperAfterSend;
+			tamperAfterSend = null;
+			run();
+		}
+		return result;
 	},
 };
 
@@ -302,8 +311,77 @@ console.log("== apply: approval, hashes, order and journal ==");
 	check("the operation persisted an attempt and a result instant", run.ops[0].attemptedAt !== undefined && run.ops[0].resultAt !== undefined);
 }
 
-console.log("== apply: an edited document invalidates the approval ==");
+console.log("== apply: an accepted mutation keeps its receipt when the proof fails ==");
 {
+	// The server ACCEPTED the create and the postcondition did not hold. Those are
+	// two different facts, and the ordering used to erase the second one's
+	// evidence: the journal entry (created id + pre-image) was written AFTER the
+	// postcondition check, so a failed proof left nothing to inspect or compensate
+	// for a row that was already on the instance.
+	const createOp = {
+		intent: "create partner 501",
+		model: "res.partner",
+		method: "create",
+		args: [{ name: "created but unproven" }],
+		identity: [{ field: "id", value: 501 }],
+		postcondition: { domain: [["id", "=", 501]], expect: "count", count: 1 },
+		expect: { kind: "created", count: 1 },
+		recovery: { kind: "unlink_created" },
+	};
+	const createBatch = {
+		id: "b-create",
+		scope: "apply",
+		title: "create one partner whose proof will fail",
+		acceptance: [],
+		companies: [1],
+		operations: [createOp],
+	};
+	const planned = await fn.execute({ operation: "plan", spec_id: specId, environment: "dev", batch: createBatch });
+	check("a create with postcondition, identity and recovery passes validation", planned.ok === true, planned.detail);
+	await fn.execute({ operation: "approve", spec_id: specId, batch_id: "b-create", scope: "apply" });
+
+	journaled.length = 0;
+	countByState = { "501": 0 };
+	const applied = await fn.execute({ operation: "apply", spec_id: specId, batch_id: "b-create", confirm_destructive: true });
+	countByState = {};
+	check("the batch stops because the state it promised was not reached", applied.ok === false, applied.detail);
+
+	const runAfter = readRun(proj, specId);
+	const rec = runAfter.ops.filter((o) => o.batchId === "b-create").pop();
+	check("the operation is reported as failed, never as applied", rec?.state === "failed", JSON.stringify(rec?.state));
+	check("the failure still records that the server ACCEPTED the call", rec?.effect === "accepted", JSON.stringify(rec?.effect));
+	check("the accepted create kept its id (the receipt survived the failed proof)", rec?.createdIds?.[0] === 501, JSON.stringify(rec?.createdIds));
+	check(
+		"the accepted create reached the data journal despite the failed postcondition",
+		journaled.length === 1 && journaled[0].method === "create" && journaled[0].createdIds?.[0] === 501,
+		JSON.stringify(journaled),
+	);
+	check(
+		"the stop message says the effect is journaled and NOT verified",
+		/journaled/i.test(String(applied.detail)) && /NOT verified/i.test(String(applied.detail)),
+		applied.detail,
+	);
+
+	// Compensation must offer to undo what landed — including this one, whose
+	// postcondition failed. Skipping it (the old `state === "applied"` filter)
+	// reported "nothing to compensate" for a row that exists.
+	const comp = await fn.execute({ operation: "compensate", spec_id: specId });
+	// The compensation batch is read back from the PERSISTED plan, not from the
+	// tool result: the output schema does not carry the batch object, so asserting
+	// against `comp.batch` would pass on `undefined` and prove nothing.
+	const compBatch = (readPlan(proj, specId)?.batches ?? []).find((b) => b.id === comp.batchId);
+	const unlink501 = (compBatch?.operations ?? []).find((o) => o.method === "unlink" && JSON.stringify(o.args?.[0]) === "[501]");
+	check("compensation offers to remove the created record even though the proof failed", unlink501 !== undefined, JSON.stringify(compBatch?.operations ?? []));
+	check("compensation says which effect it included without verification", /postcondition failed/i.test(String(comp.detail)), comp.detail);
+
+	// And the run does not present it as verified: `verify` is the evidence the
+	// closing report is built from.
+	const verify = await fn.execute({ operation: "verify", spec_id: specId });
+	check("verify does not report the run as verified while an accepted effect is unproven", verify.status === "blocked", JSON.stringify({ status: verify.status }));
+	check("verify names the unproven effect", /NOT verified/i.test(String(verify.detail)), verify.detail);
+}
+
+console.log("== apply: an edited document invalidates the approval ==");{
 	writeFileSync(join(specDir, "architecture.md"), "# Functional architecture\n\n## Operations\nb1 CHANGED after approval\n");
 	const stale = await fn.execute({ operation: "apply", spec_id: specId, batch_id: "b1", confirm_destructive: true });
 	check("editing the design after approval blocks the apply", stale.ok === false && stale.status === "not-approved", stale.detail);
@@ -369,13 +447,40 @@ console.log("== indeterminate: never retried blind ==");
 	check("the run is blocked until a human reconciles", runAfter.state === "blocked");
 	check("the mutation was attempted exactly once", calls.filter((c) => c.method === "write").length === 1);
 
-	// Reconcile: the declared identity answers whether it landed.
+	// Reconcile: the DECLARED EFFECT is what can be proven, not the existence of a
+	// record. This operation declares no postcondition, so a lookup that finds the
+	// row proves nothing (it was there before the call — that is what a `write`
+	// is), and the honest answer is "a human decides".
 	rpcMode = "ok";
 	calls.length = 0;
 	const reconciled = await fn.execute({ operation: "reconcile", spec_id: specId, batch_id: "b-flaky" });
-	check("reconcile looks the identity up on the instance", calls.some((c) => c.method === "search_count"));
-	check("reconcile resolves the operation and unblocks the run", reconciled.ok === true && reconciled.status === "idle", reconciled.detail);
+	check("reconcile consults the instance", calls.some((c) => c.method === "search_count"));
+	check("the run STAYS blocked when the effect cannot be attributed", reconciled.ok === true && reconciled.status === "blocked", reconciled.detail);
+	check(
+		"an existing record is not accepted as proof that a write landed",
+		/undecidable/i.test(reconciled.detail) && /existing record is not proof/i.test(reconciled.detail),
+		reconciled.detail,
+	);
 	check("the resolution is recorded on the operation", readRun(proj, specId).ops.find((o) => o.batchId === "b-flaky")?.resolution !== undefined);
+
+	// An undecidable result needs a HUMAN decision, and it is an explicit one.
+	// Without this the run would block forever and the only way out would be
+	// editing run.json by hand.
+	const noConfirm = await fn.execute({ operation: "reconcile", spec_id: specId, resolution: "checked in the UI", decision: "applied" });
+	check("a hand resolution needs confirm_destructive", noConfirm.ok === false && noConfirm.status === "needs-confirmation", noConfirm.detail);
+	const badDecision = await fn.execute({
+		operation: "reconcile", spec_id: specId, resolution: "checked in the UI", confirm_destructive: true,
+	});
+	check("a hand resolution without a decision is refused", badDecision.ok === false && /"applied" or "failed"/.test(badDecision.detail));
+	const byHand = await fn.execute({
+		operation: "reconcile", spec_id: specId, resolution: "the partner name is already 'after' in the UI", decision: "applied", confirm_destructive: true,
+	});
+	check("the operator can resolve it by hand and unblock the run", byHand.ok === true && byHand.status === "idle", byHand.detail);
+	check(
+		"a hand decision is recorded as a decision, never as a proof",
+		/BY HAND/.test(String(readRun(proj, specId).ops.find((o) => o.batchId === "b-flaky")?.resolution)),
+	);
+	check("the manual resolution is not evidence that the call succeeded", /NOT evidence/i.test(byHand.detail), byHand.detail);
 }
 
 console.log("== one writer at a time ==");
@@ -489,6 +594,16 @@ console.log("== audit: every functional operation leaves a trace ==");
 	await fn2.execute({ operation: "apply", spec_id: specId, batch_id: "b-audit2", confirm_destructive: true });
 	check("an indeterminate operation is audited as such", audited.some((a) => a.state === "indeterminate" && typeof a.reason === "string"));
 	rpcMode = "ok";
+	// An unresolved operation blocks the run BY DESIGN, and the tests share one
+	// spec: settle it here so the next block starts from a run that has no open
+	// question. It is the operator path, the only one that can close an
+	// "undecidable" outcome — there is no back door that resets the run.
+	const settled = await fn2.execute({
+		operation: "reconcile", spec_id: specId, batch_id: "b-audit2",
+		resolution: "test fixture: the write outcome does not matter to the next block",
+		decision: "failed", confirm_destructive: true,
+	});
+	check("an operator decision closes an undecidable outcome", settled.ok === true && settled.status === "idle", settled.detail);
 	check("the audit kind exists for functional entries", typeof auditMod.recordAudit === "function");
 }
 
@@ -511,6 +626,147 @@ check(
 		clsMod.isCallableMethodName("init") === false &&
 		clsMod.isCallableMethodName("Action Confirm") === false,
 );
+
+console.log("== limits of the batch: inspect is read-only, unresolved is not re-sent ==");
+{
+	// `inspect` runs DISCOVERY batches, which carry no approval, no confirmation
+	// and no backup. It used to decide "is this mutating?" by asking only about
+	// create/write/unlink, so a `kind: "method"` batch passed the check as a read
+	// and the business action EXECUTED under the discovery path.
+	methodAllowlist = ["example.model.action_run"];
+	const methodForInspect = {
+		id: "b-inspect-method",
+		scope: "discovery",
+		title: "a business action wearing a discovery badge",
+		acceptance: [],
+		companies: [],
+		operations: [
+			{
+				kind: "method",
+				intent: "run the action",
+				model: "example.model",
+				method: "action_run",
+				args: [[11]],
+				identity: [{ field: "id", value: 11 }],
+				precondition: { domain: [["id", "=", 11]], expect: "exists" },
+				postcondition: { domain: [["id", "=", 11], ["state", "=", "assigned"]], expect: "count", count: 1 },
+				recovery: { kind: "none", note: "not undoable" },
+			},
+		],
+	};
+	const planInspect = await fn.execute({ operation: "plan", spec_id: specId, environment: "dev", batch: methodForInspect });
+	check("a discovery batch carrying a business action does not validate", planInspect.ok === false && /discovery batch may only read/.test(planInspect.detail), planInspect.detail);
+
+	// Even if such a batch reaches the plan (a hand-written file), `inspect` refuses it.
+	const injected = { ...methodForInspect, scope: "apply" };
+	await fn.execute({ operation: "plan", spec_id: specId, environment: "dev", batch: injected });
+	calls.length = 0;
+	const inspected = await fn.execute({ operation: "inspect", spec_id: specId, batch_id: "b-inspect-method" });
+	check("inspect refuses a batch that mutates through a business action", inspected.ok === false && /READ-only/.test(inspected.detail), inspected.detail);
+	check("inspect sent nothing at all", calls.length === 0);
+
+	// And the reverse: `apply` is not a way to run a batch that only reads.
+	await fn.execute({ operation: "plan", spec_id: specId, environment: "dev", batch: writableBatch({ id: "b-readonly", operations: [{ intent: "count", model: "res.partner", method: "search_count", args: [[]] }] }) });
+	await fn.execute({ operation: "approve", spec_id: specId, batch_id: "b-readonly", scope: "apply" });
+	calls.length = 0;
+	const appliedRead = await fn.execute({ operation: "apply", spec_id: specId, batch_id: "b-readonly", confirm_destructive: true });
+	check("apply refuses a batch that changes nothing", appliedRead.ok === false && /operation=inspect/.test(appliedRead.detail), appliedRead.detail);
+	check("nothing was sent for it either", calls.length === 0);
+	methodAllowlist = [];
+
+	// An operation that cannot be resolved if its answer is lost is refused at
+	// PLAN time: neither a postcondition nor a stable identity is a dead end.
+	// (`undefined` cannot ride through the host's lossless-JSON check, so the two
+	// keys are removed by destructuring.)
+	const baseOp = writableBatch().operations[0];
+	const { identity: _dropIdentity, postcondition: _dropPost, ...opWithoutEither } = baseOp;
+	const unresolvable = await fn.execute({
+		operation: "plan",
+		spec_id: specId,
+		environment: "dev",
+		batch: writableBatch({ id: "b-unresolvable", operations: [opWithoutEither] }),
+	});
+	check(
+		"a mutation with no postcondition and no identity is refused (it could never be reconciled)",
+		unresolvable.ok === false && /postcondition or a stable identity/.test(unresolvable.detail),
+		unresolvable.detail,
+	);
+}
+
+console.log("== the brakes and the authorization are re-checked BETWEEN operations ==");
+{
+	const twoOps = writableBatch({
+		id: "b-two",
+		operations: [
+			{ ...writableBatch().operations[0], identity: [{ field: "id", value: 7 }] },
+			{ intent: "rename partner 8", model: "res.partner", method: "write", args: [[8], { name: "after too" }], identity: [{ field: "id", value: 8 }], postcondition: { domain: [["id", "=", 8]], expect: "exists" }, recovery: { kind: "restore_preimage" } },
+		],
+	});
+
+	// (a) The SPEC-level stop.md halts the loop. The project-level file used to be
+	// the only one read, while the skill promised stop.md in the spec dir halts
+	// everything.
+	await fn.execute({ operation: "plan", spec_id: specId, environment: "dev", batch: twoOps });
+	await fn.execute({ operation: "approve", spec_id: specId, batch_id: "b-two", scope: "apply" });
+	writeFileSync(join(specDir, "stop.md"), "stop the spec\n");
+	calls.length = 0;
+	const specHalted = await fn.execute({ operation: "apply", spec_id: specId, batch_id: "b-two", confirm_destructive: true });
+	check("a stop.md inside the SPEC halts the batch", specHalted.ok === false && /stop\.md appeared/.test(specHalted.detail), specHalted.detail);
+	check("nothing was sent while the spec brake was on", calls.length === 0);
+	rmSync(join(specDir, "stop.md"), { force: true });
+
+	// (b) Editing the plan between operations invalidates the approval for the
+	// NEXT one. Checking only on entry made the receipt a key that stayed valid
+	// while the approved content changed underneath it. The edit has to land AFTER
+	// the first send, or the entry check would catch it first and the loop path
+	// (the one the skill promises) would never be exercised.
+	calls.length = 0;
+	const originalPlan = readPlan(proj, specId);
+	tamperAfterSend = () => {
+		const tampered = JSON.parse(JSON.stringify(originalPlan));
+		tampered.batches.find((b) => b.id === "b-two").operations[1].args = [[8], { name: "TAMPERED" }];
+		writeFileSync(join(functionalDir(proj, specId), "plan.json"), JSON.stringify(tampered, null, 2));
+	};
+	const midEdit = await fn.execute({ operation: "apply", spec_id: specId, batch_id: "b-two", confirm_destructive: true });
+	tamperAfterSend = null;
+	const writesSent = calls.filter((c) => c.method === "write");
+	check("an edit to the plan between operations stops the batch", midEdit.ok === false && /approval no longer matches/.test(midEdit.detail), midEdit.detail);
+	check("the edited plan was not sent after the edit", JSON.stringify(writesSent).includes("TAMPERED") === false, JSON.stringify(writesSent.map((c) => c.args)));
+	// The first operation DID go out before the edit: the point is that the second
+	// one did not, which is what "revalidated between operations" means.
+	check("the operation that preceded the edit is the only one sent", writesSent.length === 1, JSON.stringify(writesSent.map((c) => c.args)));
+	writeFileSync(join(functionalDir(proj, specId), "plan.json"), JSON.stringify(originalPlan, null, 2));
+
+	// (c) An unresolved operation blocks a REPEAT of the batch. This is the
+	// duplicate-effect case: the answer never arrived, so sending the batch again
+	// is how one effect becomes two.
+	countByState = {};
+	rpcMode = "transport-fail";
+	calls.length = 0;
+	await fn.execute({ operation: "apply", spec_id: specId, batch_id: "b-two", confirm_destructive: true });
+	rpcMode = "ok";
+	check("the transport failure left an unresolved operation", readRun(proj, specId).ops.some((o) => o.state === "indeterminate" && o.decided === undefined));
+	calls.length = 0;
+	const repeated = await fn.execute({ operation: "apply", spec_id: specId, batch_id: "b-two", confirm_destructive: true });
+	check("re-applying a batch with an unresolved outcome is refused", repeated.ok === false && repeated.status === "needs-reconcile", repeated.detail);
+	check("NOTHING was re-sent by the repeat", calls.length === 0, JSON.stringify(calls.map((c) => c.method)));
+
+	// A read-only batch carries no such risk: repeating a query cannot double-apply.
+	// (Its approval is re-issued first: replacing the plan for another batch
+	// invalidates every receipt bound to the previous plan hash — which is the
+	// documented behaviour, not a wrinkle in this test.)
+	await fn.execute({ operation: "approve", spec_id: specId, batch_id: "d1", scope: "discovery" });
+	const repeatRead = await fn.execute({ operation: "inspect", spec_id: specId, batch_id: "d1" });
+	check("a read-only batch can still be repeated", repeatRead.ok === true, repeatRead.detail);
+
+	// The unresolved operation is settled by the operator before the next block.
+	const settled = await fn.execute({
+		operation: "reconcile", spec_id: specId, batch_id: "b-two",
+		resolution: "test fixture: the interrupted write is undone, its outcome is irrelevant to the next block",
+		decision: "failed", confirm_destructive: true,
+	});
+	check("the operator decision unblocks the shared run", settled.ok === true && settled.status === "idle", settled.detail);
+}
 
 console.log("== business actions: allowlisted, guarded, and PROVEN ==");
 {

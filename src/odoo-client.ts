@@ -253,7 +253,12 @@ export class OdooClient {
 			},
 			id: randomUUID(),
 		}, timeoutMs, signal);
-		return res.ok ? { ok: true, value: res.value } : { ok: false, error: res.error };
+		// The CLASSIFICATION travels with the failure, not just its message.
+		// Dropping it here is what made every consumer below decide "plain
+		// failure" for a mutation whose answer never came: `isIndeterminateFor()`
+		// reads `errorKind`, and a retry of something the server may already have
+		// committed is the one move that must not look safe.
+		return res.ok ? { ok: true, value: res.value } : { ok: false, error: res.error, errorKind: res.errorKind };
 	}
 
 	/** Search ir.module.module by technical name(s) and project lifecycle info. */

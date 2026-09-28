@@ -394,8 +394,8 @@ export interface ImportDeps {
 	approve(exec: unknown, reason: string): Promise<"allowed-once" | "rejected" | "cancelled" | "unavailable">;
 	/** Absolute path of the spec directory. */
 	specDir(specId: string, exec?: unknown): string;
-	/** Whether the imported file path is one the operator allowed. */
-	authorisedFile?(path: string): boolean;
+	/** Whether the imported file path is one the operator allowed, for THIS session. */
+	authorisedFile?(path: string, exec?: unknown): boolean;
 	/** Path masking for display. */
 	display(pathValue: string): string;
 }
@@ -512,7 +512,7 @@ export function registerImportTool(ctx: { tools: { register(tool: unknown): void
 					return { ...base, status: "needs-file", detail: "use=prepare requires file_path." };
 				}
 				const filePath = args.file_path!;
-				if (deps.authorisedFile !== undefined && !deps.authorisedFile(filePath)) {
+				if (deps.authorisedFile !== undefined && !deps.authorisedFile(filePath, exec)) {
 					return { ...base, status: "not-authorised", detail: `The path ${deps.display(filePath)} is not one the operator authorised for this run.` };
 				}
 				if (args.confirm_destructive !== true) {
@@ -738,6 +738,26 @@ export function registerImportTool(ctx: { tools: { register(tool: unknown): void
 					};
 				}
 				const plan2 = readPlan(projectRoot, specId) ?? { specId, environment: plan?.environment ?? "dev", batches: [] };
+				// The rows do not exist yet, so the identity of the created records
+				// cannot be declared here — the placeholder that used to sit in this
+				// spot (`identity: [{field: "id", value: null}]`) satisfied the
+				// declaration check while asking the instance for `id = null`, a lookup
+				// that can never match: reconciliation ran and could never decide.
+				// What CAN be declared is a baseline: how many rows the model holds
+				// now. The postcondition then requires strictly more of them, which is
+				// the demonstrable effect of an import (an empty domain would be a
+				// tautology, not a proof).
+				let baseline: number | null = null;
+				try {
+					const counted = await client.executeKw<number>(prepared.model, "search_count", [[]], {});
+					if (counted.ok && typeof counted.value === "number") baseline = counted.value;
+				} catch {
+					baseline = null;
+				}
+				const postcondition =
+					baseline === null
+						? { domain: [], expect: "exists" as const }
+						: { domain: [], expect: "count" as const, count: baseline + 1 };
 				const batch = {
 					id: batchId,
 					scope: "apply" as const,
@@ -757,7 +777,7 @@ export function registerImportTool(ctx: { tools: { register(tool: unknown): void
 								options: mapping.options,
 								dryRun: false,
 							},
-							identity: [{ field: "id", value: null }],
+							postcondition,
 							recovery: { kind: "none" as const, note: "an applied import is compensated by deleting the created ids, or by the declared backup" },
 						},
 					],

@@ -438,10 +438,15 @@ export function registerRuntimeTools(
 			// ---- execute ----------------------------------------------------
 			const rpc = await client.executeKw<unknown>(model, method, callArgs, callKwargs, undefined, exec?.signal as AbortSignal | undefined);
 			if (!rpc.ok) {
-				// A business action that never answered is an UNKNOWN outcome, not a
-				// failure: the call was sent and the server may have acted, so a retry
-				// is the wrong move. (One rule, shared with the batch executor.)
-				const unknownOutcome = isBusiness && isIndeterminateFor(method, rpc.errorKind);
+				// A MUTATION that never answered is an UNKNOWN outcome, not a
+				// failure: the call was sent and the server may have acted, so a
+				// retry is the wrong move. CRUD mutates too and is NOT replayable
+				// either — gating this on `isBusiness` alone left `create`/`write`/
+				// `unlink` reported as plain failures, inviting exactly the retry
+				// `isIndeterminateFor()` exists to prevent. A read stays a plain
+				// failure: repeating a query cannot double-apply anything.
+				// (One rule, shared with the batch executor.)
+				const unknownOutcome = (isCrud || isBusiness) && isIndeterminateFor(method, rpc.errorKind);
 				// Domain failure over a successful transport: keep `denied:false`
 				// (this is NOT a policy denial) but mark it unmistakably so the
 				// model, the renderer and any text consumer never read it as OK,
@@ -464,25 +469,14 @@ export function registerRuntimeTools(
 				return { denied: false, reason: "SERVER ERROR — RPC call failed", result: rpc.error };
 			}
 
-			// The state proof is read back BEFORE the call can be reported as OK:
-			// without it, "OK" only means the server accepted the call.
-			let proof: string | null = null;
-			if (postcondition !== undefined) {
-				const post = await checkCondition(client, model, postcondition, callContext);
-				if (!post.ok) {
-					return {
-						denied: false,
-						reason:
-							`POSTCONDITION NOT MET: "${model}.${method}" ran, but the state it promised was not reached ` +
-							`(${post.detail}). The call WAS sent, so the instance may be partially changed: inspect it ` +
-							"before retrying anything.",
-						result: JSON.stringify(rpc.value).slice(0, 4000),
-					};
-				}
-				proof = post.detail;
-			}
-
-			// ---- journal the applied mutation (best-effort undo) ------------
+			// ---- journal the mutation the server ACCEPTED ---------------------
+			// Order matters and it is not cosmetic. The RPC answering `ok` means
+			// the call was dispatched and may have changed data — a DIFFERENT fact
+			// from "the state it promised was reached". Journaling after the
+			// postcondition check made a failed proof erase the only evidence
+			// needed to inspect or compensate it: the created id and the pre-image
+			// were simply never recorded. So the receipt is taken first, the proof
+			// is read after, and a failed proof still blocks the functional result.
 			// CRUD only: a business action changes records the plugin never read, so
 			// journaling it would promise an undo that cannot exist.
 			if (isCrud && deps.recordDataOp) {
@@ -496,6 +490,28 @@ export function registerRuntimeTools(
 					createdIds,
 					...(callContext !== undefined ? { context: callContext } : {}),
 				}, exec);
+			}
+
+			// The state proof is read back BEFORE the call can be reported as OK:
+			// without it, "OK" only means the server accepted the call.
+			let proof: string | null = null;
+			if (postcondition !== undefined) {
+				const post = await checkCondition(client, model, postcondition, callContext);
+				if (!post.ok) {
+					return {
+						denied: false,
+						reason:
+							`POSTCONDITION NOT MET: "${model}.${method}" ran, but the state it promised was not reached ` +
+							`(${post.detail}). The call WAS sent, so the instance may be partially changed: inspect it ` +
+							"before retrying anything." +
+							(isCrud
+								? " The call is recorded in the journal with its pre-image, so it can be compensated " +
+									"(sdd_checkpoint operation=journal) — but it is NOT verified: do not report it as done."
+								: " A business action is not journaled: no undo exists for this call."),
+						result: boundResult(rpc.value, model, method, a),
+					};
+				}
+				proof = post.detail;
 			}
 
 			// What this call did NOT have is part of the answer: an agent that reads
@@ -516,7 +532,7 @@ export function registerRuntimeTools(
 			}
 			if (proof !== null) notes.push(`postcondition holds (${proof})`);
 			const suffix = notes.length === 0 ? "" : "\n" + notes.map((n) => `- ${n}`).join("\n");
-			return { denied: false, reason: `${model}.${method} OK${suffix}`, result: JSON.stringify(rpc.value).slice(0, 4000) };
+			return { denied: false, reason: `${model}.${method} OK${suffix}`, result: boundResult(rpc.value, model, method, a) };
 		},
 	}));
 
@@ -837,4 +853,42 @@ export function registerRuntimeTools(
 			return { valid: errors === 0, findings, detail, moduleDir, projectRoot };
 		},
 	}));
+}
+
+/**
+ * Bounded, HONEST output of an RPC result.
+ *
+ * A `slice(0, N)` of `JSON.stringify` produces text that LOOKS like a complete
+ * JSON document and is not: a brace missing, one array element cut in half, and
+ * nothing in the answer saying so. An agent reading that as the whole truth is
+ * the failure mode the bound was supposed to prevent. This marks the cut
+ * explicitly, reports the real size, and says how to ask for less — while
+ * refusing the one "recovery" that must never be attempted: re-sending a
+ * mutation to get a longer answer.
+ * @param value - the RPC value to project.
+ * @param model - model the call targeted (named in the guidance).
+ * @param method - method that was called (a read can be paged, a mutation cannot be repeated).
+ * @param args - the tool arguments, to name what the caller can page with.
+ * @returns a bounded string, marked as partial when it was cut.
+ */
+function boundResult(value: unknown, model: string, method: string, args: Record<string, unknown>): string {
+	const MAX = 4000;
+	let text: string;
+	try {
+		text = value === undefined ? "undefined" : JSON.stringify(value);
+	} catch {
+		return "[the result could not be serialized to JSON: it was not a plain value]";
+	}
+	if (text.length <= MAX) return text;
+	const kept = text.slice(0, MAX);
+	const guidance = isReadMethod(method)
+		? "Read it in SMALLER PIECES: `fields` to select columns, `limit` and `offset` to page " +
+			`(this call was ${model}.${method}${args["limit"] === undefined ? "" : `, limit=${String(args["limit"])}`}).`
+		: "This answered a call that may have CHANGED data: do NOT repeat it to get a longer answer. " +
+			"Read the records back with a separate read/search call.";
+	return (
+		`${kept}\n\n[TRUNCATED — ${text.length - MAX} of ${text.length} characters are NOT shown above; ` +
+		"the visible text is the BEGINNING of the payload, not a complete JSON document. " +
+		`${guidance}]`
+	);
 }

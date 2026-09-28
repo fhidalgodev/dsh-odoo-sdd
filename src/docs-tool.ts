@@ -49,8 +49,14 @@ export interface DocsToolDeps {
 	 * (inside the project, or inside the central specs folder).
 	 */
 	specDir(specId: string, exec?: unknown): string;
-	/** Documentation language from the plugin configuration (may be empty). */
-	configuredLanguage(): string;
+	/**
+	 * Documentation language from the plugin configuration (may be empty).
+	 *
+	 * Takes the call's execution context for the same reason every other
+	 * resolver does: the configuration is per project, and resolving it without
+	 * the session reads whichever project the fallback root names.
+	 */
+	configuredLanguage(exec?: unknown): string;
 	/** Path masking helper for display. */
 	display(pathValue: string): string;
 }
@@ -170,7 +176,7 @@ export function registerDocsTool(
 			const resolved: ResolvedLanguage = resolveDocsLanguage({
 				explicit: args.language,
 				projectRoot,
-				configured: deps.configuredLanguage(),
+				configured: deps.configuredLanguage(exec),
 			});
 			const language = resolved.language === "" ? DEFAULT_LANGUAGE : resolved.language;
 			const artifacts: string[] = [];

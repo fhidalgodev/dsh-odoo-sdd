@@ -13,9 +13,14 @@ const sdd = await import(new URL("sdd-state.js", libDir).href);
 const creds = await import(new URL("credentials.js", libDir).href);
 
 let failures = 0;
-function check(label, cond) {
+function check(label, cond, detail) {
 	if (cond) console.log(`  PASS  ${label}`);
-	else { console.log(`  FAIL  ${label}`); failures++; }
+	else {
+		// The detail rides the failure line: a check that fails without saying
+		// what it saw costs another run to diagnose.
+		console.log(`  FAIL  ${label}${detail === undefined ? "" : ` — ${detail}`}`);
+		failures++;
+	}
 }
 
 /**
@@ -290,6 +295,171 @@ for (let i = 0; i <= st2.maxIterations; i++) {
 }
 check("iteration ceiling leads to BLOCKED", blocked && st2.phase === "BLOCKED");
 
+// ---- the failure ladder survives the cycle it describes ------------------
+// `fail -> FIX_LOOP -> VERIFY` used to CLEAR the failure streak on the way into
+// VERIFY, so three consecutive failures could never be reached through real
+// transitions and the diagnosis the ladder demands was never owed. The counter
+// only resets on a success or on a recorded diagnosis starting a new strategy.
+console.log("== failure ladder across transitions, verdict freshness, AC coverage ==");
+{
+	const ladDir = join(dir, "specs", "030-ladder");
+	sdd.initSpecDir(ladDir);
+	const lad = sdd.loadState(ladDir);
+	lad.mode = "create";
+	lad.licensed = "community";
+	lad.phase = "WRITE_CODE";
+	sdd.saveState(lad);
+
+	let owedAt = 0;
+	let attempts = 0;
+	let ladderStoppedIt = false;
+	let stopReason = "none";
+	let stopRound = 0;
+	for (let round = 1; round <= 4; round += 1) {
+		// A real verification that fails: verdict FAILED, streak +1.
+		sdd.recordFailedVerdict(lad, `round ${round} failed`);
+		const out = sdd.recordFailure(lad, `round ${round}: assertion failed`);
+		if (out.requireDiagnosis && owedAt === 0) owedAt = round;
+		// Walk the graph the way the pipeline does: FIX_LOOP/WRITE_CODE -> VERIFY,
+		// then VERIFY -> FIX_LOOP to start the next attempt. From the third failure
+		// the ladder stops it: a retry is refused until a diagnosis is recorded.
+		const toVerify = sdd.transition(lad, "VERIFY", null, `attempt ${round}`);
+		if (toVerify.ok) attempts += 1;
+		else {
+			stopReason = String(toVerify.reason);
+			stopRound = round;
+			ladderStoppedIt = /diagnosis/i.test(stopReason);
+			break;
+		}
+		sdd.transition(lad, "FIX_LOOP", null, `fix ${round}`);
+	}
+	check("the streak survives the cycle (3 failures, not 0)", lad.failureCount === 3, String(lad.failureCount));
+	check("the ladder owes the diagnosis exactly at the third failure", owedAt === 3, String(owedAt));
+	// The loop stops on the EXACT round where the ladder is owed, with the same
+	// number of completed attempts behind it: no blind retry gets through.
+	check(
+		"the ladder STOPS the loop it describes (no blind 4th attempt)",
+		ladderStoppedIt === true && stopRound === 3 && attempts === 2,
+		`stopped=${ladderStoppedIt} stopRound=${stopRound} completedAttempts=${attempts} streak=${lad.failureCount} reason=${stopReason}`,
+	);
+	check("the streak is what the diagnosis gate consults", sdd.diagnosisPending(lad) === true);
+	// A blind retry while the diagnosis is owed is refused.
+	const blind = sdd.transition(lad, "FIX_LOOP", null, "blind retry");
+	check("a blind retry is refused while a diagnosis is owed", blind.ok === false && /diagnosis/i.test(blind.reason));
+	// The diagnosis clears it, and a NEW failure after that owes one again (the
+	// old flag exempted the spec for the rest of its life).
+	sdd.recordDiagnosis(lad, "root cause: the constraint was evaluated before the write");
+	check("the recorded diagnosis re-opens the retry gate", sdd.diagnosisPending(lad) === false);
+	sdd.recordFailure(lad, "a failure caused by something else");
+	check("a failure AFTER a diagnosis asks for a new one", sdd.diagnosisPending(lad) === true);
+
+	// The ceiling counts VERIFICATION ATTEMPTS, not phase hops: a budget of N
+	// used to be spent twice per cycle (VERIFY + FIX_LOOP), so it ran out after
+	// N/2 real attempts and the message described a budget nobody had used.
+	const capDir = join(dir, "specs", "031-budget");
+	sdd.initSpecDir(capDir);
+	const cap = sdd.loadState(capDir);
+	cap.mode = "create";
+	cap.licensed = "community";
+	cap.phase = "WRITE_CODE";
+	cap.maxIterations = 3;
+	sdd.saveState(cap);
+	let budgetAttempts = 0;
+	let blockedAt = 0;
+	for (let i = 0; i < 5; i += 1) {
+		const rv = sdd.transition(cap, "VERIFY", null, `attempt ${i + 1}`);
+		if (rv.ok) {
+			budgetAttempts += 1;
+			sdd.transition(cap, "FIX_LOOP", null, "fix it");
+			continue;
+		}
+		if (rv.reason.startsWith("BLOCKED")) {
+			blockedAt = budgetAttempts;
+			break;
+		}
+	}
+	check("the iteration budget counts verification attempts (3 allowed, then BLOCKED)", budgetAttempts === 3 && blockedAt === 3, `attempts=${budgetAttempts} blockedAt=${blockedAt}`);
+}
+
+// ---- verdict freshness and AC coverage -----------------------------------
+{
+	const freshDir = join(dir, "specs", "032-fresh");
+	sdd.initSpecDir(freshDir);
+	writeFileSync(
+		join(freshDir, "test-plan.md"),
+		"# Test Plan\n\n| AC | Scenario | Layer | Status |\n|---|---|---|---|\n| AC1 | x | rpc | pass |\n",
+	);
+	const fresh = sdd.loadState(freshDir);
+	fresh.phase = "FIX_LOOP";
+	sdd.saveState(fresh);
+	const okVerdict = sdd.recordSuccess(fresh, "AC1 verified");
+	check("a PASSED verdict is recorded with the artifacts it was based on", okVerdict.ok === true && typeof fresh.verdictArtifacts?.["test-plan.md"] === "string");
+	check("DONE is reachable while the evidence is unchanged", sdd.verdictStaleness(freshDir, fresh) === null);
+
+	// The proof changes after the verdict: the verdict is about a document that
+	// no longer exists, and DONE must refuse it.
+	writeFileSync(
+		join(freshDir, "test-plan.md"),
+		"# Test Plan\n\n| AC | Scenario | Layer | Status |\n|---|---|---|---|\n| AC1 | x | rpc | pass |\n| AC1 | a second story | rpc | pass |\n",
+	);
+	const staleReason = sdd.verdictStaleness(freshDir, fresh);
+	check("editing the evidence after the verdict makes it STALE", staleReason !== null && /STALE/.test(String(staleReason)));
+	const toDone = sdd.transition(fresh, "DONE", "APPROVED", "close it anyway");
+	check("DONE refuses a stale verdict", toDone.ok === false && /STALE/i.test(String(toDone.reason)), String(toDone.reason).slice(0, 140));
+
+	// A duplicate AC row is two stories for one criterion, not two proofs.
+	writeFileSync(
+		join(freshDir, "test-plan.md"),
+		"# Test Plan\n\n| AC | Scenario | Layer | Status |\n|---|---|---|---|\n| AC1 | x | rpc | pass |\n| AC1 | y | rpc | pass |\n",
+	);
+	check("a duplicated AC row is a gap", sdd.evidenceGaps(freshDir).some((g) => /more than once/.test(g)));
+
+	// Coverage is measured against what the SPEC declares, not against the rows
+	// that happen to be there: answering AC1 while AC2 exists is incomplete.
+	sdd.initSpecDir(join(dir, "specs", "033-coverage"));
+	const covDir = join(dir, "specs", "033-coverage");
+	writeFileSync(
+		join(covDir, "spec.md"),
+		"# Spec\n\n## Context\nx\n\n## Acceptance Criteria\n\n- [ ] AC1: one\n- [ ] AC2: two\n\n## Constraints\n- [ ] C1: v17\n\n## Target Odoo Version\n\n- [ ] V: 17.0\n",
+	);
+	check("both criteria are read from the spec", sdd.declaredAcIds(covDir).join(",") === "AC1,AC2");
+	writeFileSync(
+		join(covDir, "test-plan.md"),
+		"# Test Plan\n\n| AC | Scenario | Layer | Status |\n|---|---|---|---|\n| AC1 | x | rpc | pass |\n",
+	);
+	const omissions = sdd.evidenceGaps(covDir);
+	check("an OMITTED criterion blocks the verdict (it was invisible before)", omissions.some((g) => /AC2 .*NO row/.test(g)), omissions.join(" | "));
+	writeFileSync(
+		join(covDir, "test-plan.md"),
+		"# Test Plan\n\n| AC | Scenario | Layer | Status |\n|---|---|---|---|\n| AC1 | x | rpc | pass |\n| AC2 | y | rpc | pass |\n| AC9 | z | rpc | pass |\n",
+	);
+	check("a criterion the spec does not declare is a gap", sdd.evidenceGaps(covDir).some((g) => /AC9/.test(g)));
+	writeFileSync(
+		join(covDir, "test-plan.md"),
+		"# Test Plan\n\n| AC | Scenario | Layer | Status |\n|---|---|---|---|\n| AC1 | x | rpc | pass |\n| AC2 | y | rpc | fail |\n",
+	);
+	check("a failed criterion still blocks", sdd.evidenceGaps(covDir).some((g) => /AC2/.test(g)));
+
+	// A verdict recorded from a phase that is not a verification has no meaning.
+	const wrongPhase = sdd.loadState(covDir);
+	wrongPhase.phase = "CLARIFY";
+	const refusedPhase = sdd.recordSuccess(wrongPhase, "everything is fine");
+	check("PASSED is refused outside VERIFY/FIX_LOOP", refusedPhase.ok === false && /VERIFY or FIX_LOOP/.test(refusedPhase.gaps.join(" ")));
+	check("no verdict file was written by the refusal", sdd.readVerdict(covDir) === null);
+}
+
+// ---- the security verdict is read where it is declared -------------------
+{
+	const secDocDir = join(dir, "specs", "034-secverdict");
+	sdd.initSpecDir(secDocDir);
+	// The word appears in prose, not in the declared verdict line: it is not a
+	// decision, and treating it as one is how a REJECTED report passes.
+	writeFileSync(join(secDocDir, "security-report.md"), "# Security review\n\nThis was NOT APPROVED by anyone yet.\nVerdict: REJECTED\n");
+	check("a REJECTED verdict is not rescued by the word APPROVED in prose", sdd.securityReviewGaps(secDocDir).length > 0);
+	writeFileSync(join(secDocDir, "security-report.md"), "# Security review\n\nVerdict: APPROVED\nAll groups reviewed.\n");
+	check("a declared APPROVED verdict passes", sdd.securityReviewGaps(secDocDir).length === 0);
+}
+
 // ---- functional mode: graph, templates and closing gates -----------------
 // The functional path configures and imports instead of writing code, so it has
 // its own phase graph and its own content gates. Both must be STRICTER about
@@ -553,7 +723,7 @@ check(
 	sddSkill?.source === "runtime" &&
 		sddSkill?.resourceBase?.kind === "directory" &&
 		typeof sddSkill.resourceBase.path === "string" &&
-		/agents$/.test(sddSkill.resourceBase.path),
+		/resources$/.test(sddSkill.resourceBase.path),
 );
 
 // The functional path is a second bundled skill, registered the same way and
@@ -581,8 +751,11 @@ check(
 			/odoo-sdd-workflow/.test(fnSkill.whenToUse),
 	);
 	check(
-		"the functional skill resolves its own reference base",
-		/skills[\\/]odoo-functional-sdd$/.test(String(fnSkill?.resourceBase?.path ?? "")),
+		"both skills share ONE resource base (references resolve the same way)",
+		typeof fnSkill?.resourceBase?.path === "string" &&
+			fnSkill.resourceBase.path === sddSkill?.resourceBase?.path &&
+			/resources$/.test(fnSkill.resourceBase.path),
+		`${String(fnSkill?.resourceBase?.path)} vs ${String(sddSkill?.resourceBase?.path)}`,
 	);
 	check(
 		"the functional body names the functional phase, not WRITE_CODE",
@@ -597,8 +770,8 @@ check(
 			/odoo-functional-sdd/.test(sddSkill.content),
 	);
 	check(
-		"the functional domain reference exists beside the skill",
-		existsSync(new URL("../skills/odoo-functional-sdd/references/functional-domains.md", import.meta.url)),
+		"the functional domain reference exists under the shared base",
+		existsSync(new URL("../resources/references/functional-domains.md", import.meta.url)),
 	);
 }
 
@@ -839,14 +1012,30 @@ writeFileSync(join(projD, "specs", "001-bare", "spec.md"), "# Spec\n\n== Context
 let gate = await sddD.execute({ operation: "advance", spec_id: "001-bare", next_phase: "ARCHITECTURE", approval_marker: "APPROVED", approval_source: "human" });
 check("headings gate blocks advance with missing spec sections", gate.ok === false && (gate.detail.includes("Acceptance Criteria") || gate.detail.includes("missing required section")));
 
-// --- autonomy: proxy approval forbidden in supervised ---
+// --- autonomy: a phase gate is an ASK, not a declaration ---
 await setupD.execute({ mode: "skip" }); // avoid instance requirement
 sddD.execute({ operation: "init", spec_id: "002-proxy" });
 await sddD.execute({ operation: "clarify", spec_id: "002-proxy", mode: "create", licensed: "community" });
 await sddD.execute({ operation: "advance", spec_id: "002-proxy", next_phase: "READ_SPEC" });
 await sddD.execute({ operation: "mark_spec_loaded", spec_id: "002-proxy" });
-gate = await sddD.execute({ operation: "advance", spec_id: "002-proxy", next_phase: "ARCHITECTURE", approval_marker: "APPROVED", approval_source: "human-proxy" });
-check("human-proxy rejected in SUPERVISED mode", gate.ok === false && gate.detail.includes("SUPERVISED"));
+// A phase gate is an ASK, not a word the caller writes: with the human refusing
+// the native request, declaring `approval_source=human-proxy` (or anything else)
+// cannot advance the phase. Before, the gate validated the declaration itself and
+// zero native requests were made.
+{
+	const savedOutcomePr = approvalOutcome;
+	const beforePr = approvalRequests.length;
+	approvalOutcome = "rejected";
+	gate = await sddD.execute({ operation: "advance", spec_id: "002-proxy", next_phase: "ARCHITECTURE", approval_marker: "APPROVED", approval_source: "human-proxy" });
+	check(
+		"a proxy cannot grant itself a gated phase (the human is asked, and refused)",
+		gate.ok === false && /NOT approved/.test(String(gate.detail)),
+		gate.detail,
+	);
+	check("the gate actually ASKED the human (a request was made)", approvalRequests.length > beforePr);
+	check("the phase did not move on a refusal", (await sddD.execute({ operation: "status", spec_id: "002-proxy" })).phase === "READ_SPEC");
+	approvalOutcome = savedOutcomePr;
+}
 
 // switch to autonomous
 await setupD.execute({ mode: "autonomy", decision: "autonomous" });
@@ -1120,10 +1309,20 @@ console.log("== settings source drives the effective configuration ==");
 	// WRITE_CODE so the ONLY policy under test is the checkpoint requirement
 	// (an earlier phase would deny for its own reason and hide the difference).
 	const cpsMod = await import(new URL("checkpoints.js", libDir).href);
-	cpsMod.writeActiveState(projSet, { specId: "001-from-settings", phase: "WRITE_CODE", checkpointId: null });
+	const centralSettings = () => ({ specsMode: "central", specsRoot: settingsRootForSpecs });
+	// The spec's OWN state is what authorizes a change, so the phase is written
+	// where the pipeline writes it — in the CENTRAL folder the layout selected.
+	const setSpecPhaseIn = (specDirC, phase) => {
+		const stC = sdd.loadState(specDirC);
+		stC.phase = phase;
+		sdd.saveState(stC);
+		cpsMod.writeActiveState(projSet, { specId: "001-from-settings", phase, checkpointId: null });
+	};
+	const settingsSpecDir = join(settingsRootForSpecs, specLocMod.projectSlug(projSet), "001-from-settings");
+	setSpecPhaseIn(settingsSpecDir, "WRITE_CODE");
 	const setGuard = localGuards[localGuards.length - 1];
 	const mutCall = { name: "odoo_execute", arguments: { model: "sale.order", method: "create", values: {}, confirm_destructive: true } };
-	live = { requireCheckpointBeforeMutation: true };
+	live = { ...centralSettings(), requireCheckpointBeforeMutation: true };
 	hooks.onChange();
 	check("the panel's guard setting is armed in the guard", /checkpoint/i.test(setGuard(mutCall) ?? ""));
 	writeFileSync(join(projSet, ".sdd", "config.json"), JSON.stringify({ requireCheckpointBeforeMutation: false }, null, 2), { mode: 0o600 });
@@ -1138,15 +1337,16 @@ console.log("== settings source drives the effective configuration ==");
 	// The same path for the CHANGE policy: a switch that only renders in the
 	// form is a lie, so the panel's value must reach the guard (and the project
 	// file must be able to relax it, like every other policy).
+	setSpecPhaseIn(settingsSpecDir, "DONE");
 	cpsMod.writeActiveState(projSet, { specId: "001-from-settings", phase: "DONE", checkpointId: "cp-any" });
 	const editCall = { name: "write", arguments: { file_path: join(projSet, "mod.py"), content: "x\n" } };
-	live = {};
+	live = { ...centralSettings() };
 	hooks.onChange();
 	check("the change policy is armed by default in the guard", typeof setGuard(editCall) === "string");
-	live = { requireSpecForChanges: false };
+	live = { ...centralSettings(), requireSpecForChanges: false };
 	hooks.onChange();
 	check("the panel's switch disarms it", setGuard(editCall) === undefined);
-	live = {};
+	live = { ...centralSettings() };
 	hooks.onChange();
 	check("clearing the switch re-arms it", typeof setGuard(editCall) === "string");
 	writeFileSync(join(projSet, ".sdd", "config.json"), JSON.stringify({ requireSpecForChanges: false }, null, 2), { mode: 0o600 });
@@ -1690,6 +1890,171 @@ console.log("== transport details (log query, abort signal, web session) ==");
 }
 
 // ---- RPC capability: context (multi-company) and read methods (lote 4) ----
+// ---- effect contract: the error CLASS travels, and the receipt survives ----
+// Two regressions with one root cause: the plugin claimed guarantees it did not
+// deliver on these paths.
+//
+//   1. `#rpc()` classified the failure (transport/server/protocol) and
+//      `executeKw()` threw the classification away, so `isIndeterminateFor()`
+//      always received `undefined`. A mutation whose answer never arrived was
+//      reported as a plain server error — and the obvious next move for a model
+//      reading "SERVER ERROR" is to send it again. This runs the REAL client
+//      with only HTTP stubbed, because the bug lived exactly in that hop: every
+//      in-memory double preserved `errorKind` and hid it.
+//   2. The journal entry was written AFTER the postcondition check, so a failed
+//      postcondition erased the created id and the pre-image of a mutation the
+//      server had already accepted: nothing left to inspect or compensate.
+console.log("== effect contract (error class survives, receipt survives) ==");
+{
+	const odooMod = await import(new URL("odoo-client.js", libDir).href);
+	const runtimeModEc = await import(new URL("tools-runtime.js", libDir).href);
+	const clsModEc = await import(new URL("method-classification.js", libDir).href);
+	const credsEc = { url: "http://127.0.0.1:8069", db: "dev", username: "admin", secret: "k", envFile: "/tmp/x", source: "project" };
+	const realFetchEc = globalThis.fetch;
+	/** Stub HTTP only; the client under test is the real one. */
+	const stubFetch = (onObject) => {
+		globalThis.fetch = async (url, init) => {
+			const body = JSON.parse(init.body);
+			const params = body.params ?? {};
+			if (String(params.method) === "authenticate") {
+				return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: 7 }), { status: 200 });
+			}
+			return onObject(body, params);
+		};
+	};
+	try {
+		// 1a. A transport failure after a mutation keeps its class all the way out
+		// of the client, which is what the callers read.
+		stubFetch(() => {
+			throw new TypeError("fetch failed");
+		});
+		const clientEc = new odooMod.OdooClient(credsEc);
+		const failed = await clientEc.executeKw("sale.order", "create", [{ name: "x" }]);
+		check("executeKw keeps the failure classification", failed.ok === false && failed.errorKind === "transport", JSON.stringify(failed));
+		check(
+			"a transport failure is INDETERMINATE for CRUD (it used to be a plain failure)",
+			clsModEc.isIndeterminateFor("create", failed.errorKind) === true,
+		);
+		check("a read is never indeterminate (repeating a query cannot double-apply)", clsModEc.isIndeterminateFor("search_read", failed.errorKind) === false);
+
+		// 1b. A domain error (the server answered and rolled back) stays confirmed.
+		stubFetch((body) =>
+			new Response(
+				JSON.stringify({ jsonrpc: "2.0", id: body.id, error: { data: { message: "ValidationError: nope" } } }),
+				{ status: 200 },
+			),
+		);
+		const domainErr = await new odooMod.OdooClient(credsEc).executeKw("sale.order", "create", [{ name: "x" }]);
+		check("a server error keeps its class", domainErr.ok === false && domainErr.errorKind === "server", JSON.stringify(domainErr));
+		check("a server error is NOT indeterminate (Odoo answered and rolled back)", clsModEc.isIndeterminateFor("create", domainErr.errorKind) === false);
+
+		// 1c. The ad-hoc surface applies the shared rule to CRUD too: gating it on
+		// `isBusiness` alone left create/write/unlink reported as retryable.
+		stubFetch(() => {
+			throw new TypeError("fetch failed");
+		});
+		const ecTools = new Map();
+		const ecJournal = [];
+		runtimeModEc.registerRuntimeTools(
+			{ tools: { register: (t) => ecTools.set(t.name, t) } },
+			{
+				client: () => ({ client: new odooMod.OdooClient(credsEc), report: "stub" }),
+				status: () => ({ detail: "stub" }),
+				projectRoot: dir,
+				allowlist: () => ["sale.order"],
+				display: (v) => v,
+				recordDataOp: (op) => ecJournal.push(op),
+			},
+		);
+		const crudOut = await ecTools.get("odoo_execute").execute(
+			{ model: "sale.order", method: "create", values: { name: "x" }, confirm_destructive: true },
+		);
+		check("an unanswered CRUD call is reported INDETERMINATE, not as a retryable failure", /INDETERMINATE/.test(String(crudOut.reason)), String(crudOut.reason).slice(0, 160));
+
+		// 1d. A read that fails for the same reason stays a plain failure.
+		const readOut = await ecTools.get("odoo_execute").execute({ model: "sale.order", method: "search_read", domain: [] });
+		check("an unanswered READ is a plain failure (repeating it is safe)", !/INDETERMINATE/.test(String(readOut.reason)) && /SERVER ERROR/.test(String(readOut.reason)), String(readOut.reason).slice(0, 160));
+
+		// 2. Server accepted the create; the postcondition did NOT hold. The
+		// receipt (created id + pre-image + journal entry) must survive, and the
+		// answer must not read as success.
+		stubFetch((body, params) => {
+			const method = params.args?.[4];
+			if (method === "create") {
+				return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: 4242 }), { status: 200 });
+			}
+			// Every read-back reports "the state you promised is not there".
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: 0 }), { status: 200 });
+		});
+		ecJournal.length = 0;
+		const postOut = await ecTools.get("odoo_execute").execute({
+			model: "sale.order",
+			method: "create",
+			values: { name: "y" },
+			confirm_destructive: true,
+			postcondition: { domain: [["name", "=", "y"]], expect: "exists" },
+		});
+		check("a failed postcondition is not reported as OK", /POSTCONDITION NOT MET/.test(String(postOut.reason)), String(postOut.reason).slice(0, 160));
+		check(
+			"an accepted mutation keeps its journal receipt after a failed postcondition",
+			ecJournal.length === 1 && ecJournal[0].createdIds?.[0] === 4242,
+			JSON.stringify(ecJournal),
+		);
+		check("the failed postcondition says the effect is recoverable, not that it is verified", /compensated/i.test(String(postOut.reason)));
+	} finally {
+		globalThis.fetch = realFetchEc;
+	}
+}
+
+// ---- a partial answer is MARKED as partial ------------------------------
+// `slice(0, 4000)` on a JSON string produces text that looks like a complete
+// document and is not: the reader has no way to know a field was cut in half,
+// and the answer still says "OK". Recortar no es resumir.
+console.log("== bounded output (a cut answer says it was cut) ==");
+{
+	const runtimeTrunc = await import(new URL("tools-runtime.js", libDir).href);
+	const bigRows = Array.from({ length: 400 }, (_, i) => ({ id: i, name: `partner-${i}`, note: "x".repeat(40) }));
+	const toolsTrunc = new Map();
+	runtimeTrunc.registerRuntimeTools(
+		{ tools: { register: (t) => toolsTrunc.set(t.name, t) } },
+		{
+			// The stub RESPECTS the declared limit, like Odoo does: a stub that
+			// ignored it would make the "small answer" case impossible to test.
+			client: () => ({
+				client: {
+					executeKw: async (_model, _method, _args, kwargs) => {
+						const limit = typeof kwargs?.limit === "number" ? kwargs.limit : bigRows.length;
+						return { ok: true, value: bigRows.slice(0, limit) };
+					},
+				},
+				report: "stub",
+			}),
+			status: () => ({ detail: "stub" }),
+			projectRoot: dir,
+			allowlist: () => ["res.partner"],
+			display: (v) => v,
+		},
+	);
+	const rx = toolsTrunc.get("odoo_execute");
+	const readBig = await rx.execute({ model: "res.partner", method: "search_read", domain: [], limit: 400 });
+	check("a large read answer is bounded", readBig.result.length < 6000, String(readBig.result.length));
+	check("a large read answer is MARKED as truncated", /\[TRUNCATED/.test(readBig.result) && /not a complete JSON document/i.test(readBig.result));
+	check("the marker reports how much was cut", /\d+ of \d+ characters are NOT shown/.test(readBig.result));
+	check("a truncated READ is told to page with fields/limit/offset", /limit/i.test(readBig.result) && /offset/i.test(readBig.result));
+	check("a truncated read does not claim the payload is whole", !/^\s*\[\s*\{/.test(readBig.result.trim()) || /TRUNCATED/.test(readBig.result));
+
+	// A mutation whose answer is large: the guidance must be "read it back", never
+	// "call it again" — repeating a mutation to get more text is the trap.
+	const writeBig = await rx.execute({ model: "res.partner", method: "write", ids: [1], values: { name: "y" }, confirm_destructive: true });
+	check("a large mutation answer is marked too", /\[TRUNCATED/.test(String(writeBig.result)));
+	check("a truncated MUTATION forbids repeating the call", /do NOT repeat it/i.test(String(writeBig.result)));
+	check("...and points at a read instead", /read the records back/i.test(String(writeBig.result)));
+
+	// Small answers are untouched: no marker noise on the normal path.
+	const small = await rx.execute({ model: "res.partner", method: "search_read", domain: [], limit: 1 });
+	check("a small answer carries no truncation marker", !/TRUNCATED/.test(String(small.result)), JSON.stringify(String(small.result).slice(0, 160)));
+}
+
 console.log("== odoo_execute capability (context, read_group, fields_get) ==");
 {
 	const runtimeMod2 = await import(new URL("tools-runtime.js", libDir).href);
@@ -2227,6 +2592,24 @@ mkdirSync(projGuard, { recursive: true });
 plugin.apply(fakeCtx, { projectRoot: projGuard });
 const guard = capturedGuards[capturedGuards.length - 1];
 check("policy guard registered with the host", typeof guard === "function");
+
+/**
+ * Put one spec in a phase THE SPEC ITSELF records.
+ *
+ * Both halves matter now: `state.json` is the canonical phase the guard
+ * authorizes against, and `.sdd/active.json` is the pointer naming which spec the
+ * session is on. Poking only the pointer is what used to leave a spec that had
+ * gone BLOCKED still authorizing mutations.
+ */
+const setGuardSpecPhase = (projectRoot, specId, phase) => {
+	const specDirG = join(projectRoot, "specs", specId);
+	sdd.initSpecDir(specDirG);
+	const stG = sdd.loadState(specDirG);
+	stG.phase = phase;
+	sdd.saveState(stG);
+	cps.writeActiveState(projectRoot, { specId, phase });
+	return specDirG;
+};
 // No spec at all: the CHANGE gate fires before the checkpoint policy, because a
 // missing spec is the more fundamental problem and the message says how to fix
 // it (open one, continue the active one, or ask for a waiver).
@@ -2235,7 +2618,7 @@ check("guard denies a mutation with no spec at all", typeof gR === "string" && /
 check("the denial names the three ways out", /operation=init/.test(String(gR)) && /mode=bug/.test(String(gR)) && /operation=waive/.test(String(gR)));
 check("guard allows read-only tools", guard({ name: "odoo_connect", arguments: {} }) === undefined);
 // With a spec that authorizes writing, the checkpoint policy is what remains.
-cps.writeActiveState(projGuard, { specId: "001-guard", phase: "WRITE_CODE" });
+setGuardSpecPhase(projGuard, "001-guard", "WRITE_CODE");
 gR = guard({ name: "odoo_execute", arguments: { method: "create" } });
 check("guard denies a mutation with no checkpoint", typeof gR === "string" && gR.includes("no checkpoint"));
 const guardCp = registered.get("sdd_checkpoint");
@@ -2272,13 +2655,24 @@ check("guard allows the mutation after a checkpoint exists", gR === undefined);
 	writeFileSync(join(runDir, "run.json"), JSON.stringify(idle));
 	// Back under a writing spec: the functional rule is what is being tested here,
 	// not the change policy.
-	cps.writeActiveState(projGuard, { specId: "001-guard", phase: "WRITE_CODE" });
+	setGuardSpecPhase(projGuard, "001-guard", "WRITE_CODE");
 	check("an idle functional run does not block anything", guard({ name: "odoo_execute", arguments: { method: "create" } }) === undefined);
 }
-cps.writeActiveState(projGuard, { phase: "READ_SPEC" });
+// The CANONICAL phase decides, even when the cached pointer disagrees: a spec
+// that went BLOCKED (or was advanced elsewhere) cannot keep authorizing changes
+// through a stale `.sdd/active.json`.
+setGuardSpecPhase(projGuard, "001-guard", "READ_SPEC");
 gR = guard({ name: "odoo_module", arguments: { operation: "install" } });
 check("guard denies a mutation before WRITE_CODE", typeof gR === "string" && gR.includes("READ_SPEC"));
-cps.writeActiveState(projGuard, { phase: "WRITE_CODE" });
+setGuardSpecPhase(projGuard, "001-guard", "BLOCKED");
+cps.writeActiveState(projGuard, { specId: "001-guard", phase: "WRITE_CODE" });
+gR = guard({ name: "odoo_execute", arguments: { method: "create" } });
+check(
+	"a BLOCKED spec is not authorized by a stale active pointer",
+	typeof gR === "string" && /BLOCKED/.test(gR),
+	String(gR).slice(0, 160),
+);
+setGuardSpecPhase(projGuard, "001-guard", "WRITE_CODE");
 mkdirSync(join(projGuard, ".sdd"), { recursive: true });
 writeFileSync(join(projGuard, ".sdd", "stop.md"), "operator halt\n", { mode: 0o600 });
 gR = guard({ name: "odoo_connect", arguments: {} });
@@ -2291,6 +2685,17 @@ rmSync(join(projGuard, ".sdd", "stop.md"));
 // and the refusal names the three ways out. bash stays the documented hole.
 console.log("== change policy (spec, waiver, escape hatches) ==");
 {
+	/**
+	 * Align the spec's OWN state with the pointer. The canonical phase is what
+	 * authorizes a change, so a test that puts the spec in a phase must write it
+	 * where the pipeline writes it.
+	 */
+	const setSpecPhase = (projectRoot, specId, phase) => {
+		const specDirC = join(projectRoot, "specs", specId);
+		const stC = sdd.loadState(specDirC);
+		stC.phase = phase;
+		sdd.saveState(stC);
+	};
 	const projChange = join(dir, "projChange");
 	mkdirSync(join(projChange, "mod"), { recursive: true });
 	plugin.apply(fakeCtx, { projectRoot: projChange });
@@ -2337,12 +2742,14 @@ console.log("== change policy (spec, waiver, escape hatches) ==");
 	);
 	// A finished spec has answered its question: the next request is a NEW one.
 	cps.writeActiveState(projChange, { phase: "DONE" });
+	setSpecPhase(projChange, "001-chg", "DONE");
 	d = guardC({ name: "write", arguments: srcEdit, ...execC });
 	check("a DONE spec does not authorize new changes", typeof d === "string" && /001-chg is in DONE/.test(d));
 
 	// 3) Writing phase: the edit passes, and only the checkpoint policy remains
 	// for things that mutate the instance.
 	cps.writeActiveState(projChange, { phase: "WRITE_CODE" });
+	setSpecPhase(projChange, "001-chg", "WRITE_CODE");
 	check("WRITE_CODE authorizes the edit", guardC({ name: "write", arguments: srcEdit, ...execC }) === undefined);
 	d = guardC({ name: "odoo_import", arguments: { use: "prepare" }, ...execC });
 	check("an import prepare is a mutation: it needs a checkpoint", typeof d === "string" && /no checkpoint/.test(d));
@@ -2355,6 +2762,7 @@ console.log("== change policy (spec, waiver, escape hatches) ==");
 	// waiver. A policy the model can exempt itself from is not a policy, so the
 	// refusal is tested before the grant.
 	cps.writeActiveState(projChange, { phase: "DONE" });
+	setSpecPhase(projChange, "001-chg", "DONE");
 	const savedOutcomeW = approvalOutcome;
 	approvalOutcome = "rejected";
 	let w = await phaseC.execute({ operation: "waive", spec_id: "001-chg", detail: "dejalo a tu criterio" }, execC);
@@ -2401,7 +2809,12 @@ console.log("== change policy (spec, waiver, escape hatches) ==");
 	check("...and the session is back under the policy", typeof d === "string" && /001-chg/.test(d));
 	// `status` re-syncs the active phase from the spec's OWN state, so an active
 	// phase poked into place by hand cannot linger and lie to the next session.
-	check("status re-synced the active phase from the spec state", cps.readActiveState(projChange).phase === "CLARIFY");
+	await phaseC.execute({ operation: "status", spec_id: "001-chg" }, execC);
+	check(
+		"status re-synced the active phase from the spec state (the pointer is not an authority)",
+		cps.readActiveState(projChange).phase === sdd.loadState(join(projChange, "specs", "001-chg")).phase,
+		`pointer=${cps.readActiveState(projChange).phase} spec=${sdd.loadState(join(projChange, "specs", "001-chg")).phase}`,
+	);
 	const rv2 = await phaseC.execute({ operation: "waive", spec_id: "001-chg", revoke: true }, execC);
 	check("revoking twice is honest, not an error", rv2.ok === true && /No waiver/.test(String(rv2.detail)));
 	approvalOutcome = savedOutcomeW;
@@ -3100,6 +3513,99 @@ console.log("== real cordis host: optional services ==");
 		const bareRead = await tools.get("odoo_config").execute({ mode: "read" }, { agent: { id: "ghost" } });
 		check("a host with no session store falls back and says so", bareRead.resolved.rootSource === "config" && bareRead.resolved.projectRoot === bareRoot);
 	}
+}
+
+// ---- per-session isolation: no callback falls back to another project ----
+// Every auxiliary resolver used to call `effectiveConfig()` with no execution
+// context, which resolves the DEPLOYMENT/FALLBACK root. With two projects open,
+// grants, audit entries, the documentation language, the import file
+// authorisation and the sanitizer's credentials could all come from the wrong
+// one — while the tool call itself resolved the right project. This test mounts
+// two projects whose configuration differs and walks those paths.
+console.log("== per-session isolation (two projects, one plugin) ==");
+{
+	const isoA = join(dir, "iso-A");
+	const isoB = join(dir, "iso-B");
+	for (const root of [isoA, isoB]) {
+		mkdirSync(join(root, "specs"), { recursive: true });
+		mkdirSync(join(root, ".sdd"), { recursive: true });
+	}
+	// A SPEC of its own in each project, in a phase that authorizes a change.
+	for (const [root, id] of [[isoA, "001-a"], [isoB, "001-b"]]) {
+		sdd.initSpecDir(join(root, "specs", id));
+		const stIso = sdd.loadState(join(root, "specs", id));
+		stIso.mode = "create";
+		stIso.licensed = "community";
+		stIso.phase = "WRITE_CODE";
+		sdd.saveState(stIso);
+	}
+	// The documentation language lives in each project's own config file, so the
+	// answer must follow the CALLING session and nothing else.
+	writeFileSync(join(isoA, ".sdd", "config.json"), JSON.stringify({ documentationLanguage: "es" }, null, 2), { mode: 0o600 });
+	writeFileSync(join(isoB, ".sdd", "config.json"), JSON.stringify({ documentationLanguage: "en" }, null, 2), { mode: 0o600 });
+	// The configured fallback root is a THIRD place, so a lost `exec` is visible:
+	// neither session may end up reading it. The sessions service is what makes a
+	// session's project authoritative — without it every call falls back.
+	const isoCtx = {
+		...fakeCtx,
+		sessions: {
+			get: (id) => (id === "session-a" ? { header: { cwd: isoA } } : id === "session-b" ? { header: { cwd: isoB } } : undefined),
+		},
+	};
+	plugin.apply(isoCtx, { projectRoot: join(dir, "iso-fallback") });
+	const cfgTool = registered.get("odoo_config");
+	const docsTool = registered.get("odoo_docs");
+
+	const execA = { agent: { id: "session-a" }, callId: "call-a" };
+	const execB = { agent: { id: "session-b" }, callId: "call-b" };
+	const readA = await cfgTool.execute({ mode: "read" }, execA);
+	const readB = await cfgTool.execute({ mode: "read" }, execB);
+	check("two sessions resolve two different projects", readA.resolved.projectRoot === isoA && readB.resolved.projectRoot === isoB, `${readA.resolved.projectRoot} / ${readB.resolved.projectRoot}`);
+
+	// The spec/state pointers stay per project.
+	const phaseTool = registered.get("sdd_phase");
+	await phaseTool.execute({ operation: "status", spec_id: "001-a" }, execA);
+	await phaseTool.execute({ operation: "status", spec_id: "001-b" }, execB);
+	check("each session's active pointer names its OWN spec", cps.readActiveState(isoA).specId === "001-a" && cps.readActiveState(isoB).specId === "001-b");
+	check("the pointer of one project is not written by the other", existsSync(join(isoA, ".sdd", "active.json")) && existsSync(join(isoB, ".sdd", "active.json")));
+
+	// The documentation language follows the session, not the fallback root.
+	const modA = join(isoA, "my_module");
+	mkdirSync(modA, { recursive: true });
+	writeFileSync(join(modA, "__manifest__.py"), "{'name':'my_module','version':'19.0.1.0.0','depends':['base']}", { mode: 0o600 });
+	const docA = await docsTool.execute({ operation: "check", module_dir: modA }, execA);
+	const docB = await docsTool.execute({ operation: "check", module_dir: modA }, execB);
+	check(
+		"the documentation language comes from the CALLING project (es for A, en for B)",
+		/language=es /.test(String(docA.detail)) && /language=en /.test(String(docB.detail)),
+		`A=${String(docA.detail).slice(0, 90)} | B=${String(docB.detail).slice(0, 90)}`,
+	);
+
+	// The audit trail is per session: `sdd_phase` writes one, and it must land in
+	// the session's own `.sdd/audit.jsonl` (the functional audit goes through the
+	// same `recordAudit` seam with `effectiveConfig(exec)`).
+	await phaseTool.execute({ operation: "init", spec_id: "002-audit-a" }, execA);
+	await phaseTool.execute({ operation: "init", spec_id: "002-audit-b" }, execB);
+	const auditA = readFileSync(join(isoA, ".sdd", "audit.jsonl"), "utf8");
+	const auditB = readFileSync(join(isoB, ".sdd", "audit.jsonl"), "utf8");
+	check("each session's audit log records ITS call", auditA.includes("002-audit-a") && auditB.includes("002-audit-b"));
+	check(
+		"no session's audit log records the other's call",
+		!auditA.includes("002-audit-b") && !auditB.includes("002-audit-a"),
+	);
+	check("the fallback root holds neither project's audit log", !existsSync(join(dir, "iso-fallback", ".sdd", "audit.jsonl")));
+
+	// The functional state is per project too: the spec it describes lives in the
+	// session's specs folder, not in the fallback.
+	const fnToolA = registered.get("odoo_functional");
+	const fnStatusA = await fnToolA.execute({ operation: "status", spec_id: "001-a" }, execA);
+	check("the functional tool reports the session's spec", /001-a/.test(String(fnStatusA.detail)), String(fnStatusA.detail).slice(0, 90));
+	const fnUnknown = await fnToolA.execute({ operation: "status", spec_id: "no-such-spec" }, execA);
+	check("a spec of ANOTHER project is not silently adopted", /no plan|nothing|error/i.test(String(fnUnknown.detail)), String(fnUnknown.detail).slice(0, 120));
+	check(
+		"the functional state is read from the session's folder",
+		!existsSync(join(isoA, "specs", "001-b")) && !existsSync(join(isoB, "specs", "001-a")),
+	);
 }
 
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);

@@ -2,7 +2,7 @@
  * Packaging contract test for dsh-odoo-sdd.
  *
  * A plugin can pass every unit test and still be broken for the people who
- * install it: the published package once shipped without `agents/` (the
+ * install it: the published package once shipped without `resources/personas/` (the
  * personas the SKILL loads) and without `cordis.patch.yml`, because `files`
  * decides what `pnpm`/`npm` actually hardlink. Those bugs only surface after
  * installation, so this test asserts the tarball contents directly.
@@ -15,9 +15,10 @@
  * @module dsh-odoo-sdd/tests/package
  */
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -150,7 +151,7 @@ const required = [
 	"cordis.patch.yml",
 	"client/client.js",
 	"skills/odoo-sdd-workflow/SKILL.md",
-	"skills/odoo-sdd-workflow/references/tours-and-demo.md",
+	"resources/references/tours-and-demo.md",
 	"lib/index.js",
 	"lib/grants.js",
 	"lib/atomic.js",
@@ -165,14 +166,14 @@ for (const agent of [
 	"documentation",
 	"functional",
 ]) {
-	required.push(`agents/${agent}.md`);
+	required.push(`resources/personas/${agent}.md`);
 }
 // Both bundled skills travel with the package: the runtime reads them by path
 // (the functional reference resolves through the skill's resource base).
 for (const skillFile of [
 	"skills/odoo-functional-sdd/SKILL.md",
-	"skills/odoo-functional-sdd/references/business-methods.md",
-	"skills/odoo-functional-sdd/references/functional-domains.md",
+	"resources/references/business-methods.md",
+	"resources/references/functional-domains.md",
 ]) {
 	required.push(skillFile);
 }
@@ -324,7 +325,7 @@ const stage = mkdtempSync(join(tmpdir(), "dsh-odoo-sdd-publish-"));
 let staged;
 try {
 	// The package file set, minus lib/: exactly what a fresh clone has.
-	const shipThese = ["src", "client", "agents", "skills", "scripts", "cordis.patch.yml", ".env.example", "README.md", "README.es.md", "LICENSE", "package.json", "tsconfig.json"];
+	const shipThese = ["src", "client", "resources", "skills", "scripts", "cordis.patch.yml", ".env.example", "README.md", "README.es.md", "LICENSE", "package.json", "tsconfig.json"];
 	for (const name of shipThese) {
 		if (existsSync(join(root, name))) cpSync(join(root, name), join(stage, name), { recursive: true });
 	}
@@ -344,7 +345,97 @@ check(
 	srcModules.every((file) => staged.has(`lib/${file.slice(0, -3)}.js`)),
 	`missing: ${srcModules.filter((f) => !staged.has(`lib/${f.slice(0, -3)}.js`)).join(", ")}`,
 );
-check("the publish simulation kept the personas and skills", staged.has("agents/functional.md") && staged.has("skills/odoo-functional-sdd/SKILL.md"));
+check("the publish simulation kept the personas and skills", staged.has("resources/personas/functional.md") && staged.has("skills/odoo-functional-sdd/SKILL.md"));
+check("the publish simulation kept the personas and skills", staged.has("resources/personas/functional.md") && staged.has("skills/odoo-functional-sdd/SKILL.md"));
+
+// --- every reference a skill makes must RESOLVE from its declared base -----
+// A file can ship in the tarball and still be unreachable: the host tells the
+// model to resolve relative paths against the skill's resource base, and the
+// technical skill declared `agents` while its body said `agents/architect.md`
+// (which resolves to `agents/agents/architect.md`). The paths only worked
+// because the process cwd happened to be the repository root. This walks the
+// real registration and resolves each reference the way the host will.
+{
+	const pluginMod = await import(new URL("../lib/index.js", import.meta.url).href);
+	const registered = [];
+	const ctx = {
+		tools: { register: () => {}, guard: () => () => {} },
+		on: () => () => {},
+		skills: { register: (def) => registered.push(def) },
+	};
+	pluginMod.apply(ctx, { projectRoot: process.cwd() });
+	check("both bundled skills register with a resource base", registered.length === 2 && registered.every((s) => s.resourceBase?.kind === "directory"));
+	let refs = 0;
+	let unresolvable = 0;
+	for (const skill of registered) {
+		const base = String(skill.resourceBase?.path ?? "");
+		const body = String(skill.content ?? "");
+		for (const match of body.matchAll(/`((?:personas|references|skills)\/[^`]+\.md)`/g)) {
+			const rel = match[1];
+			refs += 1;
+			// What the host tells the model to do: resolve it AGAINST THE BASE.
+			const resolved = resolve(base, rel);
+			// It must also stay inside the installed package (a base cannot reach
+			// out of the tarball) and be the file that ships (`<base>/<rel>` is the
+			// same file as `<package>/<rel>` only when the base IS the package root,
+			// so the second path is what `files` has to contain).
+			const relFromPackage = relative(root, resolved);
+			const resolves = existsSync(resolved) && relFromPackage !== "" && !relFromPackage.startsWith("..") && shipped.has(relFromPackage);
+			if (!resolves) {
+				unresolvable += 1;
+				console.log(`         ${skill.name}: \`${rel}\` -> ${resolved} is missing or not shipped`);
+			}
+		}
+	}
+	check("the skills reference at least one resource (the check is not vacuous)", refs > 0, `refs=${refs}`);
+	check("every skill reference resolves from its declared resource base", unresolvable === 0, `${unresolvable} of ${refs} did not resolve`);
+
+	// --- instruction budgets ------------------------------------------------
+	// Bytes are a MAINTENANCE constraint, not a proof of token savings: a shorter
+	// body that drops a rule or makes a reference undiscoverable is a regression,
+	// so the budget is asserted together with what it must preserve. What is
+	// measured is the SELECTED load for a phase — the guide body plus the persona
+	// and the reference it sends the model to — not one file alone.
+	const guide = registered.find((s) => s.name === "odoo-sdd-workflow");
+	const functionalGuide = registered.find((s) => s.name === "odoo-functional-sdd");
+	const bodyBytes = (skill) => Buffer.byteLength(String(skill?.content ?? ""), "utf8");
+	const BUDGET = { guide: 16_000, total: 30_000, persona: 40_000 };
+	check(
+		`the technical guide body stays under ${BUDGET.guide} bytes (it was 32,495)`,
+		bodyBytes(guide) > 0 && bodyBytes(guide) < BUDGET.guide,
+		`${bodyBytes(guide)}`,
+	);
+	check(
+		`both guide bodies together stay under ${BUDGET.total} bytes`,
+		bodyBytes(guide) + bodyBytes(functionalGuide) < BUDGET.total,
+		`${bodyBytes(guide)} + ${bodyBytes(functionalGuide)}`,
+	);
+	const personaBytes = readdirSync(join(root, "resources", "personas"))
+		.filter((f) => f.endsWith(".md"))
+		.reduce((sum, f) => sum + Buffer.byteLength(readFileSync(join(root, "resources", "personas", f), "utf8"), "utf8"), 0);
+	check(
+		`the personas together stay under ${BUDGET.persona} bytes (they absorbed the moved detail)`,
+		personaBytes > 0 && personaBytes < BUDGET.persona,
+		`${personaBytes}`,
+	);
+
+	// The budget must not have been met by DELETING the route: every phase names
+	// the persona that owns it, and every gate the runtime evaluates is still
+	// discoverable from the body.
+	for (const persona of ["architect", "developer", "qa", "consultant", "security-reviewer", "documentation", "human-proxy"]) {
+		check(
+			`the guide still routes the ${persona} phase to its persona`,
+			String(guide?.content ?? "").includes(`personas/${persona}.md`),
+		);
+	}
+	for (const gate of ["README", "## Documentation", "## Security", "test-plan", "AC1"]) {
+		check(`the guide still names what the runtime gates on: ${gate}`, String(guide?.content ?? "").includes(gate));
+	}
+	for (const brake of ["stop.md", "BLOCKED", "diagnose", "rollback", "waive", "handoff"]) {
+		check(`the guide still names the brake/exit: ${brake}`, String(guide?.content ?? "").includes(brake));
+	}
+}
+
 // The hook must build, not smuggle: a build helper is never part of the tarball.
 check("the build helper itself is not shipped", !staged.has("scripts/prepare.mjs"));
 

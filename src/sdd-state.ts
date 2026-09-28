@@ -29,6 +29,7 @@
  * @module dsh-odoo-sdd/sdd-state
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { readJsonWithRecovery, quarantinedSiblings, writeFileAtomic } from "./atomic.js";
 
@@ -147,8 +148,16 @@ export interface SddState {
 	lastVerdictPassed: boolean | null;
 	/** True once deep diagnosis has run for the current failure streak. */
 	diagnosisDone: boolean;
+	/** Failure count at which the last diagnosis was recorded. */
+	diagnosedAtFailureCount?: number;
 	/** Whether the spec.md file exists and was read at least once. */
 	specLoaded: boolean;
+	/**
+	 * Fingerprints of the documents the last PASSED verdict was based on.
+	 * Absent when the verdict predates this field, or after a failure invalidated
+	 * it; either way DONE refuses to treat that verdict as current evidence.
+	 */
+	verdictArtifacts?: Record<string, string>;
 	updatedAt: string;
 }
 
@@ -440,6 +449,25 @@ export function transition(
 				state,
 			};
 		}
+		// The verdict must still be about the documents that are there NOW. Editing
+		// the spec, the design or the test plan after the verification turned a
+		// PASSED verdict into a statement about something that no longer exists,
+		// and re-reading only the verdict file could not see it.
+		const stale = verdictStaleness(state.specDir, state);
+		if (stale !== null) {
+			return { ok: false, reason: `Cannot reach DONE: ${stale}`, state };
+		}
+		// And the coverage the verdict claimed has to still hold: a criterion that
+		// appeared in test-plan.md after the verdict was recorded was never tested.
+		const coverage = evidenceGaps(state.specDir);
+		if (coverage.length > 0) {
+			return {
+				ok: false,
+				reason:
+					"Cannot reach DONE: the evidence no longer covers the spec. " + coverage.join(" "),
+				state,
+			};
+		}
 		// A FUNCTIONAL spec closes on its own terms, and they are not negotiable
 		// by `documentationPolicy`: the runbook is the only way a human repeats a
 		// configuration/import, and the batch executor can change business data,
@@ -511,7 +539,16 @@ export function transition(
 				state,
 			};
 		}
-		state.iterationsUsed += 1;
+		// An "iteration" is ONE ATTEMPT AT VERIFYING, which is what
+		// `maxIterations` announces ("N verify/fix iterations"). Counting the entry
+		// into FIX_LOOP as a second attempt too spent two of the budget per cycle:
+		// a ceiling of five ran out after three real attempts, and the message the
+		// developer read ("5 ... exhausted") described a budget nobody had used.
+		// The entry into FIX_LOOP is therefore recorded without consuming one, and
+		// the ceiling is evaluated where the attempt actually begins.
+		if (next === "VERIFY") {
+			state.iterationsUsed += 1;
+		}
 		if (state.iterationsUsed > state.maxIterations) {
 			state.phase = "BLOCKED";
 			kbAppend(
@@ -519,22 +556,26 @@ export function transition(
 				"blocker",
 				`Iteration ceiling reached (${state.maxIterations}). Last note: ${note}`,
 			);
+			// The blocker is part of the SAME save as the phase: two writes would
+			// leave a window where state.json already says BLOCKED and the KB does
+			// not, and a reader that trusts either one would see half the story.
+			const reason =
+				`BLOCKED: ${state.maxIterations} verification attempt(s) exhausted without a ` +
+				"PASSED verdict. Escalate to the developer with the KB and last verdict.";
+			kbAppend(state, "blocker", reason);
 			saveState(state);
-			return {
-				ok: false,
-				reason:
-					`BLOCKED: ${state.maxIterations} verify/fix iterations exhausted without a ` +
-					"PASSED verdict. Escalate to the developer with the KB and last verdict.",
-				state,
-			};
+			return { ok: false, reason, state };
 		}
 	}
 
 	state.phase = next;
-	if (next !== "FIX_LOOP") {
-		state.failureCount = 0;
-		state.diagnosisDone = false;
-	}
+	// The failure STREAK survives the cycle it describes. Resetting it on entry to
+	// VERIFY — which is what "next !== FIX_LOOP" did — meant the ladder restarted
+	// on every pass through the loop: `fail -> FIX_LOOP -> VERIFY` cleared the
+	// counter each time, so three consecutive failures could never be reached and
+	// the diagnosis the ladder demands was never owed. It is cleared only by a
+	// SUCCESSFUL verification (recordSuccess) or by a recorded diagnosis starting
+	// a new strategy (recordDiagnosis).
 	kbAppend(state, "decision", `Phase -> ${next}. Approved by ${approvalSource ?? "human"}. ${note}`);
 	saveState(state);
 	return { ok: true, state, note: `Phase is now ${next}. (approved by ${approvalSource ?? "human"})` };
@@ -548,7 +589,12 @@ export function transition(
  * @returns true while a recorded diagnosis is still owed.
  */
 export function diagnosisPending(state: SddState): boolean {
-	return state.failureCount >= state.maxFailuresBeforeDiagnosis && !state.diagnosisDone;
+	if (!state.diagnosisDone) return state.failureCount >= state.maxFailuresBeforeDiagnosis;
+	// A diagnosis answers the STREAK it was run on, not every failure that comes
+	// after it: without this, one recorded diagnosis exempted the spec from the
+	// ladder for the rest of its life, and the failures that followed — including
+	// ones caused by something else entirely — were followed by blind retries.
+	return state.failureCount > (state.diagnosedAtFailureCount ?? 0);
 }
 
 /**
@@ -589,6 +635,7 @@ export function recordFailure(state: SddState, errorSummary: string): {
  */
 export function recordDiagnosis(state: SddState, detail: string): SddState {
 	state.diagnosisDone = true;
+	state.diagnosedAtFailureCount = state.failureCount;
 	kbAppend(state, "diagnosis", detail.slice(0, 4000) || "root-cause diagnosis recorded");
 	saveState(state);
 	return state;
@@ -598,31 +645,106 @@ export function recordDiagnosis(state: SddState, detail: string): SddState {
  * Record one passed verification (persists the honest verdict).
  *
  * A PASSED verdict is an evidence claim, not a mood: every acceptance criterion
- * in `test-plan.md` must have moved past `pending`. When any is still open the
- * verdict is REFUSED and nothing is written, so a green verdict always maps to
- * a tested criterion.
+ * in `test-plan.md` must have moved past `pending`, AND the criteria the spec
+ * itself declares must all be there. When any is still open — or missing, or
+ * duplicated, or unknown — the verdict is REFUSED and nothing is written, so a
+ * green verdict always maps to a tested criterion.
  * @param state - current spec state.
  * @param detail - human-readable evidence summary.
  * @returns whether the verdict was persisted, the updated state, and the gaps.
  */
 export function recordSuccess(state: SddState, detail: string): { ok: boolean; state: SddState; gaps: string[] } {
+	// A verdict is a statement about a verification. Recording one from CLARIFY
+	// (or from a terminal phase) has no meaning, and it used to be possible —
+	// which made "PASSED" reachable without ever running a verification.
+	if (state.phase !== "VERIFY" && state.phase !== "FIX_LOOP") {
+		return {
+			ok: false,
+			state,
+			gaps: [
+				`a PASSED verdict belongs to a verification: the spec is in ${state.phase}, not in VERIFY or FIX_LOOP. ` +
+					"Record the verification first (sdd_phase operation=fail records an honest FAILED verdict).",
+			],
+		};
+	}
 	const gaps = evidenceGaps(state.specDir);
 	if (gaps.length > 0) {
 		return { ok: false, state, gaps };
 	}
 	state.failureCount = 0;
 	writeVerdict(state, true, detail);
+	// What the verdict was based on, so a later DONE can tell whether it is still
+	// about the same documents. A hash is not a claim that a test ran — it only
+	// makes "the evidence this verdict used" an inspectable identity.
+	state.verdictArtifacts = artifactHashes(state.specDir);
 	kbAppend(state, "verdict", "Verification PASSED.");
 	saveState(state);
 	return { ok: true, state, gaps: [] };
 }
 
-/** Record a failed verification (persists the honest FAILED verdict). */
-export function recordFailedVerdict(state: SddState, detail: string): SddState {
+/**
+ * Fingerprints of the documents a verdict is a statement about.
+ *
+ * Identity, not truth: hashing `spec.md`/`architecture.md`/`test-plan.md` proves
+ * WHICH evidence a PASSED verdict used, and therefore whether it is still about
+ * the same thing. It cannot prove a test ran, and it is not meant to.
+ * @param specDir - spec directory.
+ * @returns one hex digest per artifact (missing files hash as empty).
+ */
+export function artifactHashes(specDir: string): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const name of ["spec.md", "architecture.md", "test-plan.md"]) {
+		let text = "";
+		try {
+			text = readFileSync(join(specDir, name), "utf8");
+		} catch {
+			text = "";
+		}
+		out[name] = createHash("sha256").update(text, "utf8").digest("hex");
+	}
+	return out;
+}
+
+/** Record a failed verification (persists the honest FAILED verdict). */export function recordFailedVerdict(state: SddState, detail: string): SddState {
 	writeVerdict(state, false, detail);
+	// A failed verification invalidates the green one: the evidence changed, so
+	// the stored PASSED must not stay available to a later DONE.
+	state.verdictArtifacts = undefined;
 	kbAppend(state, "verdict", "Verification FAILED (honest verdict persisted).");
 	saveState(state);
 	return state;
+}
+
+/**
+ * Whether the persisted PASSED verdict still describes the current documents.
+ *
+ * The verdict file is a statement about a spec, an architecture and a test plan.
+ * Editing any of them afterwards makes it a statement about something that no
+ * longer exists — and re-reading only the verdict (which is what DONE used to do)
+ * cannot see that. The hash recorded when it was approved is what closes it.
+ * @param specDir - spec directory.
+ * @param state - spec state holding the recorded hashes.
+ * @returns null when the verdict is current, or the reason it is not.
+ */
+export function verdictStaleness(specDir: string, state: SddState): string | null {
+	const verdict = readVerdict(specDir);
+	if (verdict === null || !verdict.passed) return null; // no green verdict to be stale
+	const recorded = state.verdictArtifacts;
+	if (recorded === undefined) {
+		return (
+			"the PASSED verdict carries no record of the artifacts it was based on (it was written before this check " +
+			"existed). Re-run the verification to record it."
+		);
+	}
+	const current = artifactHashes(specDir);
+	const changed = Object.keys(current).filter((name) => current[name] !== recorded[name]);
+	if (changed.length > 0) {
+		return (
+			`the PASSED verdict is STALE: ${changed.join(", ")} changed after it was recorded. A verdict about ` +
+			"documents that no longer exist is not evidence — re-verify and record the verdict again."
+		);
+	}
+	return null;
 }
 
 /** Required section headings per gated phase/output file. */
@@ -873,6 +995,9 @@ export function evidenceGaps(specDir: string): string[] {
 	const text = readFileSync(path, "utf8");
 	const gaps: string[] = [];
 	let rows = 0;
+	/** Every identifier the test plan claims to cover, in file order. */
+	const planned: string[] = [];
+	const seen = new Set<string>();
 	for (const line of text.split(/\r?\n/)) {
 		if (!line.trim().startsWith("|")) continue;
 		const cells = line.split("|");
@@ -882,6 +1007,12 @@ export function evidenceGaps(specDir: string): string[] {
 		if (/^[-: ]+$/.test(cols[0])) continue; // markdown separator row
 		if (/^ac$/i.test(cols[0])) continue; // header row
 		rows += 1;
+		const id = normalizeAcId(cols[0]);
+		if (seen.has(id)) {
+			gaps.push(`AC "${cols[0]}" appears more than once in test-plan.md: two rows for one criterion is two stories, not two proofs.`);
+		}
+		seen.add(id);
+		planned.push(id);
 		const status = normalizeAcStatus(cols[3]);
 		if (!AC_PASS_PATTERN.test(status)) {
 			gaps.push(
@@ -894,7 +1025,76 @@ export function evidenceGaps(specDir: string): string[] {
 	if (rows === 0) {
 		gaps.push("test-plan.md has no AC rows: a PASSED verdict needs per-AC evidence.");
 	}
+
+	// COVERAGE, not just the rows that happen to be there. A plan that answers
+	// AC1 and says nothing about AC2 used to pass, because the gate only looked at
+	// the rows it found: the completeness of the EVIDENCE was checked against
+	// itself instead of against what the spec asked for.
+	const declared = declaredAcIds(specDir);
+	const declaredSet = new Set(declared);
+	for (const id of declared) {
+		if (!seen.has(id)) {
+			gaps.push(
+				`AC ${id} is declared in spec.md but has NO row in test-plan.md: every declared criterion needs its own ` +
+					"line with the real result — an omitted criterion is not a passing one.",
+			);
+		}
+	}
+	for (const id of planned) {
+		if (declaredSet.size > 0 && !declaredSet.has(id)) {
+			gaps.push(`test-plan.md covers "${id}", which spec.md does not declare: either it is a typo or the spec is out of date.`);
+		}
+	}
+	if (declared.length === 0) {
+		gaps.push(
+			"spec.md declares no acceptance criteria this gate can find: name them with an AC id " +
+				"(`- [ ] AC1: …` under `## Acceptance Criteria`), because otherwise there is nothing to be complete against.",
+		);
+	}
 	return gaps;
+}
+
+/**
+ * Normalize an acceptance-criterion identifier so the spec and the test plan can
+ * be compared: case, decoration, and the `AC`/`AC-` prefix all fold together.
+ * @param raw - identifier or table cell.
+ * @returns the comparable form (e.g. `AC1`).
+ */
+function normalizeAcId(raw: string): string {
+	const clean = raw.replace(/[`*_\s]/g, "").toUpperCase().replace(/^AC[-_.]?/, "AC");
+	return clean;
+}
+
+/**
+ * The acceptance criteria `spec.md` declares, in file order.
+ *
+ * Read from the `## Acceptance Criteria` section only: the rest of the document
+ * may mention AC ids in prose, and harvesting those would invent requirements.
+ * Recognizes the checklist form the templates write (`- [ ] AC1: …`) and a plain
+ * `AC1` at the start of a line.
+ * @param specDir - spec directory holding spec.md.
+ * @returns the declared identifiers (empty when the section declares none).
+ */
+export function declaredAcIds(specDir: string): string[] {
+	let text = "";
+	try {
+		text = readFileSync(join(specDir, "spec.md"), "utf8");
+	} catch {
+		return [];
+	}
+	const section = sectionBody(text, "## Acceptance Criteria");
+	const source = section === "" ? "" : section;
+	const out: string[] = [];
+	const seen = new Set<string>();
+	for (const line of source.split(/\r?\n/)) {
+		const m = /^\s*(?:[-*+]\s*)?(?:\[[ xX]\]\s*)?\*{0,2}(AC[-_.]?\s*\d+[A-Za-z0-9._-]*)\*{0,2}\s*[:.)-]?/i.exec(line);
+		if (m === null) continue;
+		const id = normalizeAcId(m[1]);
+		if (seen.has(id)) continue;
+		seen.add(id);
+		out.push(id);
+	}
+	return out;
 }
 
 /**
@@ -1072,7 +1272,7 @@ export function designWarnings(specDir: string, mode: PipelineMode | null = null
 			warnings.push(
 				"`## Tours` is missing — state which web tours ship (onboarding, test, or both), which asset " +
 				"bundle loads each one, and on which versions, or write \"no tours needed\" (see " +
-				"`skills/odoo-sdd-workflow/references/tours-and-demo.md`).",
+				"`references/tours-and-demo.md`).",
 			);
 		} else if (tourBody === "") {
 			warnings.push(
@@ -1196,7 +1396,7 @@ export function initSpecDir(specDir: string, mode: PipelineMode | null = null): 
 				"     loads it (web.assets_tests for a test tour, backend/frontend for onboarding) and\n" +
 				"     the HttpCase + start_tour that executes it — or \"no tours needed\". A tour that no\n" +
 				"     bundle loads never runs. See\n" +
-				"     skills/odoo-sdd-workflow/references/tours-and-demo.md for the per-version API. -->\n\n" +
+				"     references/tours-and-demo.md for the per-version API. -->\n\n" +
 				"## Demo data\n\n<!-- Files under demo/ declared in the manifest's \"demo\" key and what they\n" +
 				"     are for (fixtures, demonstration) — or \"no demo data\". The functionality must\n" +
 				"     never depend on it: production databases are created without demo. -->\n\n" +

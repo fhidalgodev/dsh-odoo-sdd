@@ -119,6 +119,9 @@ import {
 	readVerdict,
 	recordIntent,
 	isPipelineMode,
+	verdictStaleness,
+	declaredAcIds,
+	GATED_PHASES,
 	type Phase,
 	type PipelineMode,
 	PHASES,
@@ -496,20 +499,26 @@ const ODOO_SDD_SKILL_NAME = "odoo-sdd-workflow";
  * Skills this plugin bundles and registers at mount time.
  *
  * Each entry is a directory under `skills/` holding a `SKILL.md` with
- * frontmatter, plus the resource base relative resources in its body resolve
- * against (the personas for the development workflow, the skill's own folder for
- * a skill whose reference lives beside it).
+ * frontmatter, plus the resource base its relative references resolve against.
+ *
+ * BOTH skills point at the shared `resources/` folder, and that is deliberate:
+ * the host tells the model "resolve relative paths mentioned by this skill
+ * against the base directory", so a reference only works if it resolves FROM
+ * THAT BASE. The personas used to live at `agents/` while the technical skill
+ * declared `agents` as its base, which made every `agents/*.md` reference
+ * resolve to `agents/agents/*.md` — the paths happened to work only because the
+ * process cwd was the repository root. One base, one shape of reference.
  */
 const ODOO_SDD_SKILLS: Array<{ dir: string; resourceBase: string; fallbackDescription: string }> = [
 	{
 		dir: ODOO_SDD_SKILL_NAME,
-		resourceBase: "agents",
+		resourceBase: "resources",
 		fallbackDescription:
 			"Spec-Driven Development pipeline for Odoo modules on top of the dsh-odoo-sdd plugin.",
 	},
 	{
 		dir: "odoo-functional-sdd",
-		resourceBase: "skills/odoo-functional-sdd",
+		resourceBase: "resources",
 		fallbackDescription:
 			"Functional Odoo work on a running instance: discover what the version and the installed " +
 			"modules actually provide, configure and import in human-approved batches, and close with an " +
@@ -618,8 +627,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// advertised to the model on every new session.
 	registerOdooSddSkills(ctx);
 	// S2: sanitizer for any agent-supplied text the pipeline persists.
-	const sanitize = (textValue: string): string => {
-		const loaded = loadCredentials(effectiveConfig().projectRoot);
+	// It takes the call's execution context because it resolves CREDENTIALS: with
+	// the fallback root, a session working in project A would scrub the text with
+	// project B's secret — the redaction would look like it ran and leak anyway.
+	const sanitize = (textValue: string, exec?: unknown): string => {
+		const loaded = loadCredentials(effectiveConfig(exec).projectRoot);
 		const credentials: OdooCredentials | null = loaded.ok ? loaded.credentials : null;
 		return sanitizeForPersist(textValue, credentials);
 	};
@@ -1418,7 +1430,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			});
 			// S2: agent-supplied details are scrubbed (known secret, generic
 			// credential shapes, home paths) BEFORE any KB/verdict persistence.
-			const note = sanitize(args.detail ?? "");
+			const note = sanitize(args.detail ?? "", exec);
 			const projectRootForAudit = projectRoot;
 			appendAuditLine(projectRootForAudit, "sdd_phase/" + args.operation, args, clientFor(projectRootForAudit).credentials);
 			if (args.operation === "init") {
@@ -1466,9 +1478,35 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						detail: "No checkpoint to roll back to. Create one with sdd_checkpoint operation=create.",
 					};
 				}
+				// A checkpoint belongs to the spec that took it. Rolling this spec back
+				// to another spec's snapshot restores that spec's files under this
+				// spec's name — silently, and with the wrong provenance in the audit.
+				const meta = listCheckpoints(projectRoot).find((c) => c.id === checkpointId) ?? null;
+				if (meta === null) {
+					return {
+						operation: "rollback" as string, phase: loadState(specDir).phase as string, ok: false, requireDiagnosis: false,
+						summary: summarize(loadState(specDir)),
+						detail:
+							`Checkpoint "${checkpointId}" does not exist under .sdd/checkpoints. List them with ` +
+							"sdd_checkpoint operation=list and roll back to one of those.",
+					};
+				}
+				if (meta.specId !== null && meta.specId !== undefined && meta.specId !== args.spec_id) {
+					return {
+						operation: "rollback" as string, phase: loadState(specDir).phase as string, ok: false, requireDiagnosis: false,
+						summary: summarize(loadState(specDir)),
+						detail:
+							`Checkpoint "${checkpointId}" belongs to spec ${meta.specId}, not to ${args.spec_id}: ` +
+							"rolling this spec back to it would restore another spec's files. Create a checkpoint of this spec.",
+					};
+				}
 				const restored = restoreCheckpointFiles(projectRoot, checkpointId);
 				const st = loadState(specDir);
-				st.phase = "WRITE_CODE";
+				// Re-enter the phase this MODE works in. Forcing WRITE_CODE told a
+				// functional spec to write code — a phase its own graph does not even
+				// connect to APPLY_CONFIG — and the guard then read a phase the run
+				// could not legitimately be in.
+				st.phase = st.mode === "functional" ? "APPLY_CONFIG" : "WRITE_CODE";
 				kbAppend(st, "blocker", `Rollback to ${checkpointId}: restored ${restored.restored.length} file(s). ${note}`.trim());
 				saveState(st);
 				writeActiveState(projectRoot, { specId: args.spec_id, phase: st.phase });
@@ -1479,9 +1517,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					operation: "rollback" as string, phase: st.phase as string, ok: true, requireDiagnosis: false,
 					summary: summarize(st),
 					detail:
-						`Rolled back to ${checkpointId}: ${restored.restored.length} file(s) restored` +
+						`Rolled back to ${checkpointId} (spec ${meta.specId ?? "unknown"}): ${restored.restored.length} file(s) restored` +
 						(restored.missing.length > 0 ? `, ${restored.missing.length} failed` : "") +
-						`. Phase is now WRITE_CODE — re-apply the change and verify again. ` +
+						`. Phase is now ${st.phase} — re-apply the change and verify again. ` +
 						"NOTE: a module install/upgrade is not reverted at the database level.",
 				};
 			}
@@ -1631,21 +1669,77 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						summary: summarize(state), detail: "next_phase is required for advance.",
 					};
 				}
+				// A GATED phase is gated on a HUMAN, not on a word the caller writes.
+				// `approval_marker`/`approval_source` are arguments of the model, so
+				// validating them validated a declaration: the reproduction advanced
+				// out of a gated phase with zero native approval requests, even with
+				// an approver available that would have refused. The native request is
+				// the provenance; the marker stays as the fail-closed backstop for
+				// hosts that offer no approval API at all.
+				const autonomy = readAutonomy(projectRoot);
+				let approvalMarker = args.approval_marker ?? null;
+				let approvalSource: "human" | "human-proxy" = args.approval_source ?? "human";
+				if (GATED_PHASES.includes(state.phase) && args.next_phase !== "BLOCKED") {
+					const asked = await requestNativeApproval(
+						ctx,
+						exec,
+						"sdd_phase",
+						`Approve the phase gate: leave ${state.phase} for ${args.next_phase} in spec ${args.spec_id}` +
+							`${note.trim() === "" ? "" : ` — ${note.trim().slice(0, 300)}`}`,
+					);
+					if (asked === "rejected" || asked === "cancelled") {
+						return {
+							operation: "advance" as string, phase: state.phase as string, ok: false, requireDiagnosis: false,
+							summary: summarize(state),
+							detail:
+								`Phase ${state.phase} -> ${args.next_phase} NOT approved (the human answered "${asked}"). ` +
+								"The pipeline stays where it is; nothing was advanced by retrying with a different marker.",
+						};
+					}
+					if (asked === "unavailable") {
+						// No approval API to ask: the documented fallback is the explicit
+						// marker, so a gate still cannot be crossed by doing nothing. It
+						// is stated, never silent.
+						if (autonomy === "autonomous") {
+							approvalSource = approvalSource === "human-proxy" ? "human-proxy" : approvalSource;
+						}
+						if ((approvalMarker ?? "").trim() !== "APPROVED") {
+							return {
+								operation: "advance" as string, phase: state.phase as string, ok: false, requireDiagnosis: false,
+								summary: summarize(state),
+								detail:
+									`Phase ${state.phase} is gated and this host offers no approval interface: pass ` +
+									"approval_marker='APPROVED' to record the developer's decision explicitly. " +
+									"(No native request could be made, so nothing was asked.)",
+							};
+						}
+					} else {
+						// The human said yes: the provenance is theirs. In autonomous
+						// mode a proxy may answer the gate on their behalf, so it keeps
+						// its declared provenance (which `transition()` then validates
+						// against the mode) — in supervised mode the answer IS human.
+						approvalSource = autonomy === "autonomous" && approvalSource === "human-proxy" ? "human-proxy" : "human";
+						approvalMarker = "APPROVED";
+					}
+				}
 				const result = transition(
 					state,
 					args.next_phase,
-					args.approval_marker ?? null,
+					approvalMarker,
 					note,
-					args.approval_source ?? "human",
-					readAutonomy(projectRoot),
+					approvalSource,
+					autonomy,
 					{
 						securityReviewRequired: cfgPhase.securityReviewRequired,
 						documentationPolicy: cfgPhase.documentationPolicy ?? "required",
 					},
 				);
-				if (result.ok) {
-					writeActiveState(projectRoot, { specId: args.spec_id, phase: result.state.phase });
-				}
+				// The ACTIVE pointer follows the canonical state even when the
+				// transition FAILED: reaching BLOCKED is persisted by `transition()`
+				// and returned with ok:false, and updating the pointer only on success
+				// left `.sdd/active.json` describing a phase the spec had already
+				// left — the guard then authorized a mutation from the stale copy.
+				writeActiveState(projectRoot, { specId: args.spec_id, phase: result.state.phase });
 				return {
 					operation: "advance" as string, phase: result.state.phase as string, ok: result.ok, requireDiagnosis: false,
 					summary: summarize(result.state),
@@ -2805,10 +2899,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			}
 			lines.push("");
 			lines.push("## Decisions (logbook)");
-			lines.push(decisions.length === 0 ? "- (none)" : decisions.slice(-20).map((d) => `- ${sanitize(d.summary)}`).join("\n"));
+			lines.push(decisions.length === 0 ? "- (none)" : decisions.slice(-20).map((d) => `- ${sanitize(d.summary, exec)}`).join("\n"));
 			lines.push("");
 			lines.push("## Open blockers");
-			lines.push(blockers.length === 0 ? "- (none)" : blockers.slice(-10).map((b) => `- ${sanitize(b.summary)}`).join("\n"));
+			lines.push(blockers.length === 0 ? "- (none)" : blockers.slice(-10).map((b) => `- ${sanitize(b.summary, exec)}`).join("\n"));
 			lines.push("");
 			lines.push("## Next steps");
 			if (state.phase === "DONE") lines.push("- Delivered. Review the diff and commit with the project's conventions.");
@@ -2899,6 +2993,15 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			// the one mutating step of the import flow (preview/map/plan are local).
 			return true;
 		}
+		if (name === "odoo_functional") {
+			// The batch executor was MISSING from this classification, so its
+			// mutations never met the checkpoint or spec policy the tool's own
+			// description announces. `apply` is the operation that sends, and it can
+			// run a mutating batch (a read-only one is refused by the executor
+			// itself); `inspect` only reads; `plan`/`approve`/`verify`/`status`/
+			// `reconcile` change local state, not the instance.
+			return String(args["operation"] ?? "") === "apply";
+		}
 		return false;
 	};
 
@@ -2960,8 +3063,19 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	): string | undefined => {
 		if (!cfg.requireSpecForChanges || waived) return undefined;
 		const authorizedPhases = ["WRITE_CODE", "VERIFY", "FIX_LOOP", "APPLY_CONFIG"];
-		if (active.phase !== null && authorizedPhases.includes(active.phase)) return undefined;
-		const where = active.specId === null ? "there is no spec for this project" : `the active spec ${active.specId} is in ${String(active.phase)}`;
+		// The CANONICAL phase, not the cached pointer. `.sdd/active.json` is a
+		// pointer to the spec/checkpoint of the session; the phase lives in
+		// `specs/<id>/state.json`, and reading the copy let a spec that had already
+		// gone BLOCKED keep authorizing changes until something happened to rewrite
+		// the pointer. The pointer cannot be a second authority.
+		const phase = canonicalPhase(cfg, active);
+		if (phase !== null && authorizedPhases.includes(phase)) return undefined;
+		const where =
+			active.specId === null
+				? "there is no spec for this project"
+				: phase === null
+					? `the active spec ${active.specId} has no readable state.json`
+					: `the active spec ${active.specId} is in ${phase}`;
 		return (
 			`Change blocked by policy: ${where}, so nothing authorizes it. Three ways out: ` +
 			"(1) open a small spec for THIS change (sdd_phase operation=init spec_id=<NNN-slug>, then clarify mode=bug) " +
@@ -2971,8 +3085,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		);
 	};
 
-	const denyWithAudit = (name: string, args: Record<string, unknown>, reason: string, exec?: unknown): string => {
-		try {
+	const denyWithAudit = (name: string, args: Record<string, unknown>, reason: string, exec?: unknown): string => {		try {
 			const cfg = effectiveConfig(exec);
 			const active = readActiveState(cfg.projectRoot);
 			recordAudit(
@@ -2994,6 +3107,38 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		return reason;
 	};
 
+	/**
+	 * The phase the SPEC actually records, falling back to the cached pointer.
+	 *
+	 * `specs/<id>/state.json` is the canonical record; `.sdd/active.json` is a
+	 * pointer to which spec/checkpoint the session is working on. When the two
+	 * disagree the spec wins, because it is the file the pipeline writes on every
+	 * transition — including the ones that end in BLOCKED. Reading the copy let a
+	 * spec that had already gone BLOCKED keep authorizing changes.
+	 * @param cfg - the session's effective configuration.
+	 * @param active - the active pointer.
+	 * @returns the phase to authorize against, or null when there is no spec.
+	 */
+	const canonicalPhase = (
+		cfg: ReturnType<typeof effectiveConfig>,
+		active: ReturnType<typeof readActiveState>,
+	): string | null => {
+		if (active.specId === null) return active.phase;
+		try {
+			const dir = specDirOf(cfg.projectRoot, cfg.specsDir, active.specId, {
+				specsMode: cfg.specsMode,
+				specsRoot: cfg.specsRoot,
+			});
+			return loadState(dir).phase;
+		} catch {
+			// Unreadable canonical state must not open the gate: the pointer is the
+			// best available answer, and the caller decides what it authorizes.
+			return active.phase;
+		}
+	};
+
+	/** Why the policy guard could not be installed, when that happened. */
+	let guardUnavailable: string | null = null;
 	try {
 		if (typeof ctx.tools.guard === "function") {
 			ctx.tools.guard((execution: unknown): string | undefined => {
@@ -3077,11 +3222,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							);
 						}
 						const allowedPhases = ["WRITE_CODE", "VERIFY", "FIX_LOOP", "APPLY_CONFIG"];
-						if (cfg.requireSpecForChanges && !waived && active.phase !== null && !allowedPhases.includes(active.phase)) {
+						const mutationPhase = canonicalPhase(cfg, active);
+						if (cfg.requireSpecForChanges && !waived && mutationPhase !== null && !allowedPhases.includes(mutationPhase)) {
 							return denyWithAudit(
 								name,
 								args,
-								`Mutation blocked: the active spec is in phase ${active.phase}. Approve the spec/architecture first ` +
+								`Mutation blocked: the active spec is in phase ${mutationPhase}. Approve the spec/architecture first ` +
 									"so the pipeline reaches WRITE_CODE.",
 								execution,
 							);
@@ -3099,8 +3245,21 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					);
 				}
 			});
+		} else {
+			guardUnavailable = "this host exposes no `tools.guard`, so nothing can refuse a mutation before it is sent";
 		}
+	} catch (err) {
+		// A host that HAS the guard API and fails to install the listener is the
+		// worse case of the two: the plugin would mount, the documentation would
+		// describe an armed policy, and every mutation would go through unguarded.
+		guardUnavailable = `installing the policy guard failed (${err instanceof Error ? err.message : String(err)})`;
+	}
 
+	// The event listeners are a SEPARATE concern from the guard: a host whose
+	// event surface is missing or broken keeps working without the audit listener
+	// (it is not a security guarantee), while a missing GUARD is refused below
+	// when the policy it enforces is armed. Sharing one catch conflated the two.
+	try {
 		if (typeof ctx.on === "function") {
 			// Stamp the start of every call so the result entry carries a real
 			// duration instead of the previous hard-coded 0.
@@ -3156,6 +3315,24 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		// Hosts without guard/events keep working; the policy is simply inactive.
 	}
 
+	// The guard is a SECURITY guarantee, so its absence is not tolerated when the
+	// policy it enforces is armed: mounting anyway would announce a policy the
+	// plugin cannot deliver.
+	if (guardUnavailable !== null) {
+		const cfg = effectiveConfig();
+		const armed = cfg.requireSpecForChanges || cfg.requireCheckpointBeforeMutation;
+		if (armed) {
+			throw new Error(
+				`dsh-odoo-sdd cannot mount: ${guardUnavailable}. The configured policy is armed ` +
+					`(requireSpecForChanges=${String(cfg.requireSpecForChanges)}, ` +
+					`requireCheckpointBeforeMutation=${String(cfg.requireCheckpointBeforeMutation)}), and mounting without it would ` +
+					"announce a guarantee this plugin cannot deliver. Either use a host that provides `tools.guard`, or turn the " +
+					"policy off explicitly with odoo_config (which is a decision, recorded in .sdd/config.json).",
+			);
+		}
+	}
+
+
 	registerDocsTool(ctx, {
 		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
 		// Documenting a spec honours the configured layout (project or central)
@@ -3163,11 +3340,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		specDir: (specId, exec) => {
 			const cfg = effectiveConfig(exec);
 			return specDirOf(cfg.projectRoot, cfg.specsDir, specId, {
-				specsMode: cfg.specsMode,
-				specsRoot: cfg.specsRoot,
-			});
+			specsMode: cfg.specsMode,
+			specsRoot: cfg.specsRoot,
+		});
 		},
-		configuredLanguage: () => effectiveConfig().documentationLanguage,
+		configuredLanguage: (exec) => effectiveConfig(exec).documentationLanguage,
 		display: (v) => displayPath(v),
 	});
 
@@ -3199,83 +3376,83 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		specDir: (specId, exec) => {
 			const cfg = effectiveConfig(exec);
 			return specDirOf(cfg.projectRoot, cfg.specsDir, specId, {
-				specsMode: cfg.specsMode,
-				specsRoot: cfg.specsRoot,
-			});
+			specsMode: cfg.specsMode,
+			specsRoot: cfg.specsRoot,
+		});
 		},
 		client: (exec) => {
 			const cfg = effectiveConfig(exec);
 			const { client, report, credentials } = clientFor(cfg.projectRoot);
 			return {
-				client,
-				report,
-				...(credentials === null
-					? {}
-					: {
-							target: `${credentials.url} db=${credentials.db} user=${credentials.username}`,
-							...(credentials.environment === undefined ? {} : { environment: credentials.environment }),
-						}),
-			};
+			client,
+			report,
+			...(credentials === null
+				? {}
+				: {
+						target: `${credentials.url} db=${credentials.db} user=${credentials.username}`,
+						...(credentials.environment === undefined ? {} : { environment: credentials.environment }),
+					}),
+		};
 		},
 		approve: (exec, reason) => requestNativeApproval(ctx, exec, "odoo_functional", reason),
 		hashes: (specId, exec) => {
 			const cfg = effectiveConfig(exec);
 			const dir = specDirOf(cfg.projectRoot, cfg.specsDir, specId, {
-				specsMode: cfg.specsMode,
-				specsRoot: cfg.specsRoot,
-			});
+			specsMode: cfg.specsMode,
+			specsRoot: cfg.specsRoot,
+		});
 			const read = (name: string): string => {
-				try {
-					return readFileSync(join(dir, name), "utf8");
-				} catch {
-					return "";
-				}
-			};
+	try {
+				return readFileSync(join(dir, name), "utf8");
+			} catch {
+				return "";
+			}
+		};
 			return { specHash: sha256(read("spec.md")), designHash: sha256(read("architecture.md")) };
 		},
 		grants: {
-			write: (input) => {
-				writeGrant(effectiveConfig().projectRoot, {
-					kind: "batch",
-					fingerprint: input.fingerprint,
-					...(input.ttlMinutes === undefined ? {} : { ttlMinutes: input.ttlMinutes }),
-					...(input.reason === undefined ? {} : { reason: input.reason }),
-					...(input.details === undefined ? {} : { details: input.details }),
-				});
-			},
-			valid: (fingerprint) => hasValidGrant(effectiveConfig().projectRoot, "batch", fingerprint),
+			write: (input, exec) => {
+			writeGrant(effectiveConfig(exec).projectRoot, {
+				kind: "batch",
+				fingerprint: input.fingerprint,
+				...(input.ttlMinutes === undefined ? {} : { ttlMinutes: input.ttlMinutes }),
+				...(input.reason === undefined ? {} : { reason: input.reason }),
+				...(input.details === undefined ? {} : { details: input.details }),
+			});
 		},
-		audit: (entry) => {
-			const cfg = effectiveConfig();
+			valid: (fingerprint, exec) => hasValidGrant(effectiveConfig(exec).projectRoot, "batch", fingerprint),
+		},
+		audit: (entry, exec) => {
+			const cfg = effectiveConfig(exec);
 			const active = readActiveState(cfg.projectRoot);
 			recordAudit(
-				cfg.projectRoot,
-				{
-					tool: "odoo_functional",
-					op: `${entry.batchId}[${entry.index + 1}] ${entry.model}.${entry.method}`,
-					outcome: entry.state === "applied" ? "ok" : "error",
-					source: "tool",
-					kind: "functional",
-					...(entry.reason === undefined ? {} : { reason: entry.reason }),
-					phase: active.phase ?? undefined,
-					specId: active.specId ?? undefined,
-				},
-				clientFor(cfg.projectRoot).credentials,
+			cfg.projectRoot,
+			{
+				tool: "odoo_functional",
+				op: `${entry.batchId}[${entry.index + 1}] ${entry.model}.${entry.method}`,
+				outcome: entry.state === "applied" ? "ok" : "error",
+				source: "tool",
+				kind: "functional",
+				...(entry.reason === undefined ? {} : { reason: entry.reason }),
+				phase: active.phase ?? undefined,
+				specId: active.specId ?? undefined,
+			},
+			clientFor(cfg.projectRoot).credentials,
 			);
 		},
 		recordDataOp: (op, exec) => {
 			const cfg = effectiveConfig(exec);
 			const credentials = clientFor(cfg.projectRoot).credentials;
 			appendDataOp(cfg.projectRoot, {
-				ts: new Date().toISOString(),
-				...(credentials === null
-					? {}
-					: {
-							db: credentials.db,
-							target: fingerprintOf(credentials.url, credentials.db, credentials.username),
-						}),
-				...op,
-			});
+			ts: new Date().toISOString(),
+			...(credentials === null
+				? {}
+				: {
+						db: credentials.db,
+						target: fingerprintOf(credentials.url, credentials.db, credentials.username),
+					}),
+			...op,
+		});
 		},
 		/**
 		 * Run one declared import through Odoo's importer.
@@ -3299,37 +3476,37 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			// would swap the content after the approval.
 			const session = readWebSession(cfg.projectRoot);
 			if (session === null) {
-				return {
-					ok: false,
-					error:
-						"NEEDS_WEB_SESSION: applying an import needs the web session cookie (the file route is a web " +
-						"route). Run odoo_session and retry.",
-				};
-			}
+			return {
+				ok: false,
+				error:
+					"NEEDS_WEB_SESSION: applying an import needs the web session cookie (the file route is a web " +
+					"route). Run odoo_session and retry.",
+			};
+		}
 			const signal = exec !== null && typeof exec === "object" && "signal" in exec ? (exec as { signal?: AbortSignal }).signal : undefined;
 			const args = applyArguments(caps.capabilities, {
-				importId: spec.importId,
-				fields: [],
-				columns: spec.columns,
-				options: { ...spec.options, ...(spec.dryRun ? { dryrun: true } : {}) },
-				dryRun: spec.dryRun,
-			});
+			importId: spec.importId,
+			fields: [],
+			columns: spec.columns,
+			options: { ...spec.options, ...(spec.dryRun ? { dryrun: true } : {}) },
+			dryRun: spec.dryRun,
+		});
 			const applied = await client.executeKw<unknown>(
-				"base_import.import",
-				caps.capabilities.apply.method,
-				args,
-				{},
-				undefined,
-				signal,
+			"base_import.import",
+			caps.capabilities.apply.method,
+			args,
+			{},
+			undefined,
+			signal,
 			);
 			if (!applied.ok) {
-				const kind = (applied as { errorKind?: string }).errorKind;
-				return {
-					ok: false,
-					indeterminate: kind === "transport" || kind === "protocol",
-					error: applied.error,
-				};
-			}
+			const kind = (applied as { errorKind?: string }).errorKind;
+			return {
+				ok: false,
+				indeterminate: kind === "transport" || kind === "protocol",
+				error: applied.error,
+			};
+		}
 			const outcome = readImportOutcome(applied.value);
 			// Odoo answered, so nothing is indeterminate: the rows it reports DID land and
 			// must never be re-sent. The classification (clean vs partial) lives in
@@ -3344,9 +3521,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		specDir: (specId, exec) => {
 			const cfg = effectiveConfig(exec);
 			return specDirOf(cfg.projectRoot, cfg.specsDir, specId, {
-				specsMode: cfg.specsMode,
-				specsRoot: cfg.specsRoot,
-			});
+			specsMode: cfg.specsMode,
+			specsRoot: cfg.specsRoot,
+		});
 		},
 		client: async (exec) => {
 			const cfg = effectiveConfig(exec);
@@ -3355,18 +3532,18 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			return { client, report, ...(version === undefined ? {} : { serverVersion: version }) };
 		},
 		approve: (exec, reason) => requestNativeApproval(ctx, exec, "odoo_import", reason),
-		authorisedFile: (filePath) => {
+		authorisedFile: (filePath, exec) => {
 			// Where the plugin is willing to READ from: the session's project or the OS
 			// temp area (where attachments land). This is a guardrail against pointing an
 			// import at an unrelated file on disk, not a sandbox — the operator's own
 			// approval is what authorises the import itself.
-			const cfg = effectiveConfig();
-			try {
-				const resolved = resolve(filePath);
-				return isWithinRoot(cfg.projectRoot, resolved) || isWithinRoot(resolve(tmpdir()), resolved);
-			} catch {
-				return false;
-			}
+			const cfg = effectiveConfig(exec);
+	try {
+			const resolved = resolve(filePath);
+			return isWithinRoot(cfg.projectRoot, resolved) || isWithinRoot(resolve(tmpdir()), resolved);
+		} catch {
+			return false;
+		}
 		},
 		display: (v) => displayPath(v),
 	});
@@ -3377,47 +3554,47 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
 		allowlist: (exec) => effectiveConfig(exec).executeAllowlist,
 		recordDataOp: (op, exec) => {
-			try {
-				const cfg = effectiveConfig(exec);
-				// Stamp the destination so a replay against a DIFFERENT database or
-				// a different user/url on the same database is detected instead of
-				// silently mutating the wrong instance.
-				const credentials = clientFor(cfg.projectRoot).credentials;
-				const target =
-					credentials === null ? undefined : fingerprintOf(credentials.url, credentials.db, credentials.username);
-				appendDataOp(cfg.projectRoot, {
-					ts: new Date().toISOString(),
-					...(credentials !== null && credentials !== undefined ? { db: credentials.db } : {}),
-					...(target !== undefined ? { target } : {}),
-					...op,
-				});
-			} catch {
-				// journaling is best-effort
-			}
+	try {
+			const cfg = effectiveConfig(exec);
+			// Stamp the destination so a replay against a DIFFERENT database or
+			// a different user/url on the same database is detected instead of
+			// silently mutating the wrong instance.
+			const credentials = clientFor(cfg.projectRoot).credentials;
+			const target =
+				credentials === null ? undefined : fingerprintOf(credentials.url, credentials.db, credentials.username);
+			appendDataOp(cfg.projectRoot, {
+				ts: new Date().toISOString(),
+				...(credentials !== null && credentials !== undefined ? { db: credentials.db } : {}),
+				...(target !== undefined ? { target } : {}),
+				...op,
+			});
+		} catch {
+			// journaling is best-effort
+		}
 		},
 		display: (v) => displayPath(v),
 		auditFailure: (info, exec) => {
-			try {
-				const cfg = effectiveConfig(exec);
-				const active = readActiveState(cfg.projectRoot);
-				recordAudit(
-					cfg.projectRoot,
-					{
-						tool: info.tool,
-						op: info.op,
-						outcome: "error",
-						source: "tool",
-						kind: "rpc",
-						...(info.callId !== undefined ? { callId: info.callId } : {}),
-						reason: info.reason,
-						phase: active.phase ?? undefined,
-						specId: active.specId ?? undefined,
-					},
-					clientFor(cfg.projectRoot).credentials,
-				);
-			} catch {
-				// auditing is best-effort
-			}
+	try {
+			const cfg = effectiveConfig(exec);
+			const active = readActiveState(cfg.projectRoot);
+			recordAudit(
+				cfg.projectRoot,
+				{
+					tool: info.tool,
+					op: info.op,
+					outcome: "error",
+					source: "tool",
+					kind: "rpc",
+					...(info.callId !== undefined ? { callId: info.callId } : {}),
+					reason: info.reason,
+					phase: active.phase ?? undefined,
+					specId: active.specId ?? undefined,
+				},
+				clientFor(cfg.projectRoot).credentials,
+			);
+		} catch {
+			// auditing is best-effort
+		}
 		},
 	});
 }

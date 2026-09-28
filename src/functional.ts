@@ -177,6 +177,28 @@ export interface OpRecord {
 	preImage?: Array<Record<string, unknown>>;
 	/** Result of the declared postcondition (evidence for verify and the runbook). */
 	postcondition?: string;
+	/**
+	 * Whether the server ACCEPTED the mutation — a different fact from whether the
+	 * business result was verified.
+	 *
+	 * `state: "applied"` means both ("the state it promised was reached").
+	 * `effect: "accepted"` with `state: "failed"` means the RPC answered and the
+	 * postcondition did not hold: the data may be changed, so the effect must stay
+	 * visible, journaled and compensable — while the run stays honestly failed.
+	 * Without this, ordering the postcondition check before the journal silently
+	 * erased the pre-image of a mutation that had already landed.
+	 */
+	effect?: "accepted";
+	/**
+	 * A resolution that actually SETTLED the operation: what the run believes
+	 * happened. Absent means nobody decided yet — which includes the honest
+	 * "undecidable", where the evidence was checked and could not attribute the
+	 * effect. A note explaining that is not a decision, and treating it as one
+	 * would unblock the run on nothing.
+	 */
+	decided?: "applied" | "failed";
+	/** How it was decided: the probe that proved it, or the operator who said so. */
+	evidence?: string;
 	/** How it was resolved, when reconcile ran. */
 	resolution?: string;
 }
@@ -518,7 +540,11 @@ export function validateBatch(batch: Batch, environment: TargetEnvironment, opti
 				});
 			}
 			if (batch.scope === "discovery") {
-				findings.push({ severity: "ERROR", where: at, message: "a discovery batch may only read" });
+				findings.push({
+					severity: "ERROR",
+					where: at,
+					message: "a discovery batch may only read: a business action mutates the instance and belongs in an \"apply\" batch",
+				});
 			}
 			if (batch.scope !== "apply") {
 				findings.push({ severity: "ERROR", where: at, message: `a business action runs in an "apply" batch, not in a "${batch.scope}" one` });
@@ -549,7 +575,11 @@ export function validateBatch(batch: Batch, environment: TargetEnvironment, opti
 			});
 		}
 		if (batch.scope === "discovery" && mutating) {
-			findings.push({ severity: "ERROR", where: at, message: "a discovery batch may only read" });
+			findings.push({
+				severity: "ERROR",
+				where: at,
+				message: `a discovery batch may only read: "${op.method}" changes data and belongs in an "apply" batch`,
+			});
 		}
 		if (batch.scope !== "discovery" && !mutating) {
 			findings.push({ severity: "WARN", where: at, message: "a read inside a mutating batch: keep reads in discovery" });
@@ -575,11 +605,17 @@ export function validateBatch(batch: Batch, environment: TargetEnvironment, opti
 		if (op.method === "write" && (op.args?.[1] === undefined || typeof op.args[1] !== "object")) {
 			findings.push({ severity: "ERROR", where: at, message: "write needs a values object as its second argument" });
 		}
-		if (mutating && (op.identity === undefined || op.identity.length === 0)) {
+		if (mutating && (op.identity === undefined || op.identity.length === 0) && op.postcondition === undefined) {
+			// Fail-closed, because "we will figure it out later" is not a plan: an
+			// operation with neither a postcondition nor a stable identity cannot be
+			// resolved if its answer never arrives, and it stays indeterminate until
+			// a human decides. One of the two is required.
 			findings.push({
-				severity: "WARN",
+				severity: "ERROR",
 				where: at,
-				message: "no stable identity declared: an indeterminate result will not be reconcilable",
+				message:
+					"a mutating operation must declare a postcondition or a stable identity: with neither, an " +
+					"indeterminate result can never be reconciled and the run blocks on a human decision",
 			});
 		}
 	});
@@ -760,8 +796,11 @@ export interface FunctionalDeps {
 	): void;
 	/** Grant helpers, so the receipts live in the same file as the others. */
 	grants: {
-		write(input: { kind: "batch"; fingerprint: string; ttlMinutes?: number; reason?: string; details?: Record<string, unknown> }): void;
-		valid(fingerprint: string): boolean;
+		write(
+			input: { kind: "batch"; fingerprint: string; ttlMinutes?: number; reason?: string; details?: Record<string, unknown> },
+			exec?: unknown,
+		): void;
+		valid(fingerprint: string, exec?: unknown): boolean;
 	};
 	/**
 	 * Run an `import` operation: the registrant owns the web session, the CSRF
@@ -779,7 +818,7 @@ export interface FunctionalDeps {
 		state: OpState;
 		index: number;
 		reason?: string;
-	}): void;
+	}, exec?: unknown): void;
 	/** Path masking for display. */
 	display(pathValue: string): string;
 }
@@ -816,7 +855,19 @@ export function registerFunctionalTool(
 			environment: { type: "string", enum: ["dev", "staging", "production"], description: "Declared environment the plan targets (plan only)." },
 			server_version: { type: "string", description: "Detected server version the plan was written against (plan only)." },
 			release_stale_lock: { type: "boolean", description: "apply only: take over a lock left by an interrupted call (recorded in the audit)." },
-			confirm_destructive: { type: "boolean", description: "apply/compensate: REQUIRED true to actually send mutations." },
+			confirm_destructive: { type: "boolean", description: "apply/compensate: REQUIRED true to actually send mutations. Also required for a manual `resolution`." },
+			resolution: {
+				type: "string",
+				description:
+					"reconcile only: the OPERATOR's decision about an outcome that could not be decided from evidence. " +
+					"Requires confirm_destructive=true and `decision`. It is recorded as a hand decision, never as a proof " +
+					"that the call succeeded — repeat it for several pending operations if they share the same fate.",
+			},
+			decision: {
+				type: "string",
+				enum: ["applied", "failed"],
+				description: "reconcile only: what the operator decided became of the unresolved operation(s).",
+			},
 		},
 		output: {
 			schema: {
@@ -849,6 +900,8 @@ export function registerFunctionalTool(
 			server_version?: string;
 			release_stale_lock?: boolean;
 			confirm_destructive?: boolean;
+			resolution?: string;
+			decision?: "applied" | "failed";
 		}, exec?: unknown) {
 			const projectRoot = deps.projectRoot(exec);
 			const specId = args.spec_id.trim();
@@ -1022,7 +1075,7 @@ export function registerFunctionalTool(
 						designHash: hashes.designHash,
 						planHash: planHash(plan),
 					},
-				});
+				}, exec);
 				return {
 					...base,
 					ok: true,
@@ -1037,15 +1090,48 @@ export function registerFunctionalTool(
 
 			// ---- apply / inspect ----------------------------------------------
 			if (args.operation === "apply" || args.operation === "inspect") {
-				const scope: BatchScope = args.operation === "inspect" ? "discovery" : (args.scope ?? "apply");
 				const batchId = args.batch_id ?? "";
 				const batch = plan.batches.find((b) => b.id === batchId);
 				if (batch === undefined) {
 					return { ...base, status: "unknown-batch", detail: `Batch "${batchId}" is not in the plan of ${specId}.` };
 				}
-				const mutating = batch.operations.some((op) => MUTATING_METHODS.has(op.method));
-				if (args.operation === "inspect" && mutating) {
-					return { ...base, status: "rejected", detail: "operation=inspect runs READ-only batches; this one mutates." };
+				// "Mutable" is NOT "replayable CRUD": a business action mutates too,
+				// it is simply not reversible from a pre-image. Asking
+				// `MUTATING_METHODS` (create/write/unlink only) let a `kind: "method"`
+				// batch run as `inspect`, without `confirm_destructive`, without the
+				// production backup and without an identity — `inspect` executed the
+				// business action as a read. The three kinds are asked here, once.
+				const opMutates = (op: BatchOperation): boolean =>
+					op.kind === "import" || op.kind === "method" || MUTATING_METHODS.has(op.method);
+				const mutating = batch.operations.some(opMutates);
+				const readsOnly = batch.operations.every((op) => !opMutates(op));
+
+				// `inspect` is the read-only discovery path and it must BE read-only:
+				// it runs under scope `discovery`, which carries no approval, no
+				// confirmation and no backup.
+				if (args.operation === "inspect") {
+					if (batch.scope !== "discovery" || !readsOnly) {
+						return {
+							...base,
+							batchId,
+							status: "rejected",
+							detail:
+								"operation=inspect runs READ-only DISCOVERY batches. This batch " +
+								`(scope "${batch.scope}", ${batch.operations.length} operation(s)) is not one: use ` +
+								"operation=apply with its own approval and confirm_destructive=true.",
+						};
+					}
+				}
+				if (args.operation === "apply" && !mutating) {
+					return {
+						...base,
+						batchId,
+						scope: batch.scope,
+						status: "rejected",
+						detail:
+							"operation=apply executes a batch that changes something. This batch only reads: " +
+							"run it with operation=inspect, which carries no approval and sends no mutation.",
+					};
 				}
 				if (mutating && args.confirm_destructive !== true) {
 					return {
@@ -1067,19 +1153,25 @@ export function registerFunctionalTool(
 					}
 				}
 				// Approval: recomputed from the CURRENT hashes, so any edit invalidates it.
-				const hashes = deps.hashes(specId, exec);
-				const currentPlan = readPlan(projectRoot, specId) ?? plan;
-				const fingerprint = batchFingerprint({
-					projectRoot,
-					specId,
-					target: target ?? "",
-					environment: declared,
-					specHash: hashes.specHash,
-					designHash: hashes.designHash,
-					planHash: planHash(currentPlan),
-					batch,
-				});
-				if (!deps.grants.valid(fingerprint)) {
+				// Kept as a function because the SAME computation runs again between
+				// operations: an approval is authorization for the content the human
+				// saw, not a key that stays valid while the documents change.
+				const currentFingerprint = (): string => {
+					const hashes = deps.hashes(specId, exec);
+					const currentPlan = readPlan(projectRoot, specId) ?? plan;
+					return batchFingerprint({
+						projectRoot,
+						specId,
+						target: target ?? "",
+						environment: declared,
+						specHash: hashes.specHash,
+						designHash: hashes.designHash,
+						planHash: planHash(currentPlan),
+						batch,
+					});
+				};
+				const fingerprint = currentFingerprint();
+				if (!deps.grants.valid(fingerprint, exec)) {
 					return {
 						...base,
 						batchId,
@@ -1090,8 +1182,16 @@ export function registerFunctionalTool(
 							"target and environment). If anything changed since the approval, run operation=approve again.",
 					};
 				}
-				// One writer at a time.
+				// A run whose previous attempt is UNRESOLVED is not resumed by
+				// sending the batch again: an indeterminate operation may already
+				// have committed, and re-applying the batch is how one effect becomes
+				// two. Reconcile first, then plan an explicit batch for the remainder.
 				const run = readRun(projectRoot, specId);
+				// One writer at a time — asked BEFORE the unresolved check, because an
+				// operation still `in_progress` means the run that owns it is the only
+				// thing that can settle it. Reporting "reconcile first" to a second
+				// caller while the first is still running would be advice it cannot
+				// usefully take.
 				const callId = String((exec as { callId?: unknown } | undefined)?.callId ?? "unknown");
 				if (run.lock !== undefined && run.lock.callId !== callId) {
 					if (args.release_stale_lock !== true) {
@@ -1105,6 +1205,26 @@ export function registerFunctionalTool(
 						};
 					}
 				}
+				// An operation is unresolved while NOTHING decided it: a recorded
+				// resolution (by evidence or by hand) settles the question, even when
+				// its state stays `indeterminate` because what happened is genuinely
+				// unknown. What must never happen again is the same send.
+				const unresolved = run.ops.filter(
+					(o) => (o.state === "indeterminate" || o.state === "in_progress") && o.decided === undefined,
+				);
+				if (args.operation === "apply" && unresolved.length > 0) {
+					return {
+						...base,
+						batchId,
+						scope: batch.scope,
+						status: "needs-reconcile",
+						detail:
+							`Spec ${specId} has ${unresolved.length} operation(s) whose outcome was never resolved ` +
+							`(${unresolved.map((o) => `${o.model}.${o.method} (op ${o.index + 1})`).join(", ")}). ` +
+							"Re-applying the batch would send them again: run operation=reconcile first, then plan a NEW " +
+							"batch for whatever remains. Nothing was sent.",
+					};
+				}
 				run.lock = { callId, at: new Date().toISOString(), batchId: batch.id };
 				run.state = "running";
 				run.batchId = batch.id;
@@ -1112,13 +1232,34 @@ export function registerFunctionalTool(
 
 				const results: Array<Record<string, string | number | boolean | null>> = [];
 				let stopped: string | null = null;
+				// Both emergency brakes, in the two places the operator can put one.
+				// The project-level file alone left the spec-level brake the skill
+				// documents as halting EVERYTHING unread by the batch loop.
+				const stopBrake = (): string | null => {
+					const specStop = join(deps.specDir(specId, exec), "stop.md");
+					const candidates = [join(projectRoot, ".sdd", "stop.md"), specStop];
+					for (const candidate of candidates) {
+						if (existsSync(candidate)) return candidate;
+					}
+					return null;
+				};
 				try {
 					for (let index = 0; index < batch.operations.length; index += 1) {
 						// Brakes are checked BETWEEN operations, never inside one: the
 						// operator can stop the run, but never mid-call, where the
 						// outcome would become unknown for no good reason.
-						if (existsSync(join(projectRoot, ".sdd", "stop.md"))) {
-							stopped = "stop.md appeared: the pipeline halts here. Something was applied already — read the run state before resuming.";
+						const brake = stopBrake();
+						if (brake !== null) {
+							stopped = `stop.md appeared at ${deps.display(brake)}: the pipeline halts here. Something was applied already — read the run state before resuming.`;
+							break;
+						}
+						// The authorization is revalidated against the CURRENT content
+						// before every operation, not only on entry: editing the spec,
+						// the design or the plan mid-batch must stop the next send.
+						if (index > 0 && mutating && !deps.grants.valid(currentFingerprint(), exec)) {
+							stopped =
+								`the approval no longer matches the current content (spec/design/plan/batch hashes) before ` +
+								`operation ${index + 1}. The batch stopped where it was: re-approve and plan the remainder.`;
 							break;
 						}
 						const signal = (exec as { signal?: { aborted?: boolean } } | undefined)?.signal;
@@ -1159,12 +1300,12 @@ export function registerFunctionalTool(
 							record.resultAt = new Date().toISOString();
 							if (imported.ok) {
 								record.state = "applied";
-								deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "applied", index });
+								deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "applied", index }, exec);
 								results.push({ index, state: "applied", value: jsonScalar(imported.value) });
 							} else if (imported.indeterminate === true) {
 								record.state = "indeterminate";
 								record.error = imported.error ?? "unknown";
-								deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "indeterminate", index, reason: record.error });
+								deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "indeterminate", index, reason: record.error }, exec);
 								writeRun(projectRoot, run);
 								results.push({ index, state: "indeterminate", detail: record.error, value: null });
 								stopped =
@@ -1174,7 +1315,7 @@ export function registerFunctionalTool(
 							} else {
 								record.state = "failed";
 								record.error = imported.error ?? "unknown";
-								deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "failed", index, reason: record.error });
+								deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "failed", index, reason: record.error }, exec);
 								writeRun(projectRoot, run);
 								results.push({ index, state: "failed", detail: record.error, value: null });
 								stopped = `operation ${index + 1} (import) failed: ${record.error}`;
@@ -1212,30 +1353,19 @@ export function registerFunctionalTool(
 						const outcome = await executeOperation(client, op, batch.context);
 						record.resultAt = new Date().toISOString();
 						if (outcome.ok) {
-							// The state it promised, read back BEFORE the operation can
-							// be called applied. Without this, "applied" only means the
-							// RPC answered: an operation that returns True while leaving
-							// the records untouched looks exactly like one that worked.
-							const post = await checkPostcondition(client, op, batch.context);
-							if (!post.ok) {
-								record.state = "failed";
-								record.error = `postcondition not met: ${post.detail}`;
-								deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "failed", index, reason: record.error });
-								writeRun(projectRoot, run);
-								results.push({ index, state: "failed", detail: record.error, value: jsonScalar(outcome.value) });
-								stopped =
-									`operation ${index + 1} ran but did not reach the state it declared (${post.detail}). ` +
-									"The call WAS sent, so the instance may be partially changed: inspect it before retrying.";
-								break;
-							}
-							if (op.postcondition !== undefined) record.postcondition = post.detail;
-							record.state = "applied";
-							deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "applied", index });
+							// The send SUCCEEDED: the server accepted it and may already
+							// have changed data. That fact is recorded NOW, together with
+							// the id it created and the pre-image read before the call,
+							// because the proof below may fail — and a failed proof must
+							// not erase the evidence needed to inspect or compensate a
+							// mutation that landed. "Accepted" is not "verified": the run
+							// still fails and still stops.
+							record.effect = "accepted";
 							if (op.method === "create" && typeof outcome.value === "number") record.createdIds = [outcome.value];
-							// Only replayable CRUD goes to the journal: a business action
-							// changes records the plugin never read, so journaling it would
-							// promise an undo that cannot exist.
 							if (MUTATING_METHODS.has(op.method)) {
+								// Only replayable CRUD goes to the journal: a business action
+								// changes records the plugin never read, so journaling it would
+								// promise an undo that cannot exist.
 								deps.recordDataOp?.(
 									{
 										model: op.model,
@@ -1248,12 +1378,34 @@ export function registerFunctionalTool(
 									exec,
 								);
 							}
+							// The state it promised, read back BEFORE the operation can
+							// be called applied. Without this, "applied" only means the
+							// RPC answered: an operation that returns True while leaving
+							// the records untouched looks exactly like one that worked.
+							const post = await checkPostcondition(client, op, batch.context);
+							if (!post.ok) {
+								record.state = "failed";
+								record.error = `postcondition not met: ${post.detail}`;
+								deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "failed", index, reason: record.error }, exec);
+								writeRun(projectRoot, run);
+								results.push({ index, state: "failed", detail: record.error, value: jsonScalar(outcome.value) });
+								stopped =
+									`operation ${index + 1} ran but did not reach the state it declared (${post.detail}). ` +
+									"The call WAS sent, so the instance may be partially changed: inspect it before retrying." +
+									(MUTATING_METHODS.has(op.method)
+										? " Its effect is journaled (compensate can undo the CRUD), but it is NOT verified."
+										: " It is a business action: nothing here can undo it.");
+								break;
+							}
+							if (op.postcondition !== undefined) record.postcondition = post.detail;
+							record.state = "applied";
+							deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "applied", index }, exec);
 							results.push({ index, state: "applied", value: jsonScalar(outcome.value) });
 						} else if (outcome.indeterminate === true) {
 							// Sent, no answer: the server may have committed. Never retry.
 							record.state = "indeterminate";
 							record.error = outcome.error ?? "unknown";
-							deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "indeterminate", index, reason: record.error });
+							deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "indeterminate", index, reason: record.error }, exec);
 							writeRun(projectRoot, run);
 							results.push({ index, state: "indeterminate", detail: record.error, value: null });
 							stopped =
@@ -1263,7 +1415,7 @@ export function registerFunctionalTool(
 						} else {
 							record.state = "failed";
 							record.error = outcome.error ?? "unknown";
-							deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "failed", index, reason: record.error });
+							deps.audit?.({ batchId: batch.id, scope: batch.scope, model: op.model, method: op.method, state: "failed", index, reason: record.error }, exec);
 							results.push({ index, state: "failed", detail: record.error, value: null });
 							stopped = `operation ${index + 1} failed: ${record.error}`;
 							writeRun(projectRoot, run);
@@ -1305,19 +1457,103 @@ export function registerFunctionalTool(
 				if (pending.length === 0) {
 					return { ...base, ok: true, status: "nothing-to-reconcile", detail: "No indeterminate or in-flight operation to reconcile." };
 				}
+				// A human decision is the only way out of an undecidable result, and
+				// it is an explicit one: the operator states what became of it and
+				// confirms. Without this the run would block forever on the honest
+				// "undecidable", and the only alternative would be editing run.json
+				// by hand — which is exactly the kind of bypass this plugin exists to
+				// prevent. It is recorded as a decision, never as a proof.
+				if (args.resolution !== undefined) {
+					if (args.confirm_destructive !== true) {
+						return {
+							...base,
+							status: "needs-confirmation",
+							detail:
+								"Resolving an operation by hand changes what the run believes happened: pass " +
+								"confirm_destructive=true together with `resolution` (the operator's decision).",
+						};
+					}
+					const decision = args.resolution.trim();
+					if (decision === "") {
+						return { ...base, status: "rejected", detail: "`resolution` cannot be empty: state what the operator decided." };
+					}
+					if (args.decision !== "applied" && args.decision !== "failed") {
+						return {
+							...base,
+							status: "rejected",
+							detail: 'A manual resolution needs `decision` to be "applied" or "failed": the run has to end up in one of the two states.',
+						};
+					}
+					for (const op of pending) {
+						op.state = args.decision;
+						op.decided = args.decision;
+						op.evidence = `operator decision: ${decision}`;
+						op.resolution = `resolved BY HAND (operator decision, not a proof): ${decision}`;
+					}
+					run.state = "idle";
+					writeRun(projectRoot, run);
+					return {
+						...base,
+						ok: true,
+						status: "idle",
+						results: pending.map((o) => ({ detail: `op ${o.index + 1}: ${args.decision} — ${decision}` })),
+						counts: { ...countOps(run.ops) },
+						detail:
+							`${pending.length} operation(s) resolved BY HAND as "${args.decision}". ` +
+							"The decision is recorded on each operation; it is NOT evidence that the call succeeded — read the instance " +
+							"before you rely on it, and say so in the closing report.",
+					};
+				}
 				const plan2 = readPlan(projectRoot, specId);
 				const batch = plan2?.batches.find((b) => b.id === (args.batch_id ?? pending[0]!.batchId));
 				const resolved: string[] = [];
 				for (const op of pending) {
 					const declaredOp = batch?.operations[op.index];
+					const kwargs: Record<string, unknown> = {};
+					if (batch?.context !== undefined) kwargs["context"] = batch.context;
+
+					// What the operation PROMISED is the only evidence that can prove
+					// it ran. "A record matching this identity exists" proves nothing —
+					// it may have existed before the call, which is the normal case for
+					// an update. So the declared postcondition is asked first, and the
+					// identity is only a fallback for a CREATION (the one kind of
+					// operation whose existence is its own proof).
+					if (declaredOp?.postcondition !== undefined) {
+						const post = await checkCondition(client, op.model, declaredOp.postcondition, batch?.context);
+						if (!post.ok) {
+							op.resolution =
+								`undecidable: the declared postcondition could not be checked (${post.detail}). ` +
+								"A failed read is not proof that the call did not land.";
+							resolved.push(`op ${op.index + 1}: undecidable (postcondition unreadable)`);
+							continue;
+						}
+						const holds = post.detail;
+						// The condition holds now. For a create/write the postcondition
+						// is the state the operation promised, so holding it is the
+						// demonstrated effect; anything else stays a human decision.
+						if (declaredOp.method === "create" || declaredOp.method === "write") {
+							op.state = "applied";
+							op.decided = "applied";
+							op.evidence = `declared postcondition holds: ${holds}`;
+							op.resolution = `reconciled by the declared postcondition: ${holds}`;
+							resolved.push(`op ${op.index + 1}: applied (postcondition holds — ${holds})`);
+						} else {
+							op.resolution =
+								`undecidable: the postcondition holds (${holds}), but "${declaredOp.model}.${declaredOp.method}" ` +
+								"is not a replayable CRUD call, so holding it does not prove THIS call produced it. " +
+								"Decide by hand and record it.";
+							resolved.push(`op ${op.index + 1}: undecidable (postcondition holds but the effect is not attributable)`);
+						}
+						continue;
+					}
+
 					if (declaredOp?.identity === undefined || declaredOp.identity.length === 0) {
-						op.resolution = "undecidable: the operation declares no stable identity to look for";
-						resolved.push(`op ${op.index + 1}: undecidable (no declared identity)`);
+						op.resolution =
+							"undecidable: the operation declares no postcondition and no stable identity to look for";
+						resolved.push(`op ${op.index + 1}: undecidable (nothing declared to check)`);
 						continue;
 					}
 					const domain = declaredOp.identity.map((kv) => [kv.field, "=", kv.value]);
-					const kwargs: Record<string, unknown> = {};
-					if (batch?.context !== undefined) kwargs["context"] = batch.context;
 					const found = await client.executeKw<number>(op.model, "search_count", [domain], kwargs);
 					if (!found.ok) {
 						op.resolution = `undecidable: the identity lookup failed (${found.error})`;
@@ -1325,11 +1561,36 @@ export function registerFunctionalTool(
 						continue;
 					}
 					const count = typeof found.value === "number" ? found.value : 0;
-					op.state = count > 0 ? "applied" : "failed";
-					op.resolution = `reconciled: ${count} record(s) match the declared identity`;
-					resolved.push(`op ${op.index + 1}: ${op.state} (${count} match(es))`);
+					// Identity is read as a MEANING statement, not as a boolean: only a
+					// creation is proven by the record existing, and only a deletion by
+					// it being gone. Asking the same question for an update would mark
+					// it applied because the row was already there.
+					if (declaredOp.method === "create" && count > 0) {
+						op.state = "applied";
+						op.decided = "applied";
+						op.evidence = `created record exists (${count} match(es) on the declared identity)`;
+						op.resolution = `reconciled: the created record exists (${count} match(es) on the declared identity)`;
+						resolved.push(`op ${op.index + 1}: applied (created record found)`);
+					} else if (declaredOp.method === "unlink" && count === 0) {
+						op.state = "applied";
+						op.decided = "applied";
+						op.evidence = "the records are gone, which is what the deletion promised";
+						op.resolution = "reconciled: the records are gone, which is what the deletion promised";
+						resolved.push(`op ${op.index + 1}: applied (deletion confirmed by absence)`);
+					} else {
+						const why =
+							declaredOp.method === "create"
+								? "the record it would have created is not there"
+								: declaredOp.method === "unlink"
+									? "the records are still there"
+									: "an existing record is not proof that this call changed it";
+						op.resolution = `undecidable: ${why}. Declaring a postcondition is what makes this decidable.`;
+						resolved.push(`op ${op.index + 1}: undecidable (${why})`);
+					}
 				}
-				run.state = run.ops.some((o) => o.state === "indeterminate" || o.state === "in_progress") ? "blocked" : "idle";
+				run.state = run.ops.some((o) => (o.state === "indeterminate" || o.state === "in_progress") && o.decided === undefined)
+					? "blocked"
+					: "idle";
 				writeRun(projectRoot, run);
 				return {
 					...base,
@@ -1348,6 +1609,10 @@ export function registerFunctionalTool(
 			if (args.operation === "verify") {
 				const run = readRun(projectRoot, specId);
 				const appliedBatches = [...new Set(run.ops.filter((o) => o.state === "applied").map((o) => o.batchId))];
+				// An operation the server accepted but whose postcondition failed is
+				// NOT verified and cannot be presented as if it were: the run has a
+				// real effect on the instance that nobody proved.
+				const unverified = run.ops.filter((o) => o.effect === "accepted" && o.state !== "applied");
 				const evidence: string[] = [];
 				const specDir = deps.specDir(specId, exec);
 				const testPlan = existsSync(join(specDir, "test-plan.md")) ? readFileSync(join(specDir, "test-plan.md"), "utf8") : "";
@@ -1367,15 +1632,21 @@ export function registerFunctionalTool(
 					}
 				}
 				const counts = countOps(run.ops);
+				const clean = counts.indeterminate === 0 && unverified.length === 0;
 				return {
 					...base,
 					ok: true,
-					status: counts.indeterminate > 0 ? "blocked" : "verified",
+					status: clean ? "verified" : "blocked",
 					evidence,
 					counts: { ...counts },
 					detail:
 						`Evidence for spec ${specId} (${run.ops.length} operation(s), ${counts.applied} applied):\n` +
 						(evidence.length === 0 ? "- (no applied batch declares acceptance criteria)" : evidence.map((e) => `- ${e}`).join("\n")) +
+						(unverified.length === 0
+							? ""
+							: `\nNOT verified (${unverified.length} operation(s) the server accepted and the postcondition did not `
+								+ `confirm): ${unverified.map((o) => `${o.model}.${o.method} (op ${o.index + 1})`).join(", ")}. `
+								+ "Their effect may already be on the instance — reconcile or compensate, never report them as done.") +
 						"\nRecord the real per-AC result in test-plan.md (an explicit `pass` per row) before sdd_phase succeed.",
 				};
 			}
@@ -1383,22 +1654,43 @@ export function registerFunctionalTool(
 			// ---- compensate ---------------------------------------------------
 			if (args.operation === "compensate") {
 				const run = readRun(projectRoot, specId);
-				const applied = run.ops.filter((o) => o.state === "applied" && MUTATING_METHODS.has(o.method));
+				// What the journal can undo: CRUD the server ACCEPTED. `state:
+				// "applied"` alone would skip an operation whose postcondition failed
+				// after the RPC answered: its write landed, the proof did not, and the
+				// pre-image is right there — reporting "nothing to compensate" for it
+				// is the one answer that is certainly wrong.
+				const landed = run.ops.filter(
+					(o) => (o.state === "applied" || o.effect === "accepted") && MUTATING_METHODS.has(o.method),
+				);
+				const failedProof = landed.filter((o) => o.state !== "applied");
 				// A business action changed records the plugin never read: it is not
-				// compensated and, more importantly, it is not silently skipped.
-				const businessDone = run.ops.filter((o) => o.state === "applied" && isBusinessMethod(o.method));
+				// compensated and, more importantly, it is not silently skipped. An
+				// accepted one whose proof failed is still an effect that happened.
+				const businessDone = run.ops.filter(
+					(o) => (o.state === "applied" || o.effect === "accepted") && isBusinessMethod(o.method),
+				);
 				const businessNote =
 					businessDone.length === 0
 						? ""
 						: `\nNOT compensable by the plugin (${businessDone.length} business action(s) ran): ` +
 							businessDone.map((o) => `${o.model}.${o.method}`).join(", ") +
 							". Its effect is not reversible from a pre-image: reverse it by hand following the runbook.";
-				if (applied.length === 0) {
-					return { ...base, status: "nothing-to-compensate", detail: "No applied mutation to compensate." };
+				if (landed.length === 0) {
+					return {
+						...base,
+						status: "nothing-to-compensate",
+						detail: "No accepted CRUD mutation to compensate." + businessNote,
+					};
 				}
+				const unverifiedNote =
+					failedProof.length === 0
+						? ""
+						: `\nINCLUDED although their postcondition failed (${failedProof.length}): ` +
+							failedProof.map((o) => `${o.model}.${o.method} (op ${o.index + 1})`).join(", ") +
+							". Their effect was accepted by the server; the run stays FAILED for them.";
 				const operations: BatchOperation[] = [];
 				const notUndoable: string[] = [];
-				for (const op of [...applied].reverse()) {
+				for (const op of [...landed].reverse()) {
 					if (op.method === "create" && (op.createdIds ?? []).length > 0) {
 						const created = op.createdIds ?? [];
 						operations.push({
@@ -1464,6 +1756,7 @@ export function registerFunctionalTool(
 						(notUndoable.length > 0
 							? `\nNOT undoable (${notUndoable.length}): ${notUndoable.join(", ")} — report this honestly.`
 							: "") +
+						unverifiedNote +
 						businessNote +
 						"\nIt is a batch like any other: approve it (operation=approve) before applying it.",
 				};

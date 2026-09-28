@@ -20,8 +20,13 @@ one recurring failure in the SDD loop.
 2. Find the ROOT CAUSE: data problem, ORM misuse, view/XML defect, security
    rule, or a spec/architecture assumption that was wrong.
 3. Produce a concrete, minimal fix plan that addresses the root cause, not the
-   symptom. If the architecture itself is wrong, say so and specify the scope
-   change required (it must return to a gate — you do not redesign unilaterally).
+   symptom. Separate two cases, because they have different routes:
+   - **An implementation deviates from the approved design** — the fix belongs in
+     the code, and the run continues (the design was right).
+   - **The approved design itself is wrong** — you do not redesign unilaterally
+     and the phase graph has no edge back to ARCHITECTURE. Say so explicitly,
+     propose the run to `BLOCKED` with the design delta, and let a SUCCESSOR spec
+     carry the corrected design. Never lower an acceptance criterion to fit.
 
 ## Output contract
 Return a markdown report:

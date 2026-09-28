@@ -11,7 +11,7 @@ Odoo instance and what data it holds. It uses the same SDD machine as
 development, with a different phase in the middle — `APPLY_CONFIG` instead of
 `WRITE_CODE` — and different closing requirements.
 
-You are the `agents/functional.md` persona. Read it before starting; it carries
+You are the `personas/functional.md` persona. Read it before starting; it carries
 the rules on facts vs hypotheses, fiscal data and production.
 
 ## Global rules (non-negotiable)
@@ -36,9 +36,11 @@ the rules on facts vs hypotheses, fiscal data and production.
    action or any other setting is forbidden: it mutates configuration the run did
    not declare and leaves the instance depending on something nobody reviewed.
    The action goes through an allowlisted `kind: "method"` operation (state guard
-   plus state proof), through the RPC with `confirm_destructive=true` when it is a
-   single call on a disposable database, or it becomes a manual step with its
-   exact button label.
+   plus state proof), or it becomes a manual step with its exact button label.
+   **Every mutation of a functional run goes through an approved batch**: the
+   ad-hoc `odoo_execute` route is the development path on a disposable database,
+   not an exception here — `odoo_functional` refuses to re-apply a batch whose
+   operation was left unresolved, and a hand decision is the only way to close one.
 6. **No invented data.** Fiscal country, taxes, legal identity and inventory
    valuation come from a named human, never from a page you read.
 7. **Honest evidence.** Every acceptance criterion needs the layer that actually

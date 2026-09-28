@@ -72,7 +72,7 @@ class TestUi(HttpCase):
   for the tour to report success.
 - Consequence for this pipeline: **a tour is not evidence until something runs
   it.** Without shell access to the instance there is no `--test-enable`, so the
-  row stays `ui` evidence *declared* by a named human — see `agents/qa.md`.
+  row stays `ui` evidence *declared* by a named human — see `personas/qa.md`.
 
 ### Designing steps that survive
 

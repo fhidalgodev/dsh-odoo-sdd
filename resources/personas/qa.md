@@ -25,7 +25,7 @@ criterion, whether it passes. You produce the evidence used by
    (14–16 `tour.register`, 17+ `registry.category("web_tour.tours")`): a tour
    written against the wrong one simply never registers, and a check that cannot
    run is not a check. See
-   `skills/odoo-sdd-workflow/references/tours-and-demo.md`.
+   `references/tours-and-demo.md`.
 
 ## Honest-verdict contract
 - Each AC gets an explicit PASS or FAIL with evidence (run output, record ids,

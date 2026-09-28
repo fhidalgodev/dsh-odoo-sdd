@@ -49,7 +49,7 @@ acceptance criterion.
   executes it — a tour that no bundle loads is dead code and nothing else will
   notice. The registration API is version-specific (14–16 `tour.register`, 17+
   `registry.category("web_tour.tours")`): see
-  `skills/odoo-sdd-workflow/references/tours-and-demo.md`. If none, write exactly:
+  `references/tours-and-demo.md`. If none, write exactly:
   "no tours needed".
 - `## Demo data` — whether the module ships demo data, in which files under
   `demo/` (declared in the manifest's `"demo"` key), and what it is for (test
@@ -69,8 +69,17 @@ acceptance criterion.
   inventing a report or silently omitting one.
 
 ## Design interview (guide, does NOT block)
-Before finalizing `architecture.md`, ask the developer with `ask_user_question`
-about anything ambiguous the spec left open — **do not assume**:
+
+**When to ask, and when not to.** In SUPERVISED mode, ask the developer with
+`ask_user_question` about anything ambiguous the spec left open — **do not
+assume**. In AUTONOMOUS mode there is no developer in the loop: asking is not
+available, so decide from the request and the spec, record each answer as an
+**explicit** KB decision (a denied one too: "no tours needed"), and if a question
+decides whether the module is even correct (`## Security` is the sharp one), do
+not invent an answer — advance the run to `BLOCKED` with the question written
+out. A plausible invention is worse than a page.
+
+Questions to ask:
 - **Extra view types**: does any model need a `search` (custom filter bar,
   group-by), `kanban`, `pivot`, `graph`, `calendar`, `dashboard`, `gantt`,
   `activity`, `map`, `cohort` or `funnel` view beyond the default form/tree?
@@ -93,8 +102,20 @@ These are **guide** questions, not hard gates: if the developer answers "no" /
 "form + tree only" / "no reports", record that decision verbatim in the KB and
 write it into `architecture.md` clearly. If they do not answer, record the
 assumed default (form/tree only, no reports) as an **explicit** decision and
-note it — never leave an implicit assumption. The security gate remains the only
-fail-closed blocker for advancing ARCHITECTURE.
+note it — never leave an implicit assumption.
+
+**What actually blocks this phase** (measured by the runtime, not by opinion):
+
+- `## Security` must carry a real decision (groups, the ACL artifact, the CRUD
+  matrix, and record rules OR an explicit "none needed") — an empty section
+  blocks the advance;
+- `## Documentation` must decide the language and the fragments (an untouched
+  template comment is not a decision) — it blocks `DONE` under the default
+  `documentationPolicy=required`;
+- every required heading must be present in `architecture.md` and in
+  `test-plan.md` (`| AC | Scenario | …` with one row per criterion);
+- the ADVANCE itself is a gated phase: it needs the host's approval (native when
+  the host offers one, otherwise a literal `APPROVED` marker).
 
 ## `test-plan.md`
 One table row per AC: `| AC | Scenario | Layer (static/server/rpc/ui/manual) | Status |`.

@@ -154,12 +154,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.3.0`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.4.0`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.3.0，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.4.0，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]
@@ -262,7 +262,7 @@ bundle 加载的 tour 永远不会执行）以及**演示数据**（哪些文件
 `## Tours` / `## Demo data` 中，并在 `sdd_phase status` 里作为警告呈现，按设计不
 阻塞 —— 安全模型才是唯一 fail-closed 的内容门禁。各版本的 tour API、执行它的
 `HttpCase` 以及演示数据的陷阱都在
-`skills/odoo-sdd-workflow/references/tours-and-demo.md`。
+`resources/references/tours-and-demo.md`。
 
 每个 spec 的产物（全部在磁盘上，可断点续跑）：
 
@@ -358,11 +358,11 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | `odoo_connect` | 探测实例：服务器版本 + 认证。报告经过掩码处理；区分 `NEEDS_SETUP` / `NEEDS_SECRET` / `DEFERRED` / `SKIPPED` 状态（从不在聊天中索要密钥）。 |
 | `odoo_setup` | 上手引导：`check`（级联 + gitignore + 委派模式）、`interactive`（不含密钥的 chmod 600 脚手架）、**`authorize`**（通过原生审批向开发者本人索要一个绑定当前 url/db/user 的连接授权）、**`revoke`**（撤销授权）、**`purge`**（先给出计划，然后在 `confirm_destructive=true` 加人工批准的前提下，只删除插件自己在 `.sdd/` 下的状态）、`later`、`skip`、`reset`、`autonomy`（supervised \| autonomous，需人工批准）。密钥永远不会作为参数被接受。 |
 | `odoo_module` | 对 `ir.module.module` 执行 `info` / `install` / `upgrade`（`button_immediate_*`）。原样返回服务器自己的输出或 traceback，并做脱敏 —— 这就是闭环反馈。 |
-| `odoo_execute` | 针对实例的通用 RPC（`execute_kw`）：**任意模型的任何公共方法都可调用**，而它需要什么由它是什么决定。读操作（`search`、`search_read`、`search_count`、`read`、`read_group`、`fields_get`、`name_get`、`name_search`、`default_get`、`exists`、`check_access_rights`、`check_access_rule`）可自由执行，并可用 `fields`/`limit`/`order`/`offset` 做投影和分页（小数或负数的 `offset` 会被拒绝，绝不被截断）；CRUD 变更操作（`create`/`write`/`unlink`）需要 `confirm_destructive=true` **且**模型在 `executeAllowlist` 中，并且会被记入日志，以便数据撤销时重放它们；每一个**业务动作**（`action_*`、`button_*`、`do_*`……，例如确认一张订单）都需要 `confirm_destructive=true` 且**无需白名单**，因为插件无法重放它的效果 —— 它永远不会被记入日志，对它不存在撤销，而超时会报告为一个 **INDETERMINATE** 结果，而不是普通的失败。声明 `precondition`/`postcondition`（与批次使用的形状相同：`{domain, expect, count}`），在调用之前带上状态守卫、在调用之后带上状态证明：如果前置条件失败，什么都不会发出；如果后置条件失败，应答会说明调用**确实已发出**、实例可能只改了一半；没有它们时，`OK` 只意味着服务器接受了这次调用。**私有方法**（`_name`）会被拒绝，而这堵墙是 Odoo 自己的：`execute_kw` 通过 `get_public_method` 分发，后者对 `_…`、`init`、`@api.private` 和内部属性名会回答 `AccessError` —— 所以要在源码里读该模型（原生/自定义仓库由 `odoo_config mode=read` 报告），并调用包装它的公共按钮或动作（`sale.order._create_invoices` 是私有的；`sale.advance.payment.inv` 向导暴露了公共的 `create_invoices()`）。要执行多个操作，或者希望每次运行都有人工审批时，请使用带 `kind: "method"` 的功能批次。`context` 原样转发 —— 在多公司实例上用 `allowed_company_ids`/`company_id` —— 服务器仍然会应用它自己的 ACL。 |
+| `odoo_execute` | 针对实例的通用 RPC（`execute_kw`）：**任意模型的任何公共方法都可调用**，而它需要什么由它是什么决定。读操作（`search`、`search_read`、`search_count`、`read`、`read_group`、`fields_get`、`name_get`、`name_search`、`default_get`、`exists`、`check_access_rights`、`check_access_rule`）可自由执行，并可用 `fields`/`limit`/`order`/`offset` 做投影和分页（小数或负数的 `offset` 会被拒绝，绝不被截断）；CRUD 变更操作（`create`/`write`/`unlink`）需要 `confirm_destructive=true` **且**模型在 `executeAllowlist` 中，并且会被记入日志，以便数据撤销时重放它们；每一个**业务动作**（`action_*`、`button_*`、`do_*`……，例如确认一张订单）都需要 `confirm_destructive=true` 且**无需白名单**，因为插件无法重放它的效果 —— 它永远不会被记入日志，对它不存在撤销，而超时会报告为一个 **INDETERMINATE** 结果，而不是普通的失败 —— 同一条规则现在也适用于 CRUD：一个从未收到应答的 `create` 可能已经提交，把它报告成可重试的失败正是「一个效果变成两个」的方式。声明 `precondition`/`postcondition`（与批次使用的形状相同：`{domain, expect, count}`），在调用之前带上状态守卫、在调用之后带上状态证明：如果前置条件失败，什么都不会发出；如果后置条件失败，应答会说明调用**确实已发出**、实例可能只改了一半，而 CRUD 变更会保留它的日志回执（新建 id + 前像），因此仍然可以被补偿；没有它们时，`OK` 只意味着服务器接受了这次调用。**私有方法**（`_name`）会被拒绝，而这堵墙是 Odoo 自己的：`execute_kw` 通过 `get_public_method` 分发，后者对 `_…`、`init`、`@api.private` 和内部属性名会回答 `AccessError` —— 所以要在源码里读该模型（原生/自定义仓库由 `odoo_config mode=read` 报告），并调用包装它的公共按钮或动作（`sale.order._create_invoices` 是私有的；`sale.advance.payment.inv` 向导暴露了公共的 `create_invoices()`）。要执行多个操作，或者希望每次运行都有人工审批时，请使用带 `kind: "method"` 的功能批次。`context` 原样转发 —— 在多公司实例上用 `allowed_company_ids`/`company_id` —— 服务器仍然会应用它自己的 ACL。 |
 | `odoo_validate` | 本地、无需实例的模块结构检查：`__manifest__.py` 是否存在 + depends、声明的数据 XML 文件是否存在、有模型时是否有 `security/ir.model.access.csv`。返回 file:line 级别的发现，以及它解析出的 `module_dir` 和项目根目录（相对路径按会话所在文件夹解析，绝不按进程 cwd 解析）。 |
 | `odoo_errors` | 读取最近的 `ir.logging` 服务器错误 —— 相当于远程拉取环境日志。 |
 | `odoo_session` | 铸造一个无密码的 web 会话（`connect_as_user` 模式），存放在 `.sdd/session.json`（chmod 600），供 Playwright UI 测试使用。cookie 本身永远不会被返回。 |
-| `sdd_phase` | 阶段状态机：`init`、`status`（logbook 摘要、spec 目录和 specs 位置）、`mark_spec_loaded`、`advance`（fail-closed 门禁 + `approval_source` 来源记录）、`fail`（失败阶梯 + FAILED 结论）、`succeed`（PASSED 结论；除非 `test-plan.md` 中每一行 AC 都明确写着 `pass`，否则拒绝）、`rollback`（恢复 checkpoint 并回到 WRITE_CODE）、`diagnose`、`waive`（记录 —— 在原生审批下 —— **本会话**可以在没有 spec 的情况下工作：开发者那句"你自己看着办"会原样保存在 `.sdd/waiver.json` 里，由 `status` 和 handoff 报告；`revoke: true` 会删除它，且不需要审批）。 |
+| `sdd_phase` | 阶段状态机：`init`、`status`（logbook 摘要、spec 目录和 specs 位置）、`mark_spec_loaded`、`advance`（fail-closed 门禁：原生审批由宿主询问人类，`approval_marker`/`approval_source` 保留为没有审批接口的宿主所记录的兜底路径）、`fail`（失败阶梯 + FAILED 结论）、`succeed`（PASSED 结论；在 VERIFY/FIX_LOOP 之外会被拒绝，并且除非 SPEC 声明的每个 AC 在 `test-plan.md` 中都有一行明确写着 `pass` —— 被省略的标准不等于通过的标准；结论会记录所用证据的指纹，因此 `DONE` 会拒绝被编辑改旧的结论）、`rollback`（恢复**本 SPEC 的** checkpoint，并回到该模式实际工作的阶段 —— WRITE_CODE，或功能型 spec 的 APPLY_CONFIG）、`diagnose`、`waive`（记录 —— 在原生审批下 —— **本会话**可以在没有 spec 的情况下工作：开发者那句"你自己看着办"会原样保存在 `.sdd/waiver.json` 里，由 `status` 和 handoff 报告；`revoke: true` 会删除它，且不需要审批）。 |
 | `sdd_checkpoint` | 回滚面：`create`（对工作区做快照，成为活动 checkpoint）、`list`、`restore`（恢复文件，并在 `restore_data=true` 和 `confirm_destructive=true` 时恢复已记录的数据变更：撤销会在该变更用过的公司上下文中运行，把读取形态转换成写入值，标记每个操作以免重试时重复补偿它，拒绝来自其他目标的日志，并报告每一个它无法恢复的字段；它**总是报告** checkpoint 之后创建的文件，且只有 `remove_created=true` 才会删除它们）、`drop`、`journal`。 |
 | `odoo_docs` | 模块文档，可**独立使用**（不需要 spec、阶段、checkpoint 或实例），因此一个已有模块也能直接被文档化：`check`（把 OCA 片段映射到 Diátaxis、版本方案、changelog、`index.html`、docstring、xpath 注释、OWL 指令 → 带 `file:line` 的 ERROR/WARN）、`plan`、`scaffold`（只创建、绝不覆盖的骨架）和 `report`（持久化 `docs-report.md`；只有当不存在仍是骨架的片段时才是 APPROVED）。对已发布模块的任何改动都必须写 changelog 条目。 |
 | `odoo_security_scan` | 本地静态安全审查（不需要实例）：拼接式原生 SQL、`eval`/`exec`/`pickle`、硬编码密钥、没有理由的 `sudo()`、`auth="none"`、被关闭的 CSRF、QWeb `t-raw`。发现项带有 `file:line` + 修复提示；任何 ERROR 都会阻止 `DONE`。 |
@@ -381,7 +381,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | 模式 | 谁回答门禁 | 如何结束 |
 |---|---|---|
 | **Supervised**（默认） | 你，在每个受门禁控制的阶段 | 你批准，或者运行停下来等待 |
-| **Autonomous** | 一个**人工代理** agent（`agents/human-proxy.md`），只发出 fail-closed 的行首 `APPROVED` 或 `NEEDS_REVISION` | `create_goal` 无人值守地跑一轮轮迭代，直到 `DONE` 或 `BLOCKED` |
+| **Autonomous** | 一个**人工代理** agent（`resources/personas/human-proxy.md`），只发出 fail-closed 的行首 `APPROVED` 或 `NEEDS_REVISION` | `create_goal` 无人值守地跑一轮轮迭代，直到 `DONE` 或 `BLOCKED` |
 
 > [!TIP]
 > 在自主模式下刹车依然上膛：`stop.md`、迭代上限和诊断阶梯都还在，而 `BLOCKED`
@@ -394,7 +394,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 
 | 层 | 组件 |
 |---|---|
-| **identity** | `agents/*.md` —— 架构师、开发者、qa、顾问、human-proxy、security-reviewer、文档等人设，带角色 + 边界 |
+| **identity** | `resources/personas/*.md` —— 架构师、开发者、qa、顾问、human-proxy、security-reviewer、文档等人设，带角色 + 边界。两个内置 skill 都把 `resources/` 声明为 `resourceBase`，因此每条 `personas/…` 与 `references/…` 路径都从宿主交给模型的那个基目录解析 |
 | **odoo_connection** | `odoo-client.ts` —— JSON-RPC 认证、`execute_kw`、会话铸造 |
 | **executors** | `odoo_module`、`odoo_execute`、`odoo_validate`、`odoo_errors` |
 | **schemas** | 带必需章节的分阶段模板；`transition()` 会拒绝交付物缺少这些章节的阶段 |
@@ -597,7 +597,7 @@ DSH 能跑的地方插件就能跑，并声称支持 **Linux、macOS 和 Windows
 
 ## 🤖 模型体验
 
-agent 看到 13 个自包含描述的工具。典型流程：
+agent 看到 15 个自包含描述的工具。典型流程：
 `sdd_phase init` → 安全访谈 + `odoo_connect` → 带 `APPROVED` 的门禁阶段 →
 `sdd_checkpoint create` → 写代码 → `odoo_security_scan` →
 `odoo_module install` → 出现 traceback 时用 `odoo_errors` + `sdd_phase fail`
@@ -668,7 +668,7 @@ JS ModuleLoader bundle，它贡献 **Odoo SDD** 设置区块。
 
 | 文件 | 作用 |
 |---|---|
-| `src/index.ts` | 插件入口：注册 13 个工具、解析配置和策略守卫 |
+| `src/index.ts` | 插件入口：注册 15 个工具、解析配置和策略守卫 |
 | `src/types.ts` | 公开的 payload 类型（绝不包含密钥材料） |
 | `src/credentials.ts` | 凭据级联、`.env` 加载/校验、权限验证、`redact()`、fail-closed |
 | `src/odoo-client.ts` | JSON-RPC 客户端：`common.version`、`authenticate`、`execute_kw`、`button_immediate_*`、`ir.logging`、`/web/session/authenticate` |

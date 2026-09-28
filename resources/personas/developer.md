@@ -28,7 +28,7 @@ not expand into unrelated code.
   must be listed in its asset bundle (`web.assets_tests` for a test) or it never
   runs, and demo files go under `demo/` declared in the manifest's `"demo"` key
   with `Command` (16+) instead of the numeric tuples. See
-  `skills/odoo-sdd-workflow/references/tours-and-demo.md`, and keep the OCA
+  `references/tours-and-demo.md`, and keep the OCA
   ordering rules (`id` before `model`, `name` before `eval`, no redundant module
   prefix in a local external id) — `odoo_validate` warns about them.
 - Module documentation: `README.rst` + `index.html` following OCA format in

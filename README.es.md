@@ -164,12 +164,12 @@ bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
 
 - **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
 - Acepta cualquier spec de pnpm, así que podés fijar una versión:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.3.0`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.4.0`.
 
 ¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.3.0, publicada con attestation de provenance
+npm install dsh-odoo-sdd        # 0.4.0, publicada con attestation de provenance
 ```
 
 > [!IMPORTANT]
@@ -280,7 +280,7 @@ explícitamente: "form + tree only", "no reports needed", "no tours needed",
 `sdd_phase status`, no bloquean por diseño — el modelo de seguridad es la única
 compuerta de contenido fail-closed. La API de tours por versión, el `HttpCase`
 que los ejecuta y las trampas de los datos demo están en
-`skills/odoo-sdd-workflow/references/tours-and-demo.md`.
+`resources/references/tours-and-demo.md`.
 
 Artefactos por spec (todo en disco, reanudable):
 
@@ -388,11 +388,11 @@ filas que contó no se reenvían. La cookie de sesión queda en `.sdd/session.js
 | `odoo_connect` | Sonda la instancia: versión del servidor + autenticación. Reporte enmascarado; distingue los estados `NEEDS_SETUP` / `NEEDS_SECRET` / `DEFERRED` / `SKIPPED` (nunca pide secretos por chat). |
 | `odoo_setup` | Onboarding: `check` (cascada + gitignore + modo de delegación), `interactive` (scaffold chmod 600 sin secreto), **`authorize`** (pide al DESARROLLADOR, vía aprobación nativa, un grant de conexión atado al url/db/usuario actual), **`revoke`** (elimina los grants), **`purge`** (primero muestra el plan y, con `confirm_destructive=true` + aprobación humana, borra solo el estado propio del plugin bajo `.sdd/`), `later`, `skip`, `reset`, `autonomy` (supervised \| autonomous, aprobado por un humano). Los secretos nunca se aceptan como parámetros. |
 | `odoo_module` | `info` / `install` / `upgrade` sobre `ir.module.module` (`button_immediate_*`). Devuelve la salida o el traceback del servidor, redactado — el bucle de feedback cerrado. |
-| `odoo_execute` | RPC genérico (`execute_kw`) contra la instancia: **cualquier método público de cualquier modelo se puede llamar**, y lo que necesita lo decide qué es. Las LECTURAS (`search`, `search_read`, `search_count`, `read`, `read_group`, `fields_get`, `name_get`, `name_search`, `default_get`, `exists`, `check_access_rights`, `check_access_rule`) corren libremente, con `fields`/`limit`/`order`/`offset` para proyección y paginado (un `offset` decimal o negativo se rechaza, nunca se recorta); las mutaciones CRUD (`create`/`write`/`unlink`) exigen `confirm_destructive=true` Y el modelo en `executeAllowlist`, y se journalizan para que el undo de datos pueda replicarlas; cada **acción de negocio** (`action_*`, `button_*`, `do_*`…, por ejemplo confirmar una orden) corre con `confirm_destructive=true` y **sin allowlist**, porque el plugin no puede replicar su efecto — nunca se journaliza, no existe undo para ella, y un timeout se reporta como un desenlace **INDETERMINATE** en vez de un fallo simple. Declará `precondition`/`postcondition` (la misma forma que usa un lote: `{domain, expect, count}`) para llevar una guarda de estado antes de la llamada y una prueba de estado después: si la precondition falla, no se envía nada; si la postcondition falla, la respuesta dice que la llamada SÍ se envió y que la instancia puede haber quedado a medio cambiar; sin ninguna, `OK` solo significa que el servidor aceptó la llamada. Un **método privado** (`_name`) se rechaza, y ese muro es de Odoo: `execute_kw` despacha por `get_public_method`, que responde `AccessError` para `_…`, `init`, `@api.private` y los nombres de atributos internos — así que leé el modelo en el código fuente (los repositorios nativo/custom los reporta `odoo_config mode=read`) y llamá al botón o la acción pública que lo envuelve (`sale.order._create_invoices` es privado; el wizard `sale.advance.payment.inv` expone el `create_invoices()` público). Para varias operaciones, o cuando se quiere una aprobación humana por corrida, usá un lote funcional con `kind: "method"`. `context` se reenvía tal cual — usalo para `allowed_company_ids`/`company_id` en instancias multi-company — y el servidor sigue aplicando su propia ACL. |
+| `odoo_execute` | RPC genérico (`execute_kw`) contra la instancia: **cualquier método público de cualquier modelo se puede llamar**, y lo que necesita lo decide qué es. Las LECTURAS (`search`, `search_read`, `search_count`, `read`, `read_group`, `fields_get`, `name_get`, `name_search`, `default_get`, `exists`, `check_access_rights`, `check_access_rule`) corren libremente, con `fields`/`limit`/`order`/`offset` para proyección y paginado (un `offset` decimal o negativo se rechaza, nunca se recorta); las mutaciones CRUD (`create`/`write`/`unlink`) exigen `confirm_destructive=true` Y el modelo en `executeAllowlist`, y se journalizan para que el undo de datos pueda replicarlas; cada **acción de negocio** (`action_*`, `button_*`, `do_*`…, por ejemplo confirmar una orden) corre con `confirm_destructive=true` y **sin allowlist**, porque el plugin no puede replicar su efecto — nunca se journaliza, no existe undo para ella, y un timeout se reporta como un desenlace **INDETERMINATE** en vez de un fallo simple — la misma regla se aplica ahora a CRUD: un `create` cuya respuesta nunca llegó puede haberse confirmado ya, y reportarlo como un fallo reintentable es cómo un efecto se convierte en dos. Declará `precondition`/`postcondition` (la misma forma que usa un lote: `{domain, expect, count}`) para llevar una guarda de estado antes de la llamada y una prueba de estado después: si la precondition falla, no se envía nada; si la postcondition falla, la respuesta dice que la llamada SÍ se envió y que la instancia puede haber quedado a medio cambiar, y la mutación CRUD conserva su recibo del journal (id creado + preimagen) para que siga siendo compensable; sin ninguna, `OK` solo significa que el servidor aceptó la llamada. Un **método privado** (`_name`) se rechaza, y ese muro es de Odoo: `execute_kw` despacha por `get_public_method`, que responde `AccessError` para `_…`, `init`, `@api.private` y los nombres de atributos internos — así que leé el modelo en el código fuente (los repositorios nativo/custom los reporta `odoo_config mode=read`) y llamá al botón o la acción pública que lo envuelve (`sale.order._create_invoices` es privado; el wizard `sale.advance.payment.inv` expone el `create_invoices()` público). Para varias operaciones, o cuando se quiere una aprobación humana por corrida, usá un lote funcional con `kind: "method"`. `context` se reenvía tal cual — usalo para `allowed_company_ids`/`company_id` en instancias multi-company — y el servidor sigue aplicando su propia ACL. |
 | `odoo_validate` | Validación LOCAL del módulo sin instancia: `__manifest__.py` + depends, los XML declarados existen, `security/ir.model.access.csv` cuando hay modelos. Devuelve findings file:line, más el `module_dir` y la raíz del proyecto que resolvió (una ruta relativa se resuelve contra la carpeta de la sesión, nunca contra el cwd del proceso). |
 | `odoo_errors` | Lee errores recientes del servidor (`ir.logging`) — el equivalente remoto de obtener los logs del entorno. |
 | `odoo_session` | Mintea una sesión web sin contraseña (patrón `connect_as_user`) guardada en `.sdd/session.json` (chmod 600) para pruebas UI con Playwright. La cookie nunca se devuelve. |
-| `sdd_phase` | Máquina de fases: `init`, `clarify`, `status` (resumen del logbook, directorio del spec y ubicación de los specs), `mark_spec_loaded`, `advance` (gates fail-closed + provenance `approval_source`), `fail` (escalera de fallos + veredicto FAILED), `succeed` (veredicto PASSED; se rechaza salvo que cada fila de AC en `test-plan.md` lea un `pass` explícito), `rollback` (restaura un checkpoint y vuelve a WRITE_CODE), `diagnose`, `waive` (registra — con aprobación nativa — que ESTA sesión puede trabajar sin spec: el "dejalo a tu criterio" del desarrollador, guardado textual en `.sdd/waiver.json`, reportado por `status` y por el handoff; `revoke: true` lo elimina y no necesita aprobación). |
+| `sdd_phase` | Máquina de fases: `init`, `clarify`, `status` (resumen del logbook, directorio del spec y ubicación de los specs), `mark_spec_loaded`, `advance` (gates fail-closed + provenance `approval_source`), `fail` (escalera de fallos + veredicto FAILED), `succeed` (veredicto PASSED; se rechaza fuera de VERIFY/FIX_LOOP y salvo que cada AC que la SPEC declara tenga fila en `test-plan.md` con un `pass` explícito — un criterio omitido no es un criterio que pasa, y el veredicto guarda la huella de la evidencia que usó para que `DONE` rechace un veredicto que una edición dejó obsoleto), `rollback` (restaura un checkpoint DE ESTA SPEC y vuelve a la fase en la que trabaja su modalidad — WRITE_CODE, o APPLY_CONFIG en una spec funcional), `diagnose`, `waive` (registra — con aprobación nativa — que ESTA sesión puede trabajar sin spec: el "dejalo a tu criterio" del desarrollador, guardado textual en `.sdd/waiver.json`, reportado por `status` y por el handoff; `revoke: true` lo elimina y no necesita aprobación). |
 | `sdd_checkpoint` | La superficie de rollback: `create` (snapshot del workspace, queda activo), `list`, `restore` (archivos y, con `restore_data=true` + `confirm_destructive=true`, las mutaciones de datos registradas: el undo corre bajo el contexto de compañía que usó la mutación, convierte formas de lectura en valores de escritura, marca cada operación para que un reintento no la compense dos veces, rechaza un journal de otro destino y reporta cada campo que no pudo restaurar; **siempre reporta** los archivos creados después del checkpoint y los borra solo con `remove_created=true`), `drop`, `journal`. |
 | `odoo_docs` | Documentación de un módulo, usable **por sí sola** (sin spec, fase, checkpoint ni instancia), así que un módulo existente se puede documentar sin más: `check` (fragmentos OCA mapeados a Diátaxis, esquema de versión, changelog, `index.html`, docstrings, comentarios xpath, directiva OWL → ERROR/WARN con `file:line`), `plan`, `scaffold` (esqueletos create-only, nunca sobrescribe) y `report` (persiste `docs-report.md`; APPROVED solo si nada quedó en esqueleto). La entrada de changelog es obligatoria para cualquier cambio a un módulo ya publicado. |
 | `odoo_security_scan` | Revisión de seguridad estática local (sin instancia): SQL concatenado, `eval`/`exec`/`pickle`, secretos hardcodeados, `sudo()` sin justificar, `auth="none"`, CSRF desactivado, `t-raw` en QWeb. Hallazgos con `file:line` + sugerencia; cualquier ERROR bloquea `DONE`. |
@@ -411,7 +411,7 @@ con `odoo_setup mode=autonomy decision=...`:
 | Modo | Quién responde las compuertas | Cómo termina |
 |---|---|---|
 | **Supervisado** (default) | vos, en cada fase con compuerta | aprobás, o la ejecución se detiene |
-| **Autónomo** | un agente **proxy humano** (`agents/human-proxy.md`) que solo emite un `APPROVED` fail-closed de inicio de línea o `NEEDS_REVISION` | `create_goal` corre rondas sin atención hasta `DONE` o `BLOCKED` |
+| **Autónomo** | un agente **proxy humano** (`resources/personas/human-proxy.md`) que solo emite un `APPROVED` fail-closed de inicio de línea o `NEEDS_REVISION` | `create_goal` corre rondas sin atención hasta `DONE` o `BLOCKED` |
 
 > [!TIP]
 > En modo autónomo los frenos siguen armados: `stop.md`, el techo de iteraciones
@@ -425,7 +425,7 @@ con `odoo_setup mode=autonomy decision=...`:
 
 | Capa | Componente |
 |---|---|
-| **identity** | `agents/*.md` — personas arquitecto, desarrollador, QA, consultor, proxy humano, security-reviewer y documentación (rol + límites) |
+| **identity** | `resources/personas/*.md` — personas arquitecto, desarrollador, QA, consultor, proxy humano, security-reviewer y documentación (rol + límites). Ambos skills declarados declaran `resources/` como su `resourceBase`, así que cada ruta `personas/…` y `references/…` resuelve desde la base que el host le entrega al modelo |
 | **odoo_connection** | `odoo-client.ts` — JSON-RPC auth, `execute_kw`, sesión |
 | **executors** | `odoo_module`, `odoo_execute`, `odoo_validate`, `odoo_errors` |
 | **schemas** | plantillas con secciones obligatorias; `transition()` rechaza una fase cuyo entregable carezca de ellas |
@@ -657,7 +657,7 @@ presets para copiar y pegar donde los necesites.
 
 ## 🤖 Experiencia del modelo
 
-El agente ve 13 tools con descripciones autocontenidas. El flujo típico:
+El agente ve 15 tools con descripciones autocontenidas. El flujo típico:
 `sdd_phase init` → entrevista de seguridad + `odoo_connect` → fases con compuerta
 mediante `APPROVED` → `sdd_checkpoint create` → código → `odoo_security_scan` →
 `odoo_module install` → si hay traceback, `odoo_errors` + `sdd_phase fail` (puede
@@ -735,7 +735,7 @@ ModuleLoader que aporta la sección **Odoo SDD** en Ajustes.
 
 | Archivo | Rol |
 |---|---|
-| `src/index.ts` | Entrada del plugin: registro de las 13 tools, resolución de configuración y el guard de política |
+| `src/index.ts` | Entrada del plugin: registro de las 15 tools, resolución de configuración y el guard de política |
 | `src/types.ts` | Tipos públicos de payload (nunca contienen material secreto) |
 | `src/credentials.ts` | Cascada de credenciales, carga/validación del `.env`, verificación de permisos, `redact()`, fail-closed |
 | `src/odoo-client.ts` | Cliente JSON-RPC: `common.version`, `authenticate`, `execute_kw`, `button_immediate_*`, `ir.logging`, `/web/session/authenticate` |

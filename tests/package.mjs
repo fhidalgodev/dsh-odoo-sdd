@@ -18,7 +18,7 @@ import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -379,8 +379,17 @@ check("the publish simulation kept the personas and skills", staged.has("resourc
 			// out of the tarball) and be the file that ships (`<base>/<rel>` is the
 			// same file as `<package>/<rel>` only when the base IS the package root,
 			// so the second path is what `files` has to contain).
-			const relFromPackage = relative(root, resolved);
-			const resolves = existsSync(resolved) && relFromPackage !== "" && !relFromPackage.startsWith("..") && shipped.has(relFromPackage);
+			//
+			// The comparison is separator-insensitive ON PURPOSE: `npm pack --json`
+			// reports POSIX-style paths even on Windows, while `path.relative()`
+			// returns backslashes there — so comparing them raw made every
+			// reference look unshipped on the Windows job and nowhere else.
+			const relFromPackage = relative(root, resolved).split(sep).join("/");
+			const resolves =
+				existsSync(resolved) &&
+				relFromPackage !== "" &&
+				!relFromPackage.startsWith("../") &&
+				shipped.has(relFromPackage);
 			if (!resolves) {
 				unresolvable += 1;
 				console.log(`         ${skill.name}: \`${rel}\` -> ${resolved} is missing or not shipped`);

@@ -2,8 +2,8 @@
  * Packaging contract test for dsh-odoo-sdd.
  *
  * A plugin can pass every unit test and still be broken for the people who
- * install it: the published package once shipped without `resources/personas/` (the
- * personas the SKILL loads) and without `cordis.patch.yml`, because `files`
+ * install it: the published package once shipped without `resources/roles/` (the
+ * role files the SKILL loads) and without `cordis.patch.yml`, because `files`
  * decides what `pnpm`/`npm` actually hardlink. Those bugs only surface after
  * installation, so this test asserts the tarball contents directly.
  *
@@ -166,7 +166,7 @@ for (const agent of [
 	"documentation",
 	"functional",
 ]) {
-	required.push(`resources/personas/${agent}.md`);
+	required.push(`resources/roles/${agent}.md`);
 }
 // Both bundled skills travel with the package: the runtime reads them by path
 // (the functional reference resolves through the skill's resource base).
@@ -345,8 +345,8 @@ check(
 	srcModules.every((file) => staged.has(`lib/${file.slice(0, -3)}.js`)),
 	`missing: ${srcModules.filter((f) => !staged.has(`lib/${f.slice(0, -3)}.js`)).join(", ")}`,
 );
-check("the publish simulation kept the personas and skills", staged.has("resources/personas/functional.md") && staged.has("skills/odoo-functional-sdd/SKILL.md"));
-check("the publish simulation kept the personas and skills", staged.has("resources/personas/functional.md") && staged.has("skills/odoo-functional-sdd/SKILL.md"));
+check("the publish simulation kept the roles and skills", staged.has("resources/roles/functional.md") && staged.has("skills/odoo-functional-sdd/SKILL.md"));
+check("the publish simulation kept the roles and skills", staged.has("resources/roles/functional.md") && staged.has("skills/odoo-functional-sdd/SKILL.md"));
 
 // --- every reference a skill makes must RESOLVE from its declared base -----
 // A file can ship in the tarball and still be unreachable: the host tells the
@@ -370,7 +370,7 @@ check("the publish simulation kept the personas and skills", staged.has("resourc
 	for (const skill of registered) {
 		const base = String(skill.resourceBase?.path ?? "");
 		const body = String(skill.content ?? "");
-		for (const match of body.matchAll(/`((?:personas|references|skills)\/[^`]+\.md)`/g)) {
+		for (const match of body.matchAll(/`((?:roles|references|skills)\/[^`]+\.md)`/g)) {
 			const rel = match[1];
 			refs += 1;
 			// What the host tells the model to do: resolve it AGAINST THE BASE.
@@ -403,12 +403,12 @@ check("the publish simulation kept the personas and skills", staged.has("resourc
 	// Bytes are a MAINTENANCE constraint, not a proof of token savings: a shorter
 	// body that drops a rule or makes a reference undiscoverable is a regression,
 	// so the budget is asserted together with what it must preserve. What is
-	// measured is the SELECTED load for a phase — the guide body plus the persona
+	// measured is the SELECTED load for a phase — the guide body plus the role file
 	// and the reference it sends the model to — not one file alone.
 	const guide = registered.find((s) => s.name === "odoo-sdd-workflow");
 	const functionalGuide = registered.find((s) => s.name === "odoo-functional-sdd");
 	const bodyBytes = (skill) => Buffer.byteLength(String(skill?.content ?? ""), "utf8");
-	const BUDGET = { guide: 16_000, total: 30_000, persona: 40_000 };
+	const BUDGET = { guide: 16_000, total: 30_000, roles: 40_000 };
 	check(
 		`the technical guide body stays under ${BUDGET.guide} bytes (it was 32,495)`,
 		bodyBytes(guide) > 0 && bodyBytes(guide) < BUDGET.guide,
@@ -419,22 +419,22 @@ check("the publish simulation kept the personas and skills", staged.has("resourc
 		bodyBytes(guide) + bodyBytes(functionalGuide) < BUDGET.total,
 		`${bodyBytes(guide)} + ${bodyBytes(functionalGuide)}`,
 	);
-	const personaBytes = readdirSync(join(root, "resources", "personas"))
+	const rolesBytes = readdirSync(join(root, "resources", "roles"))
 		.filter((f) => f.endsWith(".md"))
-		.reduce((sum, f) => sum + Buffer.byteLength(readFileSync(join(root, "resources", "personas", f), "utf8"), "utf8"), 0);
+		.reduce((sum, f) => sum + Buffer.byteLength(readFileSync(join(root, "resources", "roles", f), "utf8"), "utf8"), 0);
 	check(
-		`the personas together stay under ${BUDGET.persona} bytes (they absorbed the moved detail)`,
-		personaBytes > 0 && personaBytes < BUDGET.persona,
-		`${personaBytes}`,
+		`the role files together stay under ${BUDGET.roles} bytes (they absorbed the moved detail)`,
+		rolesBytes > 0 && rolesBytes < BUDGET.roles,
+		`${rolesBytes}`,
 	);
 
 	// The budget must not have been met by DELETING the route: every phase names
-	// the persona that owns it, and every gate the runtime evaluates is still
+	// the role that owns it, and every gate the runtime evaluates is still
 	// discoverable from the body.
-	for (const persona of ["architect", "developer", "qa", "consultant", "security-reviewer", "documentation", "human-proxy"]) {
+	for (const role of ["architect", "developer", "qa", "consultant", "security-reviewer", "documentation", "human-proxy"]) {
 		check(
-			`the guide still routes the ${persona} phase to its persona`,
-			String(guide?.content ?? "").includes(`personas/${persona}.md`),
+			`the guide still routes the ${role} phase to its role`,
+			String(guide?.content ?? "").includes(`roles/${role}.md`),
 		);
 	}
 	for (const gate of ["README", "## Documentation", "## Security", "test-plan", "AC1"]) {

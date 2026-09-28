@@ -1195,7 +1195,7 @@ export function securityReviewGaps(specDir: string): string[] {
 	const path = join(specDir, "security-report.md");
 	if (!existsSync(path)) {
 		return [
-			"Write specs/<id>/security-report.md from the security-reviewer persona (groups, ACLs, " +
+			"Write specs/<id>/security-report.md from the security-reviewer role (groups, ACLs, " +
 				"record rules, risky patterns) before claiming DONE.",
 		];
 	}

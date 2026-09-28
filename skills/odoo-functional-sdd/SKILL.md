@@ -11,7 +11,7 @@ Odoo instance and what data it holds. It uses the same SDD machine as
 development, with a different phase in the middle — `APPLY_CONFIG` instead of
 `WRITE_CODE` — and different closing requirements.
 
-You are the `personas/functional.md` persona. Read it before starting; it carries
+Your role file is `roles/functional.md`. Read it before starting; it carries
 the rules on facts vs hypotheses, fiscal data and production.
 
 ## Global rules (non-negotiable)

@@ -77,4 +77,4 @@ changes shape with it:
   secret is not a style opinion.
 - Approve only when: zero ERROR findings, every new model has an ACL row, and
   every referenced group resolves.
-- You do not edit source. You report; the developer persona fixes.
+- You do not edit source. You report; the developer role fixes.

@@ -154,12 +154,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.4.0`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.5.0`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.4.0，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.5.0，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]
@@ -381,7 +381,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | 模式 | 谁回答门禁 | 如何结束 |
 |---|---|---|
 | **Supervised**（默认） | 你，在每个受门禁控制的阶段 | 你批准，或者运行停下来等待 |
-| **Autonomous** | 一个**人工代理** agent（`resources/personas/human-proxy.md`），只发出 fail-closed 的行首 `APPROVED` 或 `NEEDS_REVISION` | `create_goal` 无人值守地跑一轮轮迭代，直到 `DONE` 或 `BLOCKED` |
+| **Autonomous** | 一个**人工代理** agent（`resources/roles/human-proxy.md`），只发出 fail-closed 的行首 `APPROVED` 或 `NEEDS_REVISION` | `create_goal` 无人值守地跑一轮轮迭代，直到 `DONE` 或 `BLOCKED` |
 
 > [!TIP]
 > 在自主模式下刹车依然上膛：`stop.md`、迭代上限和诊断阶梯都还在，而 `BLOCKED`
@@ -394,7 +394,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 
 | 层 | 组件 |
 |---|---|
-| **identity** | `resources/personas/*.md` —— 架构师、开发者、qa、顾问、human-proxy、security-reviewer、文档等人设，带角色 + 边界。两个内置 skill 都把 `resources/` 声明为 `resourceBase`，因此每条 `personas/…` 与 `references/…` 路径都从宿主交给模型的那个基目录解析 |
+| **identity** | `resources/roles/*.md` —— 架构师、开发者、qa、顾问、human-proxy、security-reviewer、文档等人设，带角色 + 边界。两个内置 skill 都把 `resources/` 声明为 `resourceBase`，因此每条 `roles/…` 与 `references/…` 路径都从宿主交给模型的那个基目录解析 |
 | **odoo_connection** | `odoo-client.ts` —— JSON-RPC 认证、`execute_kw`、会话铸造 |
 | **executors** | `odoo_module`、`odoo_execute`、`odoo_validate`、`odoo_errors` |
 | **schemas** | 带必需章节的分阶段模板；`transition()` 会拒绝交付物缺少这些章节的阶段 |

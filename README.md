@@ -163,12 +163,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.4.0`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.5.0`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.4.0, published with a provenance attestation
+npm install dsh-odoo-sdd        # 0.5.0, published with a provenance attestation
 ```
 
 > [!IMPORTANT]
@@ -405,7 +405,7 @@ project with `odoo_setup mode=autonomy decision=...`:
 | Mode | Who answers the gates | How it ends |
 |---|---|---|
 | **Supervised** (default) | you, for each gated phase | you approve, or the run parks |
-| **Autonomous** | a **human-proxy** agent (`resources/personas/human-proxy.md`) that emits only a fail-closed line-start `APPROVED` or `NEEDS_REVISION` | `create_goal` runs unattended rounds until `DONE` or `BLOCKED` |
+| **Autonomous** | a **human-proxy** agent (`resources/roles/human-proxy.md`) that emits only a fail-closed line-start `APPROVED` or `NEEDS_REVISION` | `create_goal` runs unattended rounds until `DONE` or `BLOCKED` |
 
 > [!TIP]
 > In autonomous mode the brakes stay armed: `stop.md`, the iteration ceiling and
@@ -419,16 +419,16 @@ project with `odoo_setup mode=autonomy decision=...`:
 
 | Layer | Component |
 |---|---|
-| **identity** | `resources/personas/*.md` — architect, developer, qa, consultant, human-proxy, security-reviewer, documentation personas with role + limits. Both bundled skills declare `resources/` as their `resourceBase`, so every `personas/…` and `references/…` path resolves from the base the host hands the model |
+| **identity** | `resources/roles/*.md` — architect, developer, qa, consultant, human-proxy, security-reviewer, documentation roles, each with its limits. Both bundled skills declare `resources/` as their `resourceBase`, so every `roles/…` and `references/…` path resolves from the base the host hands the model |
 | **odoo_connection** | `odoo-client.ts` — JSON-RPC auth, `execute_kw`, session minting |
 | **executors** | `odoo_module`, `odoo_execute`, `odoo_validate`, `odoo_errors` |
 | **schemas** | staged templates with required sections; `transition()` rejects a phase whose deliverable lacks them |
 | **knowledge** | version-pinned Odoo pattern skills (delegated, verified by the skill) |
-| **skills** | `skills/*/SKILL.md` — the 5-phase development flow and the functional flow, auto-registered with the host on `apply()`. The body is the ROUTE (phases, owners, gates, exits); the per-phase WORK lives in `resources/personas/` and `resources/references/`, loaded on demand. Measured budgets keep the selected load from creeping back |
+| **skills** | `skills/*/SKILL.md` — the 5-phase development flow and the functional flow, auto-registered with the host on `apply()`. The body is the ROUTE (phases, owners, gates, exits); the per-phase WORK lives in `resources/roles/` and `resources/references/`, loaded on demand. Measured budgets keep the selected load from creeping back |
 | **logbook** | `kb.json` — decisions, discarded options, blockers; read before proposing |
 | **audit** | `.sdd/audit.jsonl` — sanitized append-only tool-activity log, written by a global `tools/result` listener (not just the Odoo tools) |
 | **rollback** | `.sdd/checkpoints/<id>/` — manifest + file snapshot + data journal, restorable per spec |
-| **security** | `odoo_security_scan` rules + the `security-reviewer` persona + the mandatory security interview in CLARIFY |
+| **security** | `odoo_security_scan` rules + the `security-reviewer` role + the mandatory security interview in CLARIFY |
 | **test** | `tests/smoke.mjs` — instance-free invariant suite (state machine, security, policy guard, RPC shapes, root/specs layout, real-Cordis host contract) + `tests/client.mjs` — browser bundle contract and settings-panel render |
 
 ---

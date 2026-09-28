@@ -350,7 +350,7 @@ export function scanDocs(moduleDir: string, options: DocsScanOptions = {}): Docs
 			file: indexRel,
 			line: 0,
 			message: "No static/description/index.html: the Apps page has no visual presentation.",
-			hint: "Describe the value for decision makers using Odoo's CSS classes (see the documentation persona).",
+			hint: "Describe the value for decision makers using Odoo's CSS classes (see the documentation role).",
 		});
 	} else {
 		const html = readTextSafe(indexPath) ?? "";

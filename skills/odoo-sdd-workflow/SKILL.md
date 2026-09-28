@@ -11,7 +11,7 @@ single source of truth and immutable: **the code adapts to the spec, the spec
 never adapts to the code**.
 
 This body is the ROUTE: what the phases are, who owns each one, what is gated and
-how a run closes. The WORK of a phase lives in the persona that owns it — load
+how a run closes. The WORK of a phase lives in the role that owns it — load
 that file before executing the phase, never improvise its role.
 
 ## Where files live (never assume — it is reported)
@@ -83,19 +83,19 @@ workflow: close or park the spec honestly and open a `functional` spec.
 
 ## Who owns which phase
 
-Load the persona file as the subagent's constitution before that phase runs. A
-missing persona file (broken package) ⇒ degrade to an inline role prompt; never
-run a role without its limits.
+Load the role file as the subagent's constitution before that phase runs. A
+missing role file (broken package) ⇒ degrade to an inline role prompt; never run
+a role without its limits.
 
 | Phase | Owner | What it produces |
 |---|---|---|
 | CLARIFY | you, with the developer | `mode`, `licensed`, the security interview |
 | READ_SPEC | you, with the developer | `spec.md` (context, numbered ACs, constraints, target version) |
-| ARCHITECTURE | `personas/architect.md` | `architecture.md` + `test-plan.md` |
-| WRITE_CODE | `personas/developer.md` | the module: code, views, security, documentation |
-| VERIFY | `personas/qa.md` (+ `personas/security-reviewer.md`, `personas/documentation.md`) | per-AC evidence, `security-report.md`, `docs-report.md` |
-| FIX_LOOP | `personas/consultant.md` when a diagnosis is owed | the recorded root cause and the fix plan |
-| any gate | `personas/human-proxy.md` | the gate verdict in AUTONOMOUS mode only |
+| ARCHITECTURE | `roles/architect.md` | `architecture.md` + `test-plan.md` |
+| WRITE_CODE | `roles/developer.md` | the module: code, views, security, documentation |
+| VERIFY | `roles/qa.md` (+ `roles/security-reviewer.md`, `roles/documentation.md`) | per-AC evidence, `security-report.md`, `docs-report.md` |
+| FIX_LOOP | `roles/consultant.md` when a diagnosis is owed | the recorded root cause and the fix plan |
+| any gate | `roles/human-proxy.md` | the gate verdict in AUTONOMOUS mode only |
 
 **Tooling prerequisites (verify, then suggest)**: an Odoo pattern skill
 (version-pinned) helps for phase 3 — if none is installed, SUGGEST one and
@@ -114,9 +114,9 @@ Each row is a phase: its promise, and the file that owns the how.
 |---|---|---|
 | 0 | `CLARIFY` | `sdd_phase status`; the pipeline CANNOT leave it until `mode` + `licensed` are confirmed (`sdd_phase clarify`) → `advance next_phase=READ_SPEC`. In SUPERVISED mode interview the developer (`ask_user_question`): create or bug, licensing, the security questions, and an explicit "proceed?". In AUTONOMOUS mode detect `mode`/`licensed` from the request; if they are not confidently determinable, `advance next_phase=BLOCKED` — never invent them. |
 | 1 | `READ_SPEC` | Onboarding once per project (`odoo_setup mode=check` → configure now / later / skip, and `mode=authorize` for the target, and `mode=autonomy` for delegation). Write `spec.md` with these sections (the runtime refuses the advance without them): `## Context`, `## Acceptance Criteria` (numbered `- [ ] AC1: …` — the closing gate matches them against `test-plan.md` row by row), `## Constraints`, `## Target Odoo Version`. **No implementation code in this phase.** Gate: `mark_spec_loaded` → `advance next_phase=ARCHITECTURE` with the host's approval (native when available). |
-| 2 | `ARCHITECTURE` | `search before designing` — Odoo Community source for the target version, Enterprise only if licensed, and ALWAYS the OCA repositories. `personas/architect.md` owns the required sections (`## Models`, `## Views`, `## Tours`, `## Demo data`, `## Security`, `## Manifest`, `## Reports`, `## Documentation`), the per-model view-type decision, the reports, the design interview and the OCA module skeleton (`README.rst` + `static/description/index.html`) that `personas/documentation.md` writes. The `## Security` decision and a real (non-comment) `## Documentation` decision are the two content gates this phase enforces. Derive `test-plan.md`, one row per AC. Gate: `advance next_phase=WRITE_CODE` with approval. |
-| 3 | `WRITE_CODE` | `personas/developer.md` implements the approved design (English code/docstrings, version-pinned syntax, OCA ordering). Static gates before touching the instance: `odoo_validate`, `odoo_docs operation=check`, and the repo's own pre-commit/pylint/ruff when present. Confirm the instance sees the code (`odoo_module operation=info`). **Checkpoint before mutating** (the guard refuses otherwise). Then `advance next_phase=VERIFY`. |
-| 4 | `VERIFY` | `personas/qa.md` walks the pyramid in ascending order — static, server (`odoo_module install|upgrade`, `odoo_errors` on traceback), data/RPC (`odoo_execute`: reads first, `fields_get` before asserting, `read_group` for aggregates, `context` on multi-company), security review, UI. Every AC row must read `pass` before `sdd_phase succeed`. Any failure ⇒ `sdd_phase fail` ⇒ phase 5. |
+| 2 | `ARCHITECTURE` | `search before designing` — Odoo Community source for the target version, Enterprise only if licensed, and ALWAYS the OCA repositories. `roles/architect.md` owns the required sections (`## Models`, `## Views`, `## Tours`, `## Demo data`, `## Security`, `## Manifest`, `## Reports`, `## Documentation`), the per-model view-type decision, the reports, the design interview and the OCA module skeleton (`README.rst` + `static/description/index.html`) that `roles/documentation.md` writes. The `## Security` decision and a real (non-comment) `## Documentation` decision are the two content gates this phase enforces. Derive `test-plan.md`, one row per AC. Gate: `advance next_phase=WRITE_CODE` with approval. |
+| 3 | `WRITE_CODE` | `roles/developer.md` implements the approved design (English code/docstrings, version-pinned syntax, OCA ordering). Static gates before touching the instance: `odoo_validate`, `odoo_docs operation=check`, and the repo's own pre-commit/pylint/ruff when present. Confirm the instance sees the code (`odoo_module operation=info`). **Checkpoint before mutating** (the guard refuses otherwise). Then `advance next_phase=VERIFY`. |
+| 4 | `VERIFY` | `roles/qa.md` walks the pyramid in ascending order — static, server (`odoo_module install|upgrade`, `odoo_errors` on traceback), data/RPC (`odoo_execute`: reads first, `fields_get` before asserting, `read_group` for aggregates, `context` on multi-company), security review, UI. Every AC row must read `pass` before `sdd_phase succeed`. Any failure ⇒ `sdd_phase fail` ⇒ phase 5. |
 | 5 | `FIX_LOOP` | Respect `requireDiagnosis`: when the ladder trips, the retry is refused until the analysis is RECORDED (`sdd_phase operation=diagnose`). Without one: analyze against `architecture.md`, fix the defective fragment (**never** the spec), re-run static gates, return to phase 4. Prefer `sdd_phase operation=rollback` over layering another guess on a broken state. `BLOCKED` or ceiling ⇒ stop and hand over. |
 
 **When the design itself is wrong**, do not quietly rewrite it: the spec is

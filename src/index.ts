@@ -504,7 +504,7 @@ const ODOO_SDD_SKILL_NAME = "odoo-sdd-workflow";
  * BOTH skills point at the shared `resources/` folder, and that is deliberate:
  * the host tells the model "resolve relative paths mentioned by this skill
  * against the base directory", so a reference only works if it resolves FROM
- * THAT BASE. The personas used to live at `agents/` while the technical skill
+ * THAT BASE. The role files used to live at `agents/` while the technical skill
  * declared `agents` as its base, which made every `agents/*.md` reference
  * resolve to `agents/agents/*.md` — the paths happened to work only because the
  * process cwd was the repository root. One base, one shape of reference.

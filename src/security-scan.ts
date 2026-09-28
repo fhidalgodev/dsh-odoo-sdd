@@ -9,7 +9,7 @@
  * of guessing.
  *
  * It is deliberately heuristic: every finding carries the rule id and a hint,
- * and the caller decides (with the security-reviewer persona) whether it is a
+ * and the caller decides (with the security-reviewer role) whether it is a
  * real defect or an accepted exception.
  *
  * @module dsh-odoo-sdd/security-scan

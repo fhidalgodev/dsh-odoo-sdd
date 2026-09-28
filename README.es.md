@@ -164,12 +164,12 @@ bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
 
 - **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
 - Acepta cualquier spec de pnpm, así que podés fijar una versión:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.4.0`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.5.0`.
 
 ¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.4.0, publicada con attestation de provenance
+npm install dsh-odoo-sdd        # 0.5.0, publicada con attestation de provenance
 ```
 
 > [!IMPORTANT]
@@ -411,7 +411,7 @@ con `odoo_setup mode=autonomy decision=...`:
 | Modo | Quién responde las compuertas | Cómo termina |
 |---|---|---|
 | **Supervisado** (default) | vos, en cada fase con compuerta | aprobás, o la ejecución se detiene |
-| **Autónomo** | un agente **proxy humano** (`resources/personas/human-proxy.md`) que solo emite un `APPROVED` fail-closed de inicio de línea o `NEEDS_REVISION` | `create_goal` corre rondas sin atención hasta `DONE` o `BLOCKED` |
+| **Autónomo** | un agente **proxy humano** (`resources/roles/human-proxy.md`) que solo emite un `APPROVED` fail-closed de inicio de línea o `NEEDS_REVISION` | `create_goal` corre rondas sin atención hasta `DONE` o `BLOCKED` |
 
 > [!TIP]
 > En modo autónomo los frenos siguen armados: `stop.md`, el techo de iteraciones
@@ -425,7 +425,7 @@ con `odoo_setup mode=autonomy decision=...`:
 
 | Capa | Componente |
 |---|---|
-| **identity** | `resources/personas/*.md` — personas arquitecto, desarrollador, QA, consultor, proxy humano, security-reviewer y documentación (rol + límites). Ambos skills declarados declaran `resources/` como su `resourceBase`, así que cada ruta `personas/…` y `references/…` resuelve desde la base que el host le entrega al modelo |
+| **identity** | `resources/roles/*.md` — roles arquitecto, desarrollador, QA, consultor, proxy humano, security-reviewer y documentación (rol + límites). Ambos skills declarados declaran `resources/` como su `resourceBase`, así que cada ruta `roles/…` y `references/…` resuelve desde la base que el host le entrega al modelo |
 | **odoo_connection** | `odoo-client.ts` — JSON-RPC auth, `execute_kw`, sesión |
 | **executors** | `odoo_module`, `odoo_execute`, `odoo_validate`, `odoo_errors` |
 | **schemas** | plantillas con secciones obligatorias; `transition()` rechaza una fase cuyo entregable carezca de ellas |
@@ -434,7 +434,7 @@ con `odoo_setup mode=autonomy decision=...`:
 | **logbook** | `kb.json` — decisiones, descartadas, blockers; se lee antes de proponer |
 | **audit** | `.sdd/audit.jsonl` — log de actividad append-only sanitizado, escrito por un listener global `tools/result` (no solo por las tools de Odoo) |
 | **rollback** | `.sdd/checkpoints/<id>/` — manifest + snapshot de archivos + journal de datos, restaurable por spec |
-| **security** | reglas de `odoo_security_scan` + la persona `security-reviewer` + la entrevista de seguridad obligatoria en CLARIFY |
+| **security** | reglas de `odoo_security_scan` + el rol `security-reviewer` + la entrevista de seguridad obligatoria en CLARIFY |
 | **test** | `tests/smoke.mjs` — suite de invariantes sin instancia (máquina de estados, seguridad, guard de política, formas RPC, raíz/disposición de specs, contrato de host con Cordis real) + `tests/client.mjs` — contrato del bundle de navegador y render del panel de ajustes |
 
 ---

@@ -3830,6 +3830,73 @@ console.log("== per-session isolation (two projects, one plugin) ==");
 		cleared.state.specId === null && cleared.source === "session",
 	);
 
+	// ---- strict per-session scope (adoptProjectPointerHint) ----------------
+	// The hint is what lets a new session continue where the project left off, and
+	// it is also the only remaining way a session could authorize against a spec it
+	// never opened. Turning it off must remove that possibility entirely.
+	{
+		const strictProj = join(dir, "strict-scope");
+		mkdirSync(join(strictProj, "specs", "001-strict"), { recursive: true });
+		cps.writeActiveState(strictProj, { specId: "001-strict", phase: "WRITE_CODE" });
+
+		const withHint = cps.resolveActiveState(strictProj, "session-s", () => true, true);
+		check(
+			"with the hint ON, a session without a pointer adopts the project summary",
+			withHint.state.specId === "001-strict" && withHint.source === "project",
+		);
+		const strict = cps.resolveActiveState(strictProj, "session-s", () => true, false);
+		check(
+			"with the hint OFF, the same session has NO spec (strict scope)",
+			strict.state.specId === null && strict.source === "none",
+			`${String(strict.source)}/${String(strict.state.specId)}`,
+		);
+		check(
+			"...and it is not reported as a hint either",
+			strict.hinted === false,
+		);
+		// Strict scope must not disable the feature it guards: a session that names
+		// its own spec still gets it, hint or not.
+		cps.writeActiveStateFor(strictProj, "session-s", { specId: "001-strict", phase: "WRITE_CODE" });
+		const ownsIt = cps.resolveActiveState(strictProj, "session-s", () => true, false);
+		check(
+			"a session with its OWN pointer is unaffected by the strict switch",
+			ownsIt.state.specId === "001-strict" && ownsIt.source === "session",
+		);
+
+		// End to end: the guard obeys the switch, so the option is not decoration.
+		const strictCtx = { tools: new Map(), guard: null };
+		plugin.apply(
+			{
+				tools: { register: (tool) => strictCtx.tools.set(tool.name, tool), guard: (g) => { strictCtx.guard = g; return () => {}; } },
+				on: () => () => {},
+				approval: { request: async () => "allowed-once" },
+			},
+			{ projectRoot: strictProj, adoptProjectPointerHint: false },
+		);
+		const strictEdit = { name: "write", arguments: { file_path: join(strictProj, "m.py"), content: "x\n" } };
+		const deniedStrict = strictCtx.guard({ ...strictEdit, agent: { id: "session-brand-new" } });
+		check(
+			"the guard denies a fresh session when the hint is off, even with a WRITE_CODE summary",
+			typeof deniedStrict === "string" && /no spec/i.test(deniedStrict),
+			String(deniedStrict).slice(0, 110),
+		);
+		// The switch is configuration, and configuration is REPORTED: a policy that
+		// cannot be read back is a policy nobody can audit.
+		const strictCfgTool = strictCtx.tools.get("odoo_config");
+		const strictRead = await strictCfgTool.execute({ mode: "read" }, { agent: { id: "session-brand-new" } });
+		check(
+			"the strict switch is part of the effective configuration reported by odoo_config",
+			strictRead.ok === true && strictRead.config.adoptProjectPointerHint === false,
+			`adoptProjectPointerHint=${String(strictRead.config?.adoptProjectPointerHint)}`,
+		);
+		const hintRead = await cfg.execute({ mode: "read" });
+		check(
+			"...and it defaults to true when nobody set it",
+			hintRead.config.adoptProjectPointerHint === true,
+			`adoptProjectPointerHint=${String(hintRead.config?.adoptProjectPointerHint)}`,
+		);
+	}
+
 	// An unusable session id cannot escape the pointer directory, and does not
 	// silently share another session's file either.
 	for (const bad of ["../evil", "a/b", "..", "", "x".repeat(200)]) {

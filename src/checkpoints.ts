@@ -374,12 +374,15 @@ export type SpecExists = (specId: string) => boolean;
  * @param projectRoot - workspace root.
  * @param sessionId - the calling session's identifier, when it has one.
  * @param specExists - predicate telling whether a spec id is still on disk.
+ * @param adoptHint - when false, the project summary is not consulted at all, so a
+ *   session starts with no spec until it names one (strict per-session scope).
  * @returns the pointer, its provenance, and whether it answered merely as a hint.
  */
 export function resolveActiveState(
 	projectRoot: string,
 	sessionId: string | undefined,
 	specExists: SpecExists,
+	adoptHint = true,
 ): ResolvedActiveState {
 	const own = parseActiveFile(activeSessionPath(projectRoot, sessionId));
 	if (own !== null) {
@@ -388,7 +391,7 @@ export function resolveActiveState(
 		// deliberately cleared its own pointer.
 		return { state: own, source: "session", sessionId, hinted: false };
 	}
-	const project = parseActiveFile(join(sddDir(projectRoot), ACTIVE_FILE));
+	const project = adoptHint ? parseActiveFile(join(sddDir(projectRoot), ACTIVE_FILE)) : null;
 	if (project !== null && project.specId !== null) {
 		const stamp = Date.parse(project.updatedAt);
 		const fresh = Number.isFinite(stamp) && Date.now() - stamp <= PROJECT_HINT_TTL_MS;

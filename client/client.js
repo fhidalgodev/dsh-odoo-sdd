@@ -42,6 +42,10 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"autonomous": "Autónomo",
 		"license": "Licencia",
 		"licenseHint": "OCA/Comunidad se busca siempre, en ambos casos.",
+		"adoptHint": "Una sesión nueva adopta la última spec del proyecto como pista",
+		"adoptHintHint": "Con Sí (por defecto), una sesión que aún no tiene spec propia continúa donde quedó el "
+			+ "proyecto, siempre que la pista sea reciente y la spec siga existiendo. Con No, cada sesión nace sin "
+			+ "spec hasta que la declare: así dos sesiones nunca pueden autorizar cambios contra la spec de la otra.",
 		"licensePerSpec": "La edición de Odoo no es un ajuste del plugin: se responde por spec en CLARIFY "
 			+ "(operation=clarify licensed=community|enterprise), porque un mismo workspace puede tener "
 			+ "proyectos EE y CE a la vez. No hay edición global.",
@@ -114,6 +118,10 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"autonomous": "Autonomous",
 		"license": "Licensing",
 		"licenseHint": "OCA/Community is always searched, in both cases.",
+		"adoptHint": "A new session adopts the project's last spec as a hint",
+		"adoptHintHint": "With Yes (default), a session that has no pointer of its own continues where the project "
+			+ "left off, as long as the hint is fresh and the spec still exists. With No, every session starts with "
+			+ "no spec until it declares one: two sessions then can never authorize changes against each other's spec.",
 		"licensePerSpec": "The Odoo edition is not a plugin setting: it is answered per spec in CLARIFY "
 			+ "(operation=clarify licensed=community|enterprise), because one workspace can hold EE and CE "
 			+ "projects at the same time. There is no workspace-wide edition.",
@@ -301,6 +309,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			enterpriseRepoPath: asStr(s.enterpriseRepoPath, ""),
 			requireCheckpointBeforeMutation: asBool(s.requireCheckpointBeforeMutation, true),
 			requireSpecForChanges: asBool(s.requireSpecForChanges, true),
+			adoptProjectPointerHint: asBool(s.adoptProjectPointerHint, true),
 			securityReviewRequired: asBool(s.securityReviewRequired, true),
 			securityInterviewRequired: asBool(s.securityInterviewRequired, true),
 			auditAllTools: asBool(s.auditAllTools, true),
@@ -326,6 +335,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			enterprisePath: snap.enterpriseRepoPath,
 			requireCheckpointBeforeMutation: snap.requireCheckpointBeforeMutation,
 			requireSpecForChanges: snap.requireSpecForChanges,
+			adoptProjectPointerHint: snap.adoptProjectPointerHint,
 			securityReviewRequired: snap.securityReviewRequired,
 			securityInterviewRequired: snap.securityInterviewRequired,
 			auditAllTools: snap.auditAllTools,
@@ -465,6 +475,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 				enterpriseRepoPath: form.enterpriseUse === "path" ? form.enterprisePath : "",
 				requireCheckpointBeforeMutation: form.requireCheckpointBeforeMutation === true,
 				requireSpecForChanges: form.requireSpecForChanges === true,
+				adoptProjectPointerHint: form.adoptProjectPointerHint === true,
 				securityReviewRequired: form.securityReviewRequired === true,
 				securityInterviewRequired: form.securityInterviewRequired === true,
 				auditAllTools: form.auditAllTools === true,
@@ -527,10 +538,11 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		};
 
 		/** One labelled policy row. */
-		var policyRow = function (label, ctl) {
+		var policyRow = function (label, ctl, note) {
 			return h("div", { className: "odoo-sdd-field" },
 				h("span", { className: "odoo-sdd-label" }, label),
-				ctl);
+				ctl,
+				note ? h("p", { className: "odoo-sdd-sub" }, note) : null);
 		};
 
 		var repo = function (which) {
@@ -705,6 +717,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			h(SectionCard, { title: t("policy"), hint: t("policyHint") },
 				policyRow(t("checkpointRequired"), boolSeg("requireCheckpointBeforeMutation", form.requireCheckpointBeforeMutation)),
 				policyRow(t("specRequired"), boolSeg("requireSpecForChanges", form.requireSpecForChanges)),
+				policyRow(t("adoptHint"), boolSeg("adoptProjectPointerHint", form.adoptProjectPointerHint), t("adoptHintHint")),
 				policyRow(t("securityReview"), boolSeg("securityReviewRequired", form.securityReviewRequired)),
 				policyRow(t("securityInterview"), boolSeg("securityInterviewRequired", form.securityInterviewRequired)),
 				policyRow(t("auditAll"), boolSeg("auditAllTools", form.auditAllTools)),

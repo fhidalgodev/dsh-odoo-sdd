@@ -163,12 +163,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.7.1`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.7.2`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.7.1, published with a provenance attestation
+npm install dsh-odoo-sdd        # 0.7.2, published with a provenance attestation
 ```
 
 > [!IMPORTANT]
@@ -511,6 +511,9 @@ has a way back and a way to prove what happened.
   spec at all. Checkpoint *snapshots* stay shared (they are the project's), while
   which checkpoint is *your* rollback target is per session; dropping one clears
   the reference in every pointer that held it.
+  Set **`adoptProjectPointerHint: false`** to remove the hint entirely: every
+  session then starts with no spec until it declares one (`sdd_phase status
+  spec_id=…`), which is the strictest reading of "one session, one spec".
 - **File rollback.** `sdd_checkpoint restore` puts the snapshotted files back
   byte-for-byte; `sdd_phase rollback` returns the spec to the phase its MODE
   works in — `WRITE_CODE`, or `APPLY_CONFIG` for a functional spec — with the

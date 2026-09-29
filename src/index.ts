@@ -212,6 +212,7 @@ export const Config = z.object({
 	autonomy: markVolatile(z.string()),
 	requireCheckpointBeforeMutation: markVolatile(z.boolean()),
 	requireSpecForChanges: markVolatile(z.boolean()),
+	adoptProjectPointerHint: markVolatile(z.boolean()),
 	securityReviewRequired: markVolatile(z.boolean()),
 	securityInterviewRequired: markVolatile(z.boolean()),
 	auditAllTools: markVolatile(z.boolean()),
@@ -249,6 +250,12 @@ interface OdooSddConfig {
 	autonomy?: string;
 	/** No change — instance mutation or project file edit — without a spec that authorizes it, or a session waiver. */
 	requireSpecForChanges?: boolean;
+	/**
+	 * Let a session with no pointer of its own adopt the project's last spec as a
+	 * hint. On by default for continuity; turn it off to require every session to
+	 * declare its own spec before anything authorizes a change.
+	 */
+	adoptProjectPointerHint?: boolean;
 	/** Refuse mutating calls until a checkpoint exists (fail-closed). */
 	requireCheckpointBeforeMutation?: boolean;
 	/** Require a clean security review before DONE. */
@@ -739,6 +746,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		autonomy: config.autonomy ?? "supervised",
 		requireCheckpointBeforeMutation: config.requireCheckpointBeforeMutation ?? true,
 		requireSpecForChanges: config.requireSpecForChanges ?? true,
+		adoptProjectPointerHint: config.adoptProjectPointerHint ?? true,
 		securityReviewRequired: config.securityReviewRequired ?? true,
 		securityInterviewRequired: config.securityInterviewRequired ?? true,
 		auditAllTools: config.auditAllTools ?? true,
@@ -2334,6 +2342,13 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					".",
 			},
 			requireCheckpointBeforeMutation: { type: "boolean", description: "Refuse mutations until a checkpoint exists (fail-closed)." },
+			adoptProjectPointerHint: {
+				type: "boolean",
+				description:
+					"Let a session with no pointer of its own adopt the project's last spec as a hint (only when it is " +
+					"fresh and the spec still exists). Default true. Set false for strict per-session scope: a session " +
+					"then has no spec until it names one, so two sessions can never authorize against each other's spec.",
+			},
 			securityReviewRequired: { type: "boolean", description: "Require a clean security review before DONE." },
 			securityInterviewRequired: { type: "boolean", description: "Require the security interview (groups/ACL/rules) before ARCHITECTURE." },
 			auditAllTools: { type: "boolean", description: "Record every tool call of the run in .sdd/audit.jsonl." },
@@ -2369,6 +2384,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							licensed: { type: "string", description: "DEPRECATED legacy key, reported only." },
 							requireCheckpointBeforeMutation: { type: "boolean", required: true },
 							requireSpecForChanges: { type: "boolean" },
+							adoptProjectPointerHint: { type: "boolean" },
 							securityReviewRequired: { type: "boolean", required: true },
 							securityInterviewRequired: { type: "boolean", required: true },
 							auditAllTools: { type: "boolean", required: true },
@@ -2420,6 +2436,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			licensed?: string;
 			requireCheckpointBeforeMutation?: boolean;
 			requireSpecForChanges?: boolean;
+			adoptProjectPointerHint?: boolean;
 			securityReviewRequired?: boolean;
 			securityInterviewRequired?: boolean;
 			auditAllTools?: boolean;
@@ -2448,6 +2465,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					...(typeof data["licensed"] === "string" ? { licensed: data["licensed"] } : {}),
 					requireCheckpointBeforeMutation: typeof data["requireCheckpointBeforeMutation"] === "boolean" ? data["requireCheckpointBeforeMutation"] : true,
 					requireSpecForChanges: typeof data["requireSpecForChanges"] === "boolean" ? data["requireSpecForChanges"] : true,
+					adoptProjectPointerHint: typeof data["adoptProjectPointerHint"] === "boolean" ? data["adoptProjectPointerHint"] : true,
 					securityReviewRequired: typeof data["securityReviewRequired"] === "boolean" ? data["securityReviewRequired"] : true,
 					securityInterviewRequired: typeof data["securityInterviewRequired"] === "boolean" ? data["securityInterviewRequired"] : true,
 					auditAllTools: typeof data["auditAllTools"] === "boolean" ? data["auditAllTools"] : true,
@@ -2554,6 +2572,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.autonomy !== undefined) updates["autonomy"] = args.autonomy;
 			if (args.requireCheckpointBeforeMutation !== undefined) updates["requireCheckpointBeforeMutation"] = args.requireCheckpointBeforeMutation;
 			if (args.requireSpecForChanges !== undefined) updates["requireSpecForChanges"] = args.requireSpecForChanges;
+			if (args.adoptProjectPointerHint !== undefined) updates["adoptProjectPointerHint"] = args.adoptProjectPointerHint;
 			if (args.securityReviewRequired !== undefined) updates["securityReviewRequired"] = args.securityReviewRequired;
 			if (args.securityInterviewRequired !== undefined) updates["securityInterviewRequired"] = args.securityInterviewRequired;
 			if (args.auditAllTools !== undefined) updates["auditAllTools"] = args.auditAllTools;
@@ -2670,6 +2689,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			autonomy: asString(merged["autonomy"], config.autonomy ?? "supervised"),
 			requireCheckpointBeforeMutation: asBool(merged["requireCheckpointBeforeMutation"], config.requireCheckpointBeforeMutation ?? true),
 			requireSpecForChanges: asBool(merged["requireSpecForChanges"], config.requireSpecForChanges ?? true),
+			adoptProjectPointerHint: asBool(merged["adoptProjectPointerHint"], config.adoptProjectPointerHint ?? true),
 			securityReviewRequired: asBool(merged["securityReviewRequired"], config.securityReviewRequired ?? true),
 			securityInterviewRequired: asBool(merged["securityInterviewRequired"], config.securityInterviewRequired ?? true),
 			auditAllTools: asBool(merged["auditAllTools"], config.auditAllTools ?? true),
@@ -3306,7 +3326,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			lines.push(`- projectRoot=${cfg.projectRoot} (source: ${cfg.rootSource})`);
 			lines.push(`- specs: ${describeSpecsLocation({ projectRoot: cfg.projectRoot, specsMode: cfg.specsMode, specsDir: cfg.specsDir, specsRoot: cfg.specsRoot })}`);
 			lines.push(`- autonomy=${cfg.autonomy}`);
-			lines.push(`- requireSpecForChanges=${cfg.requireSpecForChanges}`);
+			lines.push(
+				`- requireSpecForChanges=${cfg.requireSpecForChanges} ` +
+					`adoptProjectPointerHint=${cfg.adoptProjectPointerHint}`,
+			);
 			lines.push(`- allowlist=${JSON.stringify(cfg.executeAllowlist)}`);
 			if (cfg.methodAllowlist.length > 0) lines.push(`- method allowlist=${JSON.stringify(cfg.methodAllowlist)}`);
 			lines.push(`- communityRepo=${cfg.communityRepoPath || cfg.communityRepoUrl}`);
@@ -3641,7 +3664,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				return false;
 			}
 		};
-		return resolveActiveState(cfg.projectRoot, sessionIdOf(exec), specExists);
+		// `adoptProjectPointerHint=false` is the strict mode: a session without a
+		// pointer of its own gets NO spec, so it can never authorize against the last
+		// thing another session happened to touch.
+		return resolveActiveState(cfg.projectRoot, sessionIdOf(exec), specExists, cfg.adoptProjectPointerHint);
 	};
 
 	/**

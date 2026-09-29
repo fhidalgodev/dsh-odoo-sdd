@@ -361,6 +361,8 @@ check(
 // ---- host-contract edges: absent service, unserved namespace, disposal ----
 // These are the cases that decide whether the panel appears AT ALL, so they get
 // their own probes instead of riding on the happy-path stub above.
+const count = (haystack, needle) => haystack.split(needle).length - 1;
+
 console.log("== host contract edges (configForms presence) ==");
 {
 	/** A context with just enough surface for `apply` to reach the guard. */
@@ -440,6 +442,34 @@ console.log("== host contract edges (configForms presence) ==");
 	check("the registration is wrapped in ctx.effect (disposal is owned)", typeof effectDisposer === "function");
 	effectDisposer();
 	check("disposing the effect disposes the whileServed registration", disposed === true);
+}
+
+// ---- the strict-scope switch is a REAL control, not a label -------------
+{
+	const source = readFileSync(fileURLToPath(new URL("../client/client.js", import.meta.url)), "utf8");
+	check(
+		"the panel offers the adoptProjectPointerHint switch",
+		/boolSeg\("adoptProjectPointerHint"/.test(source),
+	);
+	check(
+		"...wired to read, carry and WRITE the value (a control that only renders is a lie)",
+		/adoptProjectPointerHint: asBool\(s\.adoptProjectPointerHint/.test(source) &&
+			/adoptProjectPointerHint: snap\.adoptProjectPointerHint/.test(source) &&
+			/adoptProjectPointerHint: form\.adoptProjectPointerHint === true/.test(source),
+	);
+	check(
+		"...and it explains what turning it off buys you",
+		/adoptHintHint/.test(source) && /against each other/.test(source),
+	);
+	check(
+		"the explanation is translated in both languages",
+		count(source, "\"adoptHintHint\":") === 2,
+		String(count(source, "\"adoptHintHint\":")),
+	);
+	check(
+		"...and the panel actually RENDERS it (a defined string nobody shows is dead text)",
+		/policyRow\(t\("adoptHint"\), boolSeg\("adoptProjectPointerHint", form\.adoptProjectPointerHint\), t\("adoptHintHint"\)\)/.test(source),
+	);
 }
 
 // ---- the retired edition control must not come back ----

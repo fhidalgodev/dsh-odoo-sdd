@@ -154,12 +154,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.7.1`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.7.2`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.7.1，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.7.2，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]
@@ -562,10 +562,19 @@ DSH 能跑的地方插件就能跑，并声称支持 **Linux、macOS 和 Windows
 │   ├── audit.jsonl             # 每一次工具调用，已脱敏
 │   ├── setup-state.json        # 上手引导 + 委派决定
 │   ├── active/<sessionId>.json # 本会话的指针（spec、阶段、checkpoint）
-│   ├── active.json             # 项目最近使用的 spec（供新会话参考）
+│   ├── active.json             # 项目最近使用的 spec（参考用；见 adoptProjectPointerHint）
 │   └── checkpoints/<id>/       # manifest + 文件快照 + 数据日志
 └── specs/<NNN>-<slug>/         # 或者 central 文件夹
 ```
+
+**spec 指针属于「会话」，不属于项目。** 每个对话写入自己的
+`.sdd/active/<sessionId>.json`，因此同一个项目上打开的两个会话不再互相覆盖，
+也无法用对方的 spec 来授权改动。`.sdd/active.json` 仅保留为*项目最近使用的
+spec*：没有自己指针的会话，在它足够新（< 12 小时）且该 spec 仍然存在时，会把它
+当作**提示**采用。若要严格范围 —— 每个会话在声明之前都没有 spec
+（`sdd_phase status spec_id=…`）—— 请在面板或 `odoo_config` 中设置
+**`adoptProjectPointerHint: false`**。checkpoint 的*快照*仍属于项目；而哪个是
+你的回滚目标是每个会话各自的，删除时会清除所有指向它的指针引用。
 
 > [!TIP]
 > 同时打开多个项目时，读一读每个工具结果都带的那行

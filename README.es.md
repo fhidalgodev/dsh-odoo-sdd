@@ -164,12 +164,12 @@ bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
 
 - **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
 - Acepta cualquier spec de pnpm, así que podés fijar una versión:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.7.1`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.7.2`.
 
 ¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.7.1, publicada con attestation de provenance
+npm install dsh-odoo-sdd        # 0.7.2, publicada con attestation de provenance
 ```
 
 > [!IMPORTANT]
@@ -622,10 +622,22 @@ carpeta — una carpeta ajena nunca se adopta. `.sdd/` siempre queda en el proye
 │   ├── audit.jsonl             # cada llamada, sanitizada
 │   ├── setup-state.json        # decisión de onboarding + delegación
 │   ├── active/<sessionId>.json # puntero de ESTA sesión (spec, fase, checkpoint)
-│   ├── active.json             # última spec del proyecto (pista para sesiones nuevas)
+│   ├── active.json             # última spec del proyecto (pista; ver adoptProjectPointerHint)
 │   └── checkpoints/<id>/       # manifest + snapshot + journal de datos
 └── specs/<NNN>-<slug>/         # o la carpeta central
 ```
+
+**El puntero de spec es de la SESIÓN, no del proyecto.** Cada chat escribe
+`.sdd/active/<sessionId>.json`, así que dos sesiones abiertas sobre el mismo
+proyecto ya no se pisan ni pueden autorizar cambios contra la spec de la otra.
+`.sdd/active.json` queda solo como *última spec del proyecto*: una sesión sin
+puntero propio la adopta como **pista** cuando es reciente (< 12 h) y la spec
+sigue existiendo. Si preferís alcance estricto —cada sesión nace sin spec hasta
+que la declare con `sdd_phase status spec_id=…`— poné
+**`adoptProjectPointerHint: false`** en el panel o con `odoo_config`. Los
+*snapshots* de checkpoint siguen siendo del proyecto; cuál es tu objetivo de
+rollback es de cada sesión, y al borrar uno se limpia la referencia en todos los
+punteros que la tenían.
 
 > [!TIP]
 > Con varios proyectos abiertos, leé la línea `Project root: … [procedencia]` que

@@ -163,12 +163,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.6.2`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.7.0`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.6.2, published with a provenance attestation
+npm install dsh-odoo-sdd        # 0.7.0, published with a provenance attestation
 ```
 
 > [!IMPORTANT]
@@ -216,9 +216,30 @@ Or do it by hand — the plugin looks for the first of these that exists:
 | # | Location | Scope |
 |---|---|---|
 | 1 | `ODOO_SDD_ENV_FILE` | explicit environment override |
-| 2 | `<project>/.sdd/.env` | project scope, plugin-owned hidden dir |
-| 3 | `~/.config/dsh-odoo-sdd/.env` (honors `$XDG_CONFIG_HOME`) | user scope — one set of dev credentials for every project |
-| 4 | `<project>/.env` | legacy location, still supported (reported as legacy) |
+| 2 | `<project>/.sdd/instances/<name>.env` | **one target per file**, the active instance |
+| 3 | `<project>/.sdd/.env` | single-target layout (also listed as the instance `default`) |
+| 4 | `~/.config/dsh-odoo-sdd/.env` (honors `$XDG_CONFIG_HOME`) | user scope — one set of dev credentials for every project |
+| 5 | `<project>/.env` | legacy location, still supported (reported as legacy) |
+
+**Several targets in one project.** A workspace that needs a local CE server, a
+staging EE server and a client's instance no longer overwrites its only `.env`:
+each target gets its own file under `.sdd/instances/`, and one is active.
+
+```bash
+odoo_setup mode=instance instance=list                      # what exists, non-secret identity
+odoo_setup mode=instance instance=add name=staging url=https://stg.example.com db=stg username=ci
+# fill ODOO_PASSWORD in .sdd/instances/staging.env by hand, then:
+odoo_setup mode=authorize                                   # grants THIS target
+odoo_setup mode=instance instance=use name=staging           # activate it
+odoo_setup mode=instance instance=remove name=staging        # needs confirm_destructive=true
+```
+
+Authorization is **per target** (`url`+`db`+`user`), so two instances on the same
+server are two grants. Activating an instance that has no live grant is refused:
+the pointer decides where mutations go, so it cannot be switched to a target
+nobody approved. With **several** instances and **none** active, every connection
+tool refuses instead of picking one by order — and an old `.sdd/.env` keeps
+working untouched as `default` until you choose to move it yourself.
 
 ```bash
 mkdir -p ~/.config/dsh-odoo-sdd && cd ~/.config/dsh-odoo-sdd
@@ -595,7 +616,9 @@ name — a foreign folder is never adopted. `.sdd/` always stays with the projec
 ```text
 <projectRoot>/
 ├── .sdd/                       # plugin-owned, gitignored
-│   ├── .env                    # credentials (chmod 600)
+│   ├── .env                    # credentials, single-target layout (chmod 600)
+│   ├── instances/<name>.env    # one file per Odoo target (chmod 600)
+│   ├── instances/active.json   # which target is in use
 │   ├── config.json             # project configuration
 │   ├── grants.json             # human authorization receipts
 │   ├── session.json            # Playwright cookie

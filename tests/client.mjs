@@ -256,6 +256,8 @@ function inputIds(node) {
 
 const baseSnapshot = {
 	autonomy: "supervised",
+	// Deliberately still present in the snapshot: the panel must IGNORE it, because
+	// the edition moved to the spec. A rendered control for it would be the bug.
 	licensed: "community",
 	executeAllowlist: [],
 	projectRoot: "",
@@ -438,6 +440,24 @@ console.log("== host contract edges (configForms presence) ==");
 	check("the registration is wrapped in ctx.effect (disposal is owned)", typeof effectDisposer === "function");
 	effectDisposer();
 	check("disposing the effect disposes the whileServed registration", disposed === true);
+}
+
+// ---- the retired edition control must not come back ----
+{
+	const source = readFileSync(fileURLToPath(new URL("../client/client.js", import.meta.url)), "utf8");
+	const code = source
+		.replace(/\/\*[\s\S]*?\*\//g, "")
+		.split("\n")
+		.map((line) => line.replace(/\s*\/\/.*$/, ""))
+		.join("\n");
+	check(
+		"the panel no longer renders an edition control (the edition is per spec)",
+		!/seg\("licensed"/.test(code) && !/licensed: form\.licensed/.test(code),
+	);
+	check(
+		"the panel explains WHERE the edition is answered",
+		/licensePerSpec/.test(source) && /operation=clarify/.test(source),
+	);
 }
 
 console.log(`\n${checks - failures}/${checks} checks passed.`);

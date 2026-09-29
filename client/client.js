@@ -42,6 +42,9 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"autonomous": "Autónomo",
 		"license": "Licencia",
 		"licenseHint": "OCA/Comunidad se busca siempre, en ambos casos.",
+		"licensePerSpec": "La edición de Odoo no es un ajuste del plugin: se responde por spec en CLARIFY "
+			+ "(operation=clarify licensed=community|enterprise), porque un mismo workspace puede tener "
+			+ "proyectos EE y CE a la vez. No hay edición global.",
 		"community": "Community",
 		"enterprise": "Enterprise",
 		"allowlist": "Allowlist de mutaciones",
@@ -111,6 +114,9 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"autonomous": "Autonomous",
 		"license": "Licensing",
 		"licenseHint": "OCA/Community is always searched, in both cases.",
+		"licensePerSpec": "The Odoo edition is not a plugin setting: it is answered per spec in CLARIFY "
+			+ "(operation=clarify licensed=community|enterprise), because one workspace can hold EE and CE "
+			+ "projects at the same time. There is no workspace-wide edition.",
 		"community": "Community",
 		"enterprise": "Enterprise",
 		"allowlist": "Mutation allowlist",
@@ -281,11 +287,8 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		var asStr = function (v, fb) { return typeof v === "string" ? v : fb; };
 		var asList = function (v) { return Array.isArray(v) ? v.filter(function (x) { return typeof x === "string"; }) : []; };
 		var asBool = function (v, fb) { return typeof v === "boolean" ? v : fb; };
-		var lic = asStr(s.licensed, "community");
-		if (lic !== "enterprise") lic = "community";
 		return {
 			autonomy: asStr(s.autonomy, "supervised"),
-			licensed: lic,
 			executeAllowlist: asList(s.executeAllowlist),
 			methodAllowlist: asList(s.methodAllowlist),
 			projectRoot: asStr(s.projectRoot, ""),
@@ -310,7 +313,6 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 	function toForm(snap) {
 		return {
 			autonomy: snap.autonomy,
-			licensed: snap.licensed,
 			allowlist: snap.executeAllowlist.join(", "),
 			methods: snap.methodAllowlist.join(", "),
 			communityUse: snap.communityRepoPath ? "path" : "url",
@@ -449,7 +451,6 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			var parseList = function (v) { return String(v || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean); };
 			var target = {
 				autonomy: form.autonomy,
-				licensed: form.licensed,
 				executeAllowlist: parseList(form.allowlist),
 				methodAllowlist: parseList(form.methods),
 				communityRepoUrl: form.communityUse === "url" ? form.communityUrl : "",
@@ -674,11 +675,13 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 					{ value: "autonomous", label: t("autonomous") }
 				])),
 
+			// The Odoo edition is NOT a plugin setting: it is answered per spec in
+			// CLARIFY (sdd_phase operation=clarify licensed=...), because one
+			// workspace can hold EE and CE projects at the same time. The card is
+			// kept as an explanation rather than a control that would lie about
+			// being plugin-wide.
 			h(SectionCard, { title: t("license"), hint: t("licenseHint") },
-				seg("licensed", form.licensed, [
-					{ value: "community", label: t("community") },
-					{ value: "enterprise", label: t("enterprise") }
-				])),
+				h("p", { className: "odoo-sdd-sub" }, t("licensePerSpec"))),
 
 			h(SectionCard, { title: t("allowlist"), hint: t("allowlistHint") },
 				h("div", { className: "odoo-sdd-field" },

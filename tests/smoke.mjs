@@ -599,6 +599,15 @@ console.log("== functional mode (graph, templates, gates) ==");
 }
 
 console.log("== credentials & security (S1, S2) ==");
+/** Write a named instance into a project's .sdd/instances/ directory. */
+function writeInstance2(root, name) {
+	mkdirSync(join(root, ".sdd", "instances"), { recursive: true });
+	writeFileSync(
+		join(root, ".sdd", "instances", `${name}.env`),
+		`ODOO_URL=http://localhost:8070\nODOO_DB=dev_${name}\nODOO_USERNAME=admin\nODOO_PASSWORD=s3cr3t-${name}\n`,
+		{ mode: 0o600 },
+	);
+}
 const miss = creds.loadCredentials(dir);
 check("missing .env reported (fail-closed)", miss.ok === false && miss.reason === "env_file_missing");
 
@@ -626,6 +635,61 @@ const straddle = writeEnv("http://127.odoo.example.com:8069");
 check("S1: plain http to a 127.-prefixed non-IP host REFUSED", straddle.ok === false && straddle.reason === "insecure_url");
 const realLoop = writeEnv("http://127.0.0.1:8069");
 check("S1: http to a real 127.0.0.1 loopback allowed", realLoop.ok === true);
+
+// ---- several instances per project ---------------------------------------
+// One target per project stopped being enough the moment a workspace needed a
+// local CE, a staging EE and a client's server: switching meant overwriting the
+// only credential file. Each instance now lives in its own file, exactly one is
+// active, and an ambiguous project is REFUSED rather than resolved by order.
+{
+	const instRoot = join(dir, "projInstances");
+	mkdirSync(join(instRoot, ".sdd", "instances"), { recursive: true });
+	const writeInstance = (name, url, db, user) =>
+		writeFileSync(
+			join(instRoot, ".sdd", "instances", `${name}.env`),
+			`ODOO_URL=${url}\nODOO_DB=${db}\nODOO_USERNAME=${user}\nODOO_PASSWORD=s3cr3t-${name}\n`,
+			{ mode: 0o600 },
+		);
+	writeInstance("local", "http://localhost:8069", "dev_local", "admin");
+	writeInstance("staging", "https://stg.example.com", "stg", "ci");
+
+	check(
+		"two instances and none active is reported, never resolved by order",
+		creds.ambiguousInstances(instRoot).join(",") === "local,staging" &&
+			creds.loadCredentials(instRoot).ok === false &&
+			creds.loadCredentials(instRoot).reason === "needs_instance",
+	);
+	check("activating one is recorded", creds.writeActiveInstance(instRoot, "staging") === true);
+	const activeLoad = creds.loadCredentials(instRoot);
+	check(
+		"the active instance is the one the credentials come from",
+		activeLoad.ok === true && activeLoad.credentials.instance === "staging" && activeLoad.credentials.db === "stg",
+	);
+	check("...and the ambiguity disappears once one is chosen", creds.ambiguousInstances(instRoot).length === 0);
+
+	const listed = creds.listInstances(instRoot);
+	check("both instances are listed with their non-secret identity", listed.length === 2 && listed.some((i) => i.name === "local" && i.db === "dev_local") && listed.some((i) => i.name === "staging" && i.url === "https://stg.example.com"));
+	check(
+		"the listing never carries the secret",
+		!JSON.stringify(listed).includes("s3cr3t-") && !JSON.stringify(listed.map((i) => i.path)).includes("s3cr3t-"),
+	);
+	check("an instance name becomes a path only when it is safe", ["../evil", "a/b", "..", "", "x".repeat(70), ".hidden"].every((bad) => creds.instanceEnvPath(instRoot, bad) === null));
+	check("a safe name resolves inside .sdd/instances", (creds.instanceEnvPath(instRoot, "local") ?? "").endsWith(join(".sdd", "instances", "local.env")));
+
+	check("removing the active instance releases the pointer", creds.removeInstance(instRoot, "staging") === true && creds.readActiveInstance(instRoot) === null);
+	check("removing refuses an unusable name", creds.removeInstance(instRoot, "../evil") === false);
+
+	// The legacy single file is presented as `default` and never moved for you.
+	const legacyRoot = join(dir, "projLegacyInstances");
+	mkdirSync(join(legacyRoot, ".sdd"), { recursive: true });
+	writeFileSync(join(legacyRoot, ".sdd", ".env"), "ODOO_URL=http://localhost:8069\nODOO_DB=dev\nODOO_USERNAME=admin\nODOO_PASSWORD=s3cr3t-legacy\n", { mode: 0o600 });
+	const legacyList = creds.listInstances(legacyRoot);
+	check("the legacy .env is listed as the instance 'default'", legacyList.length === 1 && legacyList[0].name === "default" && legacyList[0].legacy === true);
+	check("one legacy file is NOT ambiguous (single-target projects keep working)", creds.ambiguousInstances(legacyRoot).length === 0 && creds.loadCredentials(legacyRoot).ok === true);
+	// A named instance OUTRANKS the legacy file, which is the whole point of the feature.
+	writeInstance2(legacyRoot, "other");
+	check("a named instance wins over the legacy file", creds.writeActiveInstance(legacyRoot, "other") === true && creds.loadCredentials(legacyRoot).ok === true && creds.loadCredentials(legacyRoot).credentials.instance === "other");
+}
 
 check("S2: scrubGeneric hides password= shapes", !creds.scrubGeneric("reset with password=Sup3rS3cret! now").includes("Sup3rS3cret!"));
 check("S2: scrubGeneric hides Bearer tokens", !creds.scrubGeneric("Authorization: Bearer abc123.def-456").includes("abc123"));
@@ -1170,9 +1234,16 @@ check("mutating call still requires confirm_destructive", exConfirm.denied === t
 
 rc = await cfg.execute({ mode: "read" });
 check("read defaults autonomy", rc.config.autonomy === "supervised");
-check("read defaults licensed", rc.config.licensed === "community");
+// The edition is NOT plugin configuration any more: it is answered per spec in
+// CLARIFY, because one workspace can hold EE and CE projects at once. The key is
+// accepted (an old caller must not crash) and REPORTED, never applied.
+check("read no longer invents a licensed value", rc.config.licensed === undefined);
 rc = await cfg.execute({ mode: "set", autonomy: "autonomous", licensed: "enterprise" });
-check("set persists autonomy/licensed", rc.ok === true && rc.config.autonomy === "autonomous" && rc.config.licensed === "enterprise");
+check(
+	"set persists autonomy and IGNORES the retired licensed key",
+	rc.ok === true && rc.config.autonomy === "autonomous" && rc.config.licensed === undefined,
+	`autonomy=${String(rc.config.autonomy)} licensed=${String(rc.config.licensed)}`,
+);
 
 // --- native approval: the model cannot self-authorize (lote 2) -----------
 console.log("== native approval (grants, refusals, fail-closed) ==");
@@ -1270,7 +1341,7 @@ console.log("== settings schema (the host's volatileForm contract) ==");
 	);
 	check(
 		"the fields the panel edits are all present",
-		["specsMode", "specsRoot", "specsDir", "executeAllowlist", "methodAllowlist", "autonomy", "licensed", "requireCheckpointBeforeMutation", "requireSpecForChanges", "documentationPolicy", "documentationLanguage", "maxCheckpoints"].every((f) => fields.includes(f)),
+		["specsMode", "specsRoot", "specsDir", "executeAllowlist", "methodAllowlist", "autonomy", "requireCheckpointBeforeMutation", "requireSpecForChanges", "documentationPolicy", "documentationLanguage", "maxCheckpoints"].every((f) => fields.includes(f)),
 		fields.join(", "),
 	);
 	// The other half of the same contract: an OLDER schemastery (the peer range

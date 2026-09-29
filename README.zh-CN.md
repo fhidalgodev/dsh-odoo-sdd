@@ -154,12 +154,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.6.2`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.7.0`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.6.2，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.7.0，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]
@@ -204,9 +204,29 @@ odoo_setup mode=authorize   # 只问你一次，授权这个确切的目标
 | # | 位置 | 范围 |
 |---|---|---|
 | 1 | `ODOO_SDD_ENV_FILE` | 显式的环境变量覆盖 |
-| 2 | `<project>/.sdd/.env` | 项目范围，插件自有的隐藏目录 |
-| 3 | `~/.config/dsh-odoo-sdd/.env`（遵循 `$XDG_CONFIG_HOME`） | 用户范围 —— 一套开发凭据供所有项目使用 |
-| 4 | `<project>/.env` | 旧位置，仍然支持（会被标记为 legacy） |
+| 2 | `<project>/.sdd/instances/<name>.env` | **每个目标一个文件**，当前激活的实例 |
+| 3 | `<project>/.sdd/.env` | 单目标布局（也会作为实例 `default` 出现） |
+| 4 | `~/.config/dsh-odoo-sdd/.env`（遵循 `$XDG_CONFIG_HOME`） | 用户范围 —— 一套开发凭据供所有项目使用 |
+| 5 | `<project>/.env` | 旧位置，仍然支持（会被标记为 legacy） |
+
+**一个项目里的多个目标。** 需要本地 CE 服务器、EE 预发服务器和客户实例的
+工作区，不再覆盖唯一的 `.env`：每个目标在 `.sdd/instances/` 下有自己的文件，
+其中一个是激活的。
+
+```bash
+odoo_setup mode=instance instance=list                       # 有哪些，非机密身份
+odoo_setup mode=instance instance=add name=staging url=https://stg.example.com db=stg username=ci
+# 在 .sdd/instances/staging.env 中手工填写 ODOO_PASSWORD，然后：
+odoo_setup mode=authorize                                    # 授权**这个**目标
+odoo_setup mode=instance instance=use name=staging            # 激活它
+odoo_setup mode=instance instance=remove name=staging         # 需要 confirm_destructive=true
+```
+
+授权是**按目标**的（`url`+`db`+`user`），因此同一台服务器上的两个实例是两个授权。
+激活一个没有有效授权的实例会被拒绝：指针决定变更发往哪里，所以它不能指向
+没有人批准过的目标。当存在**多个**实例且**没有**激活任何一个时，所有连接工具
+都会拒绝，而不是按顺序挑选 —— 旧的 `.sdd/.env` 会作为 `default` 原样继续工作，
+直到你自己决定迁移。
 
 ```bash
 mkdir -p ~/.config/dsh-odoo-sdd && cd ~/.config/dsh-odoo-sdd

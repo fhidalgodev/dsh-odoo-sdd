@@ -22,13 +22,13 @@
  *
  * @module dsh-odoo-sdd/credentials
  */
-import { readFileSync, statSync, existsSync, chmodSync } from "node:fs";
+import { readFileSync, statSync, existsSync, chmodSync, mkdirSync, writeFileSync, rmSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 
 /** Where a resolved credential file came from in the cascade. */
-export type CredentialSource = "env-var" | "project" | "user" | "legacy";
+export type CredentialSource = "env-var" | "instance" | "project" | "user" | "legacy";
 
 /** One concrete credential location in the cascade. */
 export interface CredentialLocation {
@@ -36,6 +36,35 @@ export interface CredentialLocation {
 	path: string;
 	/** Which cascade tier produced it. */
 	source: CredentialSource;
+	/**
+	 * Name of the instance this file belongs to, when there is one.
+	 *
+	 * A project can hold several targets (a local CE, a staging EE, a client's
+	 * server), each in `.sdd/instances/<name>.env`. The legacy `<root>/.sdd/.env`
+	 * is reported as the instance `default`, so an existing single-target project
+	 * keeps working AND `instance=list` can offer to move that file.
+	 */
+	instance?: string;
+}
+
+/**
+ * Whether a value may be used as an instance name.
+ *
+ * The name becomes a FILE NAME inside `.sdd/instances/`, so this is the guard
+ * that stops a name from escaping that directory (`..`, a path separator, an
+ * absolute path, a NUL byte). Deliberately conservative: it must start with a
+ * letter or digit and may only contain letters, digits, dot, dash and underscore.
+ * @param value - the candidate name.
+ * @returns true when the name is safe to build a path with.
+ */
+export function isInstanceName(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= 64 &&
+		/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) &&
+		!value.includes("..")
+	);
 }
 
 /** The connection data the pipeline needs to reach an existing Odoo instance. */
@@ -52,6 +81,11 @@ export interface OdooCredentials {
 	envFile: string;
 	/** Cascade tier the .env file was loaded from. */
 	source: CredentialSource;
+	/**
+	 * Name of the instance the credentials belong to, when the file is a named
+	 * one (`.sdd/instances/<name>.env`). Undefined for the user/legacy tiers.
+	 */
+	instance?: string;
 	/**
 	 * Declared environment of the target (`ODOO_SDD_ENVIRONMENT`), when the
 	 * developer declared one. UNDEFINED means "not declared": the functional
@@ -93,7 +127,8 @@ export interface CredentialsProblem {
 		| "required_var_missing"
 		| "invalid_url"
 		| "insecure_url"
-		| "invalid_environment";
+		| "invalid_environment"
+		| "needs_instance";
 	/** Developer-facing remediation instructions (never contains secrets). */
 	message: string;
 	/** Path of the .env file that was (or should be) used. */
@@ -192,10 +227,34 @@ export function credentialCandidates(projectRoot: string): CredentialLocation[] 
 	if (override !== undefined && override.trim() !== "") {
 		candidates.push({ path: resolve(override.trim()), source: "env-var" });
 	}
-	candidates.push({ path: join(projectRoot, ".sdd", ".env"), source: "project" });
+	// The active NAMED instance, when the project chose one. It comes before the
+	// legacy file because it is the more specific choice, and after the env-var
+	// because an explicit override is an operator instruction.
+	const active = readActiveInstance(projectRoot);
+	const activePath = active === null ? null : instanceEnvPath(projectRoot, active);
+	if (active !== null && activePath !== null) {
+		candidates.push({ path: activePath, source: "instance", instance: active });
+	}
+	candidates.push({ path: join(projectRoot, ".sdd", ".env"), source: "project", instance: "default" });
 	candidates.push({ path: join(userConfigDir(), ".env"), source: "user" });
 	candidates.push({ path: join(projectRoot, ".env"), source: "legacy" });
 	return candidates;
+}
+
+/**
+ * Instance names to choose from when the project has SEVERAL and chose none.
+ *
+ * This is the one state that must never be resolved by guessing: picking one by
+ * alphabetical order would aim mutations at a target nobody selected. The legacy
+ * single file does not count as an instance here — a project that never used the
+ * feature has exactly one target and must keep working untouched.
+ * @param projectRoot - workspace root.
+ * @returns the names to choose from (empty when there is no ambiguity).
+ */
+export function ambiguousInstances(projectRoot: string): string[] {
+	if (readActiveInstance(projectRoot) !== null) return [];
+	const named = listInstances(projectRoot).filter((entry) => !entry.legacy);
+	return named.length > 1 ? named.map((entry) => entry.name) : [];
 }
 
 /** Resolve the first existing credential source in the cascade, or null. */
@@ -207,15 +266,216 @@ export function resolveCredentialSource(projectRoot: string): CredentialLocation
 }
 
 /**
+ * Absolute path of a named instance's credential file.
+ *
+ * The name is validated here and NOT by the caller: every path in this module is
+ * built from a checked name, so no call site can forget the check.
+ * @param projectRoot - workspace root.
+ * @param name - instance name (validated by {@link isInstanceName}).
+ * @returns the absolute path, or null when the name is not usable.
+ */
+export function instanceEnvPath(projectRoot: string, name: unknown): string | null {
+	if (!isInstanceName(name)) return null;
+	return join(projectRoot, ".sdd", "instances", `${name}.env`);
+}
+
+/** Directory holding the named instances of one project. */
+function instancesDir(projectRoot: string): string {
+	return join(projectRoot, ".sdd", "instances");
+}
+
+/** File recording which instance the project works against. */
+function activeInstanceFile(projectRoot: string): string {
+	return join(instancesDir(projectRoot), "active.json");
+}
+
+/** The instance the project works against, when one was chosen. */
+export function readActiveInstance(projectRoot: string): string | null {
+	try {
+		const raw = JSON.parse(readFileSync(activeInstanceFile(projectRoot), "utf8")) as { name?: unknown };
+		return isInstanceName(raw.name) ? raw.name : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Record the active instance. The name is validated by the path builder, so an
+ * unusable name simply cannot be written.
+ * @param projectRoot - workspace root.
+ * @param name - instance to activate.
+ * @returns true when it was recorded.
+ */
+export function writeActiveInstance(projectRoot: string, name: string): boolean {
+	const target = instancesDir(projectRoot);
+	if (instanceEnvPath(projectRoot, name) === null) return false;
+	try {
+		mkdirSync(target, { recursive: true, mode: 0o700 });
+		chmodSync(target, 0o700);
+	} catch {
+		// best effort: the file write below reports the real failure
+	}
+	try {
+		writeFileSync(
+			activeInstanceFile(projectRoot),
+			JSON.stringify({ name, updatedAt: new Date().toISOString() }, null, 2) + "\n",
+			{ mode: 0o600 },
+		);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Drop the active-instance pointer (used when the active file disappears). */
+export function clearActiveInstance(projectRoot: string): void {
+	try {
+		rmSync(activeInstanceFile(projectRoot), { force: true });
+	} catch {
+		// nothing to report: an absent pointer is a valid state
+	}
+}
+
+/**
+ * Delete one named instance, releasing the pointer when it was the active one.
+ *
+ * Only the NAMED instance file is touched: the legacy `<root>/.sdd/.env` and the
+ * user-scope file are refused by the caller, because deleting the only target a
+ * project has is not a side effect this function may have.
+ * @param projectRoot - workspace root.
+ * @param name - instance to delete (validated here).
+ * @returns true when it is gone (or was already).
+ */
+export function removeInstance(projectRoot: string, name: string): boolean {
+	const path = instanceEnvPath(projectRoot, name);
+	if (path === null) return false;
+	try {
+		rmSync(path, { force: true });
+	} catch {
+		return false;
+	}
+	if (readActiveInstance(projectRoot) === name) clearActiveInstance(projectRoot);
+	return true;
+}
+
+/** One instance a project can target, WITHOUT its secret. */
+export interface InstanceSummary {
+	name: string;
+	/** Absolute path of its .env file (the secret stays inside it). */
+	path: string;
+	/** Declared URL, or null when the file is unreadable/incomplete. */
+	url: string | null;
+	/** Declared database, or null. */
+	db: string | null;
+	/** Declared login, or null. */
+	username: string | null;
+	/** Declared environment (dev/staging/production), or null. */
+	environment: TargetEnvironment | null;
+	/** True when the file could be parsed as KEY=VALUE pairs. */
+	readable: boolean;
+	/** True when the legacy `<root>/.sdd/.env` produced this entry. */
+	legacy: boolean;
+	/** Whether the file is owner-only enough to be trusted (0600-ish). */
+	secure: boolean;
+}
+
+/**
+ * Enumerate the instances of one project.
+ *
+ * Only NON-SECRET fields are projected: the secret is read by
+ * {@link loadCredentials} at call time and never leaves the file. A file that
+ * cannot be parsed is still LISTED (with `readable: false`) so a broken instance
+ * is visible instead of missing.
+ * @param projectRoot - workspace root.
+ * @returns the instances, sorted by name, with the legacy file as `default`.
+ */
+export function listInstances(projectRoot: string): InstanceSummary[] {
+	const out: InstanceSummary[] = [];
+	const dir = instancesDir(projectRoot);
+	let names: string[] = [];
+	try {
+		names = readdirSync(dir)
+			.filter((entry) => entry.endsWith(".env"))
+			.map((entry) => entry.slice(0, -".env".length))
+			.filter((name) => isInstanceName(name))
+			.sort();
+	} catch {
+		names = [];
+	}
+	for (const name of names) {
+		const path = join(dir, `${name}.env`);
+		out.push(summarizeInstance(name, path, false));
+	}
+	// The legacy single-file layout, presented as an instance named `default` so it
+	// is visible and can be adopted deliberately (never moved behind your back).
+	const legacyPath = join(projectRoot, ".sdd", ".env");
+	if (existsSync(legacyPath) && !names.includes("default")) {
+		out.push(summarizeInstance("default", legacyPath, true));
+	}
+	return out;
+}
+
+/**
+ * Whether a file is already owner-only, WITHOUT touching it.
+ *
+ * `ensureSecurePermissions()` is a fixer (it chmods), which is right when the
+ * plugin is about to READ a secret and wrong when it is merely listing: a
+ * listing must not silently rewrite the permissions of every instance file.
+ * @param path - file to inspect.
+ * @returns "owner-only", "too-open" or "unknown" (platform without mode bits).
+ */
+function permissionState(path: string): "owner-only" | "too-open" | "unknown" {
+	try {
+		const mode = statSync(path).mode & 0o777;
+		if ((mode & 0o077) === 0) return "owner-only";
+		// Windows and FAT-like volumes cannot express POSIX bits; a chmod there
+		// neither fixes nor proves anything, so this is reported as unknown.
+		return process.platform === "win32" ? "unknown" : "too-open";
+	} catch {
+		return "unknown";
+	}
+}
+
+/** Read one instance file into its non-secret summary. */
+function summarizeInstance(name: string, path: string, legacy: boolean): InstanceSummary {
+	const readable = permissionState(path) !== "too-open";
+	let pairs: Record<string, string> | null = null;
+	try {
+		pairs = parseEnv(readFileSync(path, "utf8"));
+	} catch {
+		pairs = null;
+	}
+	const get = (key: string): string | null => {
+		const raw = pairs?.[key];
+		return typeof raw === "string" && raw.trim() !== "" ? raw.trim() : null;
+	};
+	return {
+		name,
+		path,
+		url: get("ODOO_URL"),
+		db: get("ODOO_DB"),
+		username: get("ODOO_USERNAME"),
+		environment: parseEnvironment(pairs?.["ODOO_SDD_ENVIRONMENT"]),
+		readable: pairs !== null,
+		legacy,
+		secure: readable,
+	};
+}
+
+/**
  * Where a setup flow should write a new .env for the requested scope.
  * @param scope - "user" (shared across projects, the generic default) or
  *   "project" (isolated per workspace, under the plugin-owned .sdd/ dir).
  * @param projectRoot - workspace root for project-scoped paths.
+ * @param instance - when given (project scope), the named instance file under
+ *   `.sdd/instances/`; omitted keeps the historical single-file location.
  */
-export function targetEnvPath(scope: "project" | "user", projectRoot: string): string {
-	return scope === "user"
-		? join(userConfigDir(), ".env")
-		: join(projectRoot, ".sdd", ".env");
+export function targetEnvPath(scope: "project" | "user", projectRoot: string, instance?: string): string {
+	if (scope === "user") return join(userConfigDir(), ".env");
+	if (instance !== undefined) {
+		return instanceEnvPath(projectRoot, instance) ?? join(projectRoot, ".sdd", ".env");
+	}
+	return join(projectRoot, ".sdd", ".env");
 }
 
 /**
@@ -352,6 +612,23 @@ function parseEnv(content: string): Record<string, string> {
  * @returns the loaded credentials or a structured problem report.
  */
 export function loadCredentials(projectRoot: string): CredentialsResult {
+	// Several instances and none chosen: refuse BEFORE picking one. Choosing by
+	// order here would aim the pipeline at a target nobody selected, which is the
+	// most expensive kind of guess this plugin can make.
+	const ambiguous = ambiguousInstances(projectRoot);
+	if (ambiguous.length > 0) {
+		const suggested = targetEnvPath("project", projectRoot, ambiguous[0]!);
+		return {
+			ok: false,
+			reason: "needs_instance",
+			envFile: suggested,
+			message:
+				`This project has ${ambiguous.length} Odoo instances and none is active: ` +
+				`${ambiguous.join(", ")}. Choose one with ` +
+				"`odoo_setup mode=instance instance=use name=<name>` (each target needs its own " +
+				"connection grant). Nothing was sent anywhere.",
+		};
+	}
 	const location = resolveCredentialSource(projectRoot);
 	if (location === null) {
 		const suggested = targetEnvPath("user", projectRoot);
@@ -360,11 +637,11 @@ export function loadCredentials(projectRoot: string): CredentialsResult {
 			reason: "env_file_missing",
 			envFile: suggested,
 			message:
-				"No credential file found in the cascade (.sdd/.env, " +
-				`${displayPath(suggested)}, or legacy .env). Run the odoo_setup ` +
-				"tool (mode=interactive) to scaffold one, or ask the developer to " +
-				"create it from .env.example. Never ask for these values through " +
-				"chat.",
+				"No credential file found in the cascade (.sdd/instances/<name>.env, " +
+				`.sdd/.env, ${displayPath(suggested)}, or legacy .env). Run the odoo_setup ` +
+				"tool (mode=interactive for the single-target layout, mode=instance " +
+				"instance=add to create a named target) to scaffold one, or ask the developer " +
+				"to create it from .env.example. Never ask for these values through chat.",
 		};
 	}
 	const envFile = location.path;
@@ -426,6 +703,7 @@ export function loadCredentials(projectRoot: string): CredentialsResult {
 			secret: vars["ODOO_PASSWORD"]!,
 			envFile,
 			source: location.source,
+			...(location.instance === undefined ? {} : { instance: location.instance }),
 			...(environment === null ? {} : { environment }),
 		},
 		...(permission.enforced ? {} : { permissionNote: permission.note ?? POSIX_MODE_NOTE }),
@@ -465,9 +743,10 @@ export function describeCredentials(credentials: OdooCredentials): string {
 		credentials.environment === undefined
 			? " environment=UNDECLARED (the functional executor will refuse to apply batches)"
 			: ` environment=${credentials.environment}`;
+	const instanceNote = credentials.instance === undefined ? "" : ` instance=${credentials.instance}`;
 	return (
 		`url=${credentials.url} db=${credentials.db} user=${credentials.username} ` +
-		`secret=***masked*** (source: ${credentials.source}, file: ` +
+		`secret=***masked*** (source: ${credentials.source}${instanceNote}, file: ` +
 		displayPath(credentials.envFile) + ")" + legacyNote + environment
 	);
 }

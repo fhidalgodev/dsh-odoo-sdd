@@ -164,12 +164,12 @@ bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
 
 - **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
 - Acepta cualquier spec de pnpm, así que podés fijar una versión:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.6.2`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.7.0`.
 
 ¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.6.2, publicada con attestation de provenance
+npm install dsh-odoo-sdd        # 0.7.0, publicada con attestation de provenance
 ```
 
 > [!IMPORTANT]
@@ -218,9 +218,30 @@ O a mano — el plugin usa la primera ubicación de esta cascada que exista:
 | # | Ubicación | Alcance |
 |---|---|---|
 | 1 | `ODOO_SDD_ENV_FILE` | override explícito de entorno |
-| 2 | `<proyecto>/.sdd/.env` | scope proyecto, directorio oculto del plugin |
-| 3 | `~/.config/dsh-odoo-sdd/.env` (respeta `$XDG_CONFIG_HOME`) | scope usuario — un juego de credenciales para todos los proyectos |
-| 4 | `<proyecto>/.env` | ubicación legacy, sigue soportada (se reporta como tal) |
+| 2 | `<proyecto>/.sdd/instances/<nombre>.env` | **un destino por fichero**, la instancia activa |
+| 3 | `<proyecto>/.sdd/.env` | disposición de un solo destino (también aparece como la instancia `default`) |
+| 4 | `~/.config/dsh-odoo-sdd/.env` (respeta `$XDG_CONFIG_HOME`) | scope usuario — un juego de credenciales para todos los proyectos |
+| 5 | `<proyecto>/.env` | ubicación legacy, sigue soportada (se reporta como tal) |
+
+**Varios destinos en un mismo proyecto.** Un workspace que necesita un servidor CE
+local, uno EE de staging y la instancia de un cliente ya no sobreescribe su único
+`.env`: cada destino tiene su fichero bajo `.sdd/instances/`, y uno está activo.
+
+```bash
+odoo_setup mode=instance instance=list                       # qué existe, identidad sin secretos
+odoo_setup mode=instance instance=add name=staging url=https://stg.example.com db=stg username=ci
+# rellena ODOO_PASSWORD a mano en .sdd/instances/staging.env, y después:
+odoo_setup mode=authorize                                    # autoriza ESTE destino
+odoo_setup mode=instance instance=use name=staging            # lo activa
+odoo_setup mode=instance instance=remove name=staging         # exige confirm_destructive=true
+```
+
+La autorización es **por destino** (`url`+`db`+`user`), así que dos instancias en
+el mismo servidor son dos grants. Activar una instancia sin grant vivo se rechaza:
+el puntero decide a dónde van las mutaciones, así que no puede apuntar a un destino
+que nadie aprobó. Con **varias** instancias y **ninguna** activa, toda herramienta
+de conexión se niega en vez de elegir por orden — y un `.sdd/.env` antiguo sigue
+funcionando sin tocarlo, como `default`, hasta que decidas moverlo tú.
 
 ```bash
 mkdir -p ~/.config/dsh-odoo-sdd && cd ~/.config/dsh-odoo-sdd

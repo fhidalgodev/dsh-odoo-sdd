@@ -35,6 +35,12 @@ import {
 	sanitizeForPersist,
 	credentialCandidates,
 	targetEnvPath,
+	instanceEnvPath,
+	listInstances,
+	readActiveInstance,
+	writeActiveInstance,
+	removeInstance,
+	ambiguousInstances,
 	parseInstanceUrl,
 	ensureSecurePermissions,
 	type OdooCredentials,
@@ -198,7 +204,6 @@ export const Config = z.object({
 	enterpriseRepoUrl: markVolatile(z.string()),
 	enterpriseRepoPath: markVolatile(z.string()),
 	autonomy: markVolatile(z.string()),
-	licensed: markVolatile(z.string()),
 	requireCheckpointBeforeMutation: markVolatile(z.boolean()),
 	requireSpecForChanges: markVolatile(z.boolean()),
 	securityReviewRequired: markVolatile(z.boolean()),
@@ -236,8 +241,6 @@ interface OdooSddConfig {
 	enterpriseRepoPath?: string;
 	/** Default delegation mode: supervised | autonomous. */
 	autonomy?: string;
-	/** Default licensing strategy: community | enterprise. */
-	licensed?: string;
 	/** No change — instance mutation or project file edit — without a spec that authorizes it, or a session waiver. */
 	requireSpecForChanges?: boolean;
 	/** Refuse mutating calls until a checkpoint exists (fail-closed). */
@@ -469,10 +472,17 @@ function rootNote(root: ResolvedRoot): string {
 function setupStatusFor(projectRoot: string): { status: EffectiveSetupStatus; detail: string } {
 	const loaded = loadCredentials(projectRoot);
 	if (loaded.ok) {
+		// Which instance is in play is part of the answer: with several targets
+		// configured, "credentials OK" without naming the target is ambiguous.
+		const others = listInstances(projectRoot).filter((entry) => entry.name !== loaded.credentials.instance);
 		return {
 			status: "configured",
 			detail:
 				`Credentials OK (${loaded.credentials.source}): ${describeCredentials(loaded.credentials)}` +
+				(others.length === 0
+					? ""
+					: ` — this project also has: ${others.map((entry) => entry.name).join(", ")} ` +
+						"(mode=instance instance=list to see them, instance=use name=<name> to switch)") +
 				(loaded.permissionNote === undefined ? "" : ` — NOTE: ${loaded.permissionNote}`),
 		};
 	}
@@ -721,7 +731,6 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		enterpriseRepoUrl: config.enterpriseRepoUrl ?? "https://github.com/odoo/enterprise",
 		enterpriseRepoPath: config.enterpriseRepoPath ?? "",
 		autonomy: config.autonomy ?? "supervised",
-		licensed: config.licensed ?? "community",
 		requireCheckpointBeforeMutation: config.requireCheckpointBeforeMutation ?? true,
 		requireSpecForChanges: config.requireSpecForChanges ?? true,
 		securityReviewRequired: config.securityReviewRequired ?? true,
@@ -782,6 +791,26 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					uid: { type: "number" },
 					projectRoot: { type: "string" },
 					rootSource: { type: "string" },
+					activeInstance: { type: "string" },
+					instances: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								name: { type: "string", required: true },
+								url: { type: "string" },
+								db: { type: "string" },
+								username: { type: "string" },
+								environment: { type: "string" },
+								active: { type: "boolean" },
+								authorized: { type: "boolean" },
+								legacy: { type: "boolean" },
+								secure: { type: "boolean" },
+								readable: { type: "boolean" },
+							},
+						},
+					},
 					detail: { type: "string", required: true },
 				},
 			},
@@ -851,7 +880,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			"— secrets are never accepted as tool parameters. mode=authorize asks the DEVELOPER (native " +
 			"approval) for a connection grant covering the current url/db/user: without it no tool may " +
 			"open a socket, because possessing credentials is not authorization. mode=revoke drops the " +
-			"stored grants. mode=later defers setup until the VERIFY phase; mode=skip marks the project " +
+			"stored grants. mode=instance manages SEVERAL targets per project (list | show | use | add | " +
+			"remove): each lives in its own .sdd/instances/<name>.env, one is active, and use requires a " +
+			"live grant for that target. mode=later defers setup until the VERIFY phase; mode=skip marks the project " +
 			"to run without an instance (manual verification); mode=reset clears the persisted decision. " +
 			"mode=purge reports (and, with confirm_destructive=true plus human approval, removes) only the " +
 			"plugin's own state under .sdd/ — credentials, stop.md and specs/ are always preserved.",
@@ -859,7 +890,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			mode: {
 				type: "string",
 				required: true,
-				enum: ["check", "interactive", "later", "skip", "reset", "autonomy", "authorize", "revoke", "purge"],
+				enum: ["check", "interactive", "later", "skip", "reset", "autonomy", "authorize", "revoke", "purge", "instance"],
 				description: "Onboarding operation.",
 			},
 			url: { type: "string", description: "Instance base URL for mode=interactive (validated with the transport guard; no embedded credentials)." },
@@ -875,9 +906,23 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				enum: ["supervised", "autonomous"],
 				description: "Delegation mode for mode=autonomy: supervised (human answers gates) or autonomous (human-proxy agent answers).",
 			},
+			instance: {
+				type: "string",
+				enum: ["list", "show", "use", "add", "remove"],
+				description:
+					"mode=instance only: list the project's Odoo instances | show the active one | " +
+					"use <name> to activate one (requires a live grant for that target) | " +
+					"add <name> to scaffold a new .env (non-secret fields) | remove <name> to delete it.",
+			},
+			name: {
+				type: "string",
+				description:
+					"mode=instance only: instance name ([A-Za-z0-9][A-Za-z0-9._-]*, max 64). Its file is " +
+					".sdd/instances/<name>.env. Required for use/add/remove and optional for show.",
+			},
 			confirm_destructive: {
 				type: "boolean",
-				description: "REQUIRED true to actually run mode=purge. Without it, purge only reports its plan.",
+				description: "REQUIRED true to actually run mode=purge or mode=instance instance=remove. Without it, they only report their plan.",
 			},
 		},
 		output: {
@@ -898,11 +943,13 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			render: (_args: unknown, value: unknown) => [text((value as { detail: string }).detail)],
 		},
 		async execute(args: {
-			mode: "check" | "interactive" | "later" | "skip" | "reset" | "autonomy" | "authorize" | "revoke" | "purge";
+			mode: "check" | "interactive" | "later" | "skip" | "reset" | "autonomy" | "authorize" | "revoke" | "purge" | "instance";
 			url?: string;
 			db?: string;
 			username?: string;
 			scope?: "user" | "project";
+			instance?: "list" | "show" | "use" | "add" | "remove";
+			name?: string;
 			decision?: "supervised" | "autonomous";
 			confirm_destructive?: boolean;
 		}, exec?: unknown) {
@@ -910,6 +957,322 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const projectRoot = root.root;
 			const autonomyMode = readAutonomy(projectRoot);
 			appendAuditLine(projectRoot, "odoo_setup/" + args.mode, args, clientFor(projectRoot).credentials);
+
+			// ---- mode=instance: several targets in one project ---------------
+			// Each target is its own file and its own connection grant, so a local
+			// CE, a staging EE and a client's server can coexist without anyone
+			// overwriting a credential file to switch.
+			if (args.mode === "instance") {
+				const operation = args.instance ?? "list";
+				const named = (args.name ?? "").trim();
+				const activeNow = readActiveInstance(projectRoot);
+				const describe = (): Array<Record<string, unknown>> =>
+					listInstances(projectRoot).map((entry) => ({
+						name: entry.name,
+						...(entry.url === null ? {} : { url: entry.url }),
+						...(entry.db === null ? {} : { db: entry.db }),
+						...(entry.username === null ? {} : { username: entry.username }),
+						...(entry.environment === null ? {} : { environment: entry.environment }),
+						active: entry.name === activeNow,
+						// Authorization is per TARGET: two instances on the same server
+						// are two different grants.
+						authorized:
+							entry.url !== null && entry.db !== null && entry.username !== null
+								? hasValidGrant(projectRoot, "connection", fingerprintOf(entry.url, entry.db, entry.username))
+								: false,
+						legacy: entry.legacy,
+						secure: entry.secure,
+						readable: entry.readable,
+					}));
+				const action = args.name !== undefined ? ` ${named}` : "";
+				appendAuditLine(projectRoot, `odoo_setup/instance-${operation}`, { name: named }, clientFor(projectRoot).credentials);
+
+				if (operation === "list") {
+					const found = listInstances(projectRoot);
+					const ambiguous = ambiguousInstances(projectRoot);
+					const lines = found.length === 0
+						? ["No instance is configured in this project."]
+						: found.map((entry) => {
+							const flag = entry.name === activeNow ? " (ACTIVE)" : "";
+							const where = entry.url === null ? "unreadable" : `${entry.url} db=${entry.db ?? "?"} user=${entry.username ?? "?"}`;
+							const notes = [
+								entry.legacy ? "legacy single file: `use` it or add a named instance and remove it" : "",
+								entry.secure ? "" : "permissions too open (chmod 600)",
+								entry.readable ? "" : "could not be parsed",
+							].filter(Boolean);
+							return `- ${entry.name}${flag}: ${where}${notes.length === 0 ? "" : ` — ${notes.join("; ")}`}`;
+						});
+					return {
+						mode: "instance" as string,
+						status: ambiguous.length > 0 ? "needs-instance" : "ok",
+						activeInstance: activeNow ?? undefined,
+						instances: describe(),
+						detail:
+							`Instances of ${projectRoot} (${found.length}):\n${lines.join("\n")}` +
+							(ambiguous.length > 0
+								? `\nSeveral instances and none active (${ambiguous.join(", ")}): every connection tool refuses ` +
+									"until one is chosen with mode=instance instance=use name=<name>. Nothing is picked by order."
+								: "") +
+							(activeNow === null ? "" : `\nActive: ${activeNow}`),
+					};
+				}
+
+				if (operation === "show") {
+					const wanted = named === "" ? activeNow : named;
+					if (wanted === null) {
+						return {
+							mode: "instance" as string,
+							status: "needs-instance",
+							instances: describe(),
+							detail:
+								"No instance is active" +
+								(args.name === undefined ? "." : ` and "${named}" was not given as an existing name.`) +
+								" Use mode=instance instance=list to see them, then instance=use name=<name>.",
+						};
+					}
+					const entry = listInstances(projectRoot).find((candidate) => candidate.name === wanted);
+					if (entry === undefined) {
+						return {
+							mode: "instance" as string,
+							status: "unknown-instance",
+							activeInstance: activeNow ?? undefined,
+							instances: describe(),
+							detail: `No instance named "${wanted}" in this project. Run mode=instance instance=list.`,
+						};
+					}
+					return {
+						mode: "instance" as string,
+						status: "ok",
+						activeInstance: activeNow ?? undefined,
+						envFile: displayPath(entry.path),
+						instances: describe(),
+						detail:
+							`Instance ${entry.name}${entry.name === activeNow ? " (ACTIVE)" : ""}: ` +
+							`${entry.url ?? "unreadable"} db=${entry.db ?? "?"} user=${entry.username ?? "?"} ` +
+							`environment=${entry.environment ?? "UNDECLARED"} ` +
+							`(file: ${displayPath(entry.path)}${entry.legacy ? ", legacy location" : ""}). ` +
+							"The secret is never read here: only the file that holds it is named.",
+					};
+				}
+
+				if (operation === "use") {
+					if (named === "") {
+						return {
+							mode: "instance" as string,
+							status: "needs-instance",
+							instances: describe(),
+							detail: "instance=use requires name=<instance>.",
+						};
+					}
+					if (instanceEnvPath(projectRoot, named) === null) {
+						return {
+							mode: "instance" as string,
+							status: "invalid-name",
+							detail:
+								`"${named}" is not a usable instance name: letters, digits, dot, dash and underscore only, ` +
+								"up to 64 characters, and no path separators (the name becomes a file name).",
+						};
+					}
+					const entry = listInstances(projectRoot).find((candidate) => candidate.name === named);
+					if (entry === undefined) {
+						return {
+							mode: "instance" as string,
+							status: "unknown-instance",
+							activeInstance: activeNow ?? undefined,
+							instances: describe(),
+							detail: `No instance named "${named}" in this project, so there is nothing to activate.`,
+						};
+					}
+					// Activating decides WHERE mutations go, so it needs the same
+					// authorization the connection itself needs: switching the pointer to
+					// an unauthorized target would only move the failure one step later.
+					const authorized =
+						entry.url !== null && entry.db !== null && entry.username !== null
+							? hasValidGrant(projectRoot, "connection", fingerprintOf(entry.url, entry.db, entry.username))
+							: false;
+					if (!authorized) {
+						return {
+							mode: "instance" as string,
+							status: "not-authorized",
+							activeInstance: activeNow ?? undefined,
+							instances: describe(),
+							detail:
+								`Instance ${named} has no live connection grant, so it was NOT activated` +
+								(entry.url === null ? " (and its file could not be read)." : ` (${entry.url} db=${entry.db}, user=${entry.username}).`) +
+								" Each target is authorized on its own: activate it after the developer approves it " +
+								"(complete its .env, then mode=authorize).",
+						};
+					}
+					if (entry.legacy) {
+						return {
+							mode: "instance" as string,
+							status: "legacy-target",
+							envFile: displayPath(entry.path),
+							activeInstance: activeNow ?? undefined,
+							instances: describe(),
+							detail:
+								`"${named}" is the legacy <project>/.sdd/.env, which the cascade already uses when no ` +
+								"named instance is active. To keep several targets, create a named one " +
+								"(mode=instance instance=add name=<name>) and remove the legacy file yourself once the " +
+								"new one is authorized — the plugin will not move a credential file on its own.",
+						};
+					}
+					if (!writeActiveInstance(projectRoot, named)) {
+						return {
+							mode: "instance" as string,
+							status: "error",
+							detail: `Could not record "${named}" as the active instance: the pointer under .sdd/instances/ is not writable.`,
+						};
+					}
+					return {
+						mode: "instance" as string,
+						status: "ok",
+						activeInstance: named,
+						envFile: displayPath(entry.path),
+						instances: describe(),
+						detail:
+							`Active instance: ${named} (${entry.url ?? "unreadable"} db=${entry.db ?? "?"}). ` +
+							"Every connection tool now uses it; the other instances stay configured and untouched.",
+					};
+				}
+
+				if (operation === "add") {
+					if (named === "") {
+						return {
+							mode: "instance" as string,
+							status: "needs-instance",
+							detail: "instance=add requires name=<instance> (for example: local, staging, client-acme).",
+						};
+					}
+					const target = instanceEnvPath(projectRoot, named);
+					if (target === null) {
+						return {
+							mode: "instance" as string,
+							status: "invalid-name",
+							detail:
+								`"${named}" is not a usable instance name: letters, digits, dot, dash and underscore only, ` +
+								"up to 64 characters, and no path separators (the name becomes a file name).",
+						};
+					}
+					if (existsSync(target)) {
+						return {
+							mode: "instance" as string,
+							status: "exists",
+							envFile: displayPath(target),
+							detail:
+								`${displayPath(target)} already exists — refusing to overwrite a credential file. ` +
+								"Edit it by hand, or pick another name.",
+						};
+					}
+					// The scaffold carries the NON-SECRET fields only; the secret is filled
+					// by hand, exactly like mode=interactive.
+					mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+					writeFileSync(
+						target,
+						[
+							`# dsh-odoo-sdd credentials — instance "${named}", written by odoo_setup (mode=instance).`,
+							"# Fill ODOO_PASSWORD below (an Odoo API key is recommended).",
+							"# NEVER commit this file; it must stay chmod 600.",
+							`ODOO_URL=${args.url?.trim() ?? "http://localhost:8069"}`,
+							`ODOO_DB=${args.db?.trim() ?? "dev_sdd"}`,
+							`ODOO_USERNAME=${args.username?.trim() ?? "admin"}`,
+							"ODOO_PASSWORD=",
+							"# ODOO_SDD_ENVIRONMENT=dev",
+							"",
+						].join("\n"),
+						{ mode: 0o600 },
+					);
+					const permission = ensureSecurePermissions(target);
+					writeSetupState(projectRoot, {
+						status: "needs-secret",
+						decidedAt: new Date().toISOString(),
+						scope: "project",
+						envFile: target,
+					});
+					return {
+						mode: "instance" as string,
+						status: "needs-secret",
+						envFile: displayPath(target),
+						activeInstance: activeNow ?? undefined,
+						permissionsEnforced: permission.enforced,
+						instances: describe(),
+						detail:
+							`Scaffold written at ${displayPath(target)} for instance "${named}" ` +
+							`(url/db/user ${args.url === undefined ? "are placeholders" : "as given"}). Fill ODOO_PASSWORD ` +
+							"by hand, then run mode=authorize to authorize THIS target, and mode=instance instance=use " +
+							`name=${named} to activate it.` +
+							(permission.note === undefined ? "" : `\nWARNING: ${permission.note}`),
+					};
+				}
+
+				// remove
+				if (named === "") {
+					return {
+						mode: "instance" as string,
+						status: "needs-instance",
+						instances: describe(),
+						detail: "instance=remove requires name=<instance> (and confirm_destructive=true to actually delete it).",
+					};
+				}
+				const target = instanceEnvPath(projectRoot, named);
+				if (target === null) {
+					return {
+						mode: "instance" as string,
+						status: "invalid-name",
+						detail: `"${named}" is not a usable instance name, so no file can be resolved for it.`,
+					};
+				}
+				const entry = listInstances(projectRoot).find((candidate) => candidate.name === named);
+				if (entry === undefined) {
+					return {
+						mode: "instance" as string,
+						status: "unknown-instance",
+						instances: describe(),
+						detail: `No instance named "${named}" in this project.`,
+					};
+				}
+				if (entry.legacy) {
+					return {
+						mode: "instance" as string,
+						status: "legacy-target",
+						envFile: displayPath(entry.path),
+						detail:
+							`"${named}" is the legacy <project>/.sdd/.env and this tool will not delete it: it is the ` +
+							"only target you have until a named instance is authorized. Remove the file yourself when you " +
+							"are sure.",
+					};
+				}
+				if (args.confirm_destructive !== true) {
+					return {
+						mode: "instance" as string,
+						status: "needs-confirmation",
+						envFile: displayPath(entry.path),
+						instances: describe(),
+						detail:
+							`This would delete ${displayPath(entry.path)} (instance "${named}"). Pass ` +
+							"confirm_destructive=true to delete it. The stored connection grant for that target is not " +
+							"touched: revoke it with mode=revoke if you also want access withdrawn.",
+					};
+				}
+				if (!removeInstance(projectRoot, named)) {
+					return {
+						mode: "instance" as string,
+						status: "error",
+						detail: `Could not delete ${displayPath(entry.path)}.`,
+					};
+				}
+				return {
+					mode: "instance" as string,
+					status: "removed",
+					activeInstance: readActiveInstance(projectRoot) ?? undefined,
+					instances: describe(),
+					detail:
+						`Instance "${named}" removed (${displayPath(entry.path)}).` +
+						(readActiveInstance(projectRoot) === null && named === activeNow
+							? " It was the active one, so nothing is active now: the connection tools will refuse until you choose another."
+							: ""),
+				};
+			}
 
 			if (args.mode === "authorize") {
 				const loaded = loadCredentials(projectRoot);
@@ -1954,7 +2317,15 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			specsDir: { type: "string", description: "Specs folder inside the project when specsMode=project (default 'specs')." },
 			executeAllowlist: { type: "array", items: { type: "string" }, description: "Models permitted for odoo_execute mutations." },
 			autonomy: { type: "string", enum: ["supervised", "autonomous"], description: "Default delegation mode." },
-			licensed: { type: "string", enum: ["community", "enterprise"], description: "Licensing strategy. OCA/community is always searched as well." },
+			licensed: {
+				type: "string",
+				enum: ["community", "enterprise"],
+				description:
+					"DEPRECATED and ignored: the Odoo edition is a per-spec decision, answered in CLARIFY " +
+					"(sdd_phase operation=clarify licensed=...). A workspace can hold EE and CE projects at once, " +
+					"so there is no plugin-wide edition." +
+					".",
+			},
 			requireCheckpointBeforeMutation: { type: "boolean", description: "Refuse mutations until a checkpoint exists (fail-closed)." },
 			securityReviewRequired: { type: "boolean", description: "Require a clean security review before DONE." },
 			securityInterviewRequired: { type: "boolean", description: "Require the security interview (groups/ACL/rules) before ARCHITECTURE." },
@@ -1986,7 +2357,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							executeAllowlist: { type: "array", required: true, items: { type: "string" } },
 							methodAllowlist: { type: "array", items: { type: "string" } },
 							autonomy: { type: "string", required: true },
-							licensed: { type: "string", required: true },
+							// Present only when a legacy key still sits in .sdd/config.json: it is
+							// REPORTED so it can be deleted, never applied (the edition is per spec).
+							licensed: { type: "string", description: "DEPRECATED legacy key, reported only." },
 							requireCheckpointBeforeMutation: { type: "boolean", required: true },
 							requireSpecForChanges: { type: "boolean" },
 							securityReviewRequired: { type: "boolean", required: true },
@@ -2036,6 +2409,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			executeAllowlist?: string[];
 			methodAllowlist?: string[];
 			autonomy?: string;
+			/** Legacy field: accepted and REPORTED, never applied. The edition lives in the spec. */
 			licensed?: string;
 			requireCheckpointBeforeMutation?: boolean;
 			requireSpecForChanges?: boolean;
@@ -2050,8 +2424,6 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const normalize = (data: Record<string, unknown>) => {
 				const asString = (v: unknown, fallback: string): string => (typeof v === "string" ? v : fallback);
 				const asList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
-				// Two-value strategy only; legacy "oca" migrates to "community".
-				const asLicense = (v: unknown, fallback: string): string => (asString(v, fallback) === "enterprise" ? "enterprise" : "community");
 				return {
 					communityRepoUrl: asString(data["communityRepoUrl"], "https://github.com/odoo/odoo"),
 					communityRepoPath: asString(data["communityRepoPath"], ""),
@@ -2064,7 +2436,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					executeAllowlist: asList(data["executeAllowlist"]),
 					methodAllowlist: asList(data["methodAllowlist"]),
 					autonomy: asString(data["autonomy"], "supervised"),
-					licensed: asLicense(data["licensed"], "community"),
+					// Reported, never applied: the edition belongs to a spec, and a workspace
+					// can hold EE and CE projects at the same time.
+					...(typeof data["licensed"] === "string" ? { licensed: data["licensed"] } : {}),
 					requireCheckpointBeforeMutation: typeof data["requireCheckpointBeforeMutation"] === "boolean" ? data["requireCheckpointBeforeMutation"] : true,
 					requireSpecForChanges: typeof data["requireSpecForChanges"] === "boolean" ? data["requireSpecForChanges"] : true,
 					securityReviewRequired: typeof data["securityReviewRequired"] === "boolean" ? data["securityReviewRequired"] : true,
@@ -2107,13 +2481,21 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			};
 			if (args.mode === "read") {
 				const cfgRead = effectiveConfig(exec);
+				const stored = normalize(cfgRead as unknown as Record<string, unknown>);
+				// A legacy key is REPORTED, not honoured: the Odoo edition is decided per spec in
+				// CLARIFY, and a workspace-wide value would silently apply to every project here.
+				const legacyNote =
+					typeof stored.licensed === "string"
+						? "\nNOTE: `licensed` is obsolete and was NOT applied — the edition is a per-spec decision " +
+							`(the stored value says "${stored.licensed}"). Remove the key from the config file when convenient.`
+						: "";
 				return {
 					mode: "read" as string,
 					ok: true,
 					// The EFFECTIVE values, not just the file: a value coming from
 					// the deployment patch or Settings is in force too, and a
 					// "read" that hid it would misreport the live configuration.
-					config: normalize(cfgRead as unknown as Record<string, unknown>),
+					config: stored,
 					resolved: resolution(),
 					detail:
 						`Stored at ${displayPath(configFile(cfgRead.projectRoot))}.\n` +
@@ -2123,7 +2505,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							specsMode: cfgRead.specsMode,
 							specsDir: cfgRead.specsDir,
 							specsRoot: cfgRead.specsRoot,
-						})}`,
+						})}` +
+						legacyNote,
 				};
 			}
 			// mode=set
@@ -2162,7 +2545,6 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.executeAllowlist !== undefined) updates["executeAllowlist"] = args.executeAllowlist;
 			if (args.methodAllowlist !== undefined) updates["methodAllowlist"] = args.methodAllowlist;
 			if (args.autonomy !== undefined) updates["autonomy"] = args.autonomy;
-			if (args.licensed !== undefined) updates["licensed"] = args.licensed;
 			if (args.requireCheckpointBeforeMutation !== undefined) updates["requireCheckpointBeforeMutation"] = args.requireCheckpointBeforeMutation;
 			if (args.requireSpecForChanges !== undefined) updates["requireSpecForChanges"] = args.requireSpecForChanges;
 			if (args.securityReviewRequired !== undefined) updates["securityReviewRequired"] = args.securityReviewRequired;
@@ -2279,7 +2661,6 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			enterpriseRepoUrl: asString(merged["enterpriseRepoUrl"], config.enterpriseRepoUrl ?? "https://github.com/odoo/enterprise"),
 			enterpriseRepoPath: asString(merged["enterpriseRepoPath"], config.enterpriseRepoPath ?? ""),
 			autonomy: asString(merged["autonomy"], config.autonomy ?? "supervised"),
-			licensed: ((v: unknown, fb: string): string => (asString(v, fb) === "enterprise" ? "enterprise" : "community"))(merged["licensed"], config.licensed ?? "community"),
 			requireCheckpointBeforeMutation: asBool(merged["requireCheckpointBeforeMutation"], config.requireCheckpointBeforeMutation ?? true),
 			requireSpecForChanges: asBool(merged["requireSpecForChanges"], config.requireSpecForChanges ?? true),
 			securityReviewRequired: asBool(merged["securityReviewRequired"], config.securityReviewRequired ?? true),
@@ -2900,7 +3281,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			lines.push("## Configuration in effect");
 			lines.push(`- projectRoot=${cfg.projectRoot} (source: ${cfg.rootSource})`);
 			lines.push(`- specs: ${describeSpecsLocation({ projectRoot: cfg.projectRoot, specsMode: cfg.specsMode, specsDir: cfg.specsDir, specsRoot: cfg.specsRoot })}`);
-			lines.push(`- autonomy=${cfg.autonomy} licensed=${cfg.licensed}`);
+			lines.push(`- autonomy=${cfg.autonomy}`);
 			lines.push(`- requireSpecForChanges=${cfg.requireSpecForChanges}`);
 			lines.push(`- allowlist=${JSON.stringify(cfg.executeAllowlist)}`);
 			if (cfg.methodAllowlist.length > 0) lines.push(`- method allowlist=${JSON.stringify(cfg.methodAllowlist)}`);

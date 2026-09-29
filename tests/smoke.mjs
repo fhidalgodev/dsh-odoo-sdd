@@ -1273,6 +1273,45 @@ console.log("== settings schema (the host's volatileForm contract) ==");
 		["specsMode", "specsRoot", "specsDir", "executeAllowlist", "methodAllowlist", "autonomy", "licensed", "requireCheckpointBeforeMutation", "requireSpecForChanges", "documentationPolicy", "documentationLanguage", "maxCheckpoints"].every((f) => fields.includes(f)),
 		fields.join(", "),
 	);
+	// The other half of the same contract: an OLDER schemastery (the peer range
+	// used to allow 3.0.0, and a profile resolved 3.18.2) has no `.volatile()`, and
+	// calling it unguarded made the module THROW AT IMPORT — the plugin could not
+	// load at all. The schema must survive a library without the marker: the form
+	// degrades, the tools never do.
+	{
+		const stripped = z.object(
+			Object.fromEntries(
+				Object.entries(Config.dict ?? {}).map(([key, child]) => {
+					const clone = new z(child.toJSON());
+					delete clone.meta.volatile;
+					for (const nested of Object.values(clone.dict ?? {})) delete nested.meta.volatile;
+					return [key, clone];
+				}),
+			),
+		);
+		const withoutMarker = z.object(
+			Object.fromEntries(
+				Object.entries(stripped.dict ?? {}).map(([key, child]) => {
+					const bare = new z(child.toJSON());
+					// Simulate the old library: the method is simply not there.
+					Object.defineProperty(bare, "volatile", { value: undefined, configurable: true });
+					return [key, bare];
+				}),
+			),
+		);
+		check(
+			"the schema still builds when the library has no .volatile() (no unguarded call)",
+			(() => {
+				try {
+					volatileForm(withoutMarker);
+					return true;
+				} catch {
+					return false;
+				}
+			})(),
+		);
+	}
+
 	check(
 		"every editable field still accepts its type (the schema validates a real payload)",
 		(() => {

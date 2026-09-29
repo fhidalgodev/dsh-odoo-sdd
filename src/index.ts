@@ -139,6 +139,39 @@ export const name = "odoo-sdd";
 export const inject = ["tools", "skills"];
 
 /**
+ * Mark a schema node as editable in Settings, when the schema library supports it.
+ *
+ * `.volatile()` is what the host's `volatileForm` looks for, and it exists from
+ * schemastery 3.18.4 on. A host whose resolved copy is older (pnpm installed
+ * 3.18.2 for a profile, for instance) would otherwise make this module THROW at
+ * import time, taking the whole plugin down over a form marker — so the marker is
+ * applied when available and skipped when not, with the reason reported once.
+ * The tool surface and the pipeline never depend on it.
+ * @param field - the schema node to mark.
+ * @returns the same node, marked when the library supports it.
+ */
+let volatileWarningReported = false;
+const markVolatile = <T>(field: T): T => {
+	// The method is optional in the type on purpose: it is what an OLDER
+	// schemastery lacks, and the whole point is to keep working there.
+	const marker = (field as { volatile?: () => T }).volatile;
+	if (typeof marker === "function") return marker.call(field);
+	if (!volatileWarningReported) {
+		volatileWarningReported = true;
+		try {
+			console.warn(
+				"[dsh-odoo-sdd] this host resolves @deepseek-ai/schemastery without `.volatile()`, so the Settings form " +
+					"will be incomplete or absent. dsh-settings needs schemastery >= 3.18.4. The tools and the pipeline " +
+					"are unaffected; edit the configuration with `odoo_config mode=read|set`.",
+			);
+		} catch {
+			// a host without console is not a reason to fail
+		}
+	}
+	return field;
+};
+
+/**
  * Deployment configuration schema (settable from cordis.patch.yml).
  *
  * Schemastery convention: a property WITHOUT `.required()` is optional.
@@ -155,25 +188,25 @@ export const inject = ["tools", "skills"];
  */
 export const Config = z.object({
 	projectRoot: z.string(),
-	specsMode: z.string().volatile(),
-	specsRoot: z.string().volatile(),
-	specsDir: z.string().volatile(),
-	executeAllowlist: z.array(z.string()).volatile(),
-	methodAllowlist: z.array(z.string()).volatile(),
-	communityRepoUrl: z.string().volatile(),
-	communityRepoPath: z.string().volatile(),
-	enterpriseRepoUrl: z.string().volatile(),
-	enterpriseRepoPath: z.string().volatile(),
-	autonomy: z.string().volatile(),
-	licensed: z.string().volatile(),
-	requireCheckpointBeforeMutation: z.boolean().volatile(),
-	requireSpecForChanges: z.boolean().volatile(),
-	securityReviewRequired: z.boolean().volatile(),
-	securityInterviewRequired: z.boolean().volatile(),
-	auditAllTools: z.boolean().volatile(),
-	maxCheckpoints: z.number().volatile(),
-	documentationPolicy: z.string().volatile(),
-	documentationLanguage: z.string().volatile(),
+	specsMode: markVolatile(z.string()),
+	specsRoot: markVolatile(z.string()),
+	specsDir: markVolatile(z.string()),
+	executeAllowlist: markVolatile(z.array(z.string())),
+	methodAllowlist: markVolatile(z.array(z.string())),
+	communityRepoUrl: markVolatile(z.string()),
+	communityRepoPath: markVolatile(z.string()),
+	enterpriseRepoUrl: markVolatile(z.string()),
+	enterpriseRepoPath: markVolatile(z.string()),
+	autonomy: markVolatile(z.string()),
+	licensed: markVolatile(z.string()),
+	requireCheckpointBeforeMutation: markVolatile(z.boolean()),
+	requireSpecForChanges: markVolatile(z.boolean()),
+	securityReviewRequired: markVolatile(z.boolean()),
+	securityInterviewRequired: markVolatile(z.boolean()),
+	auditAllTools: markVolatile(z.boolean()),
+	maxCheckpoints: markVolatile(z.number()),
+	documentationPolicy: markVolatile(z.string()),
+	documentationLanguage: markVolatile(z.string()),
 });
 
 /** Effective deployment configuration after validation. */

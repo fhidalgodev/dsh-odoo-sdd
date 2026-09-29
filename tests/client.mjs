@@ -91,16 +91,57 @@ check("the bundle registers itself with the ModuleLoader", client !== undefined)
 check("it exports the host contract", client !== undefined && typeof client.apply === "function" && Array.isArray(client.inject) && client.name === "odoo-sdd");
 check(
 	"it declares the services it reads",
-	client !== undefined && ["slots", "locale", "theme"].every((s) => client.inject.includes(s)),
+	client !== undefined && ["slots", "locale", "theme", "configForms"].every((s) => client.inject.includes(s)),
 );
+
+// The regression this pins: the host 0.2.0-rc.2 REMOVED `settingsScope`, and the
+// section used to be registered inside `ctx.inject(["settingsScope"], …)`. An
+// inject of a service that no longer exists never runs its callback, so the
+// section disappeared from the sidebar with no error at all. The bundle must not
+// depend on that service any more — comments explaining the history are fine, a
+// property access is not.
+{
+	const source = readFileSync(fileURLToPath(new URL("../client/client.js", import.meta.url)), "utf8");
+	const code = source
+		.replace(/\/\*[\s\S]*?\*\//g, "")
+		.split("\n")
+		.map((line) => line.replace(/\s*\/\/.*$/, ""))
+		.join("\n");
+	check("the bundle no longer reads the removed `settingsScope` service", !/settingsScope/.test(code));
+}
 
 // ---- context stub: effects run immediately so the section is registered.
 let registered = null;
+/** The settings snapshot the panel reads, as the Host would report it. */
+let namespaceSnapshot = { value: {}, status: "ready", writable: true };
+/** Every write the panel performs, so persistence is asserted, not assumed. */
+const writes = [];
+/** Namespaces the fake Host "serves" (drives `whileServed`). */
+const served = new Set(["odoo-sdd"]);
 /**
- * The settings snapshot the panel reads. Declared before the context because
- * `bind()` reads it during apply.
+ * The `configForms` service of the host 0.2.0-rc.2, with the shape the real one
+ * has: `get(namespace)` returns a controller exposing getSnapshot/subscribe/set,
+ * and `whileServed(namespaces, register)` runs `register` only while the Host
+ * actually serves one of them, returning its disposer.
  */
-let settingsScope = { getSnapshot: () => ({ value: {}, status: "ready", writable: true }) };
+const configForms = {
+	get(namespace) {
+		return {
+			getSnapshot: () => (served.has(namespace) ? namespaceSnapshot : { value: {}, status: "unavailable", writable: false }),
+			subscribe: () => () => {},
+			set: async (field, value) => {
+				writes.push([field, value]);
+			},
+			unset: async (field) => {
+				writes.push([field, null]);
+			},
+		};
+	},
+	whileServed(namespaces, register) {
+		if (namespaces.some((ns) => served.has(ns))) return register(served);
+		return () => {};
+	},
+};
 const context = {
 	effect(fn) {
 		const dispose = fn();
@@ -115,18 +156,7 @@ const context = {
 			return Object.prototype.hasOwnProperty.call(dict, key) ? dict[key] : undefined;
 		},
 	},
-	inject(_names, cb) {
-		cb({
-			settingsScope: {
-				// A live getter, like the host scope: it must reflect later renders.
-				bind: () => ({
-					getSnapshot: () => settingsScope.getSnapshot(),
-					subscribe: () => () => {},
-					set: async () => {},
-				}),
-			},
-		});
-	},
+	configForms,
 	slots: {
 		inject(_name, cb) {
 			cb();
@@ -159,7 +189,7 @@ check("applying the bundle registers the settings section", typeof registered ==
 function render(snapshot) {
 	hookSlots = [];
 	hookIndex = 0;
-	settingsScope = { getSnapshot: () => ({ value: snapshot, status: "ready", writable: true }) };
+	namespaceSnapshot = { value: snapshot, status: "ready", writable: true };
 	return registered();
 }
 
@@ -325,6 +355,90 @@ check(
 	"the narrow-input rule is actually shipped in the stylesheet",
 	/\.odoo-sdd-input--short\{width:min\(100%,200px\)\}/.test(source),
 );
+
+// ---- host-contract edges: absent service, unserved namespace, disposal ----
+// These are the cases that decide whether the panel appears AT ALL, so they get
+// their own probes instead of riding on the happy-path stub above.
+console.log("== host contract edges (configForms presence) ==");
+{
+	/** A context with just enough surface for `apply` to reach the guard. */
+	const probeContext = ({ configForms, onRegister }) => ({
+		effect(fn) {
+			const dispose = fn();
+			return typeof dispose === "function" ? dispose : () => {};
+		},
+		locale: { register() {}, bind: () => (key) => key },
+		configForms,
+		slots: {
+			inject(_name, cb) { cb(); },
+			register(_spec, render) { if (onRegister) onRegister(render); return () => {}; },
+		},
+		uiWorkspace: {},
+	});
+
+	// (a) No `configForms` at all: it must SAY SO and not pretend to be fine.
+	const logged = [];
+	const realError = console.error;
+	console.error = (...args) => logged.push(args.join(" "));
+	let registeredProbe = null;
+	let threw = false;
+	try {
+		client.apply(probeContext({ configForms: undefined, onRegister: (r) => { registeredProbe = r; } }));
+	} catch (err) {
+		threw = true;
+	}
+	console.error = realError;
+	check("a host without configForms does not throw on apply", threw === false);
+	check("a host without configForms registers no section (nothing to bind)", registeredProbe === null);
+	check(
+		"a host without configForms says WHY, out loud",
+		logged.some((line) => /configForms/.test(line) && /cannot be registered|unavailable/i.test(line)),
+		logged.join(" | ").slice(0, 160),
+	);
+	check(
+		"...and the message names the way out (odoo_config)",
+		logged.some((line) => /odoo_config/.test(line)),
+	);
+
+	// (b) The service exists but is unusable (a partial/stale host): same answer.
+	const loggedPartial = [];
+	console.error = (...args) => loggedPartial.push(args.join(" "));
+	let registeredPartial = null;
+	client.apply(probeContext({ configForms: {}, onRegister: (r) => { registeredPartial = r; } }));
+	console.error = realError;
+	check("a malformed configForms service is refused too", registeredPartial === null && loggedPartial.length > 0);
+
+	// (c) The namespace is not served by the Host: `whileServed` must not register.
+	let registeredUnserved = "untouched";
+	client.apply(
+		probeContext({
+			configForms: {
+				get: () => ({ getSnapshot: () => ({ status: "unavailable", value: {}, writable: false }), subscribe: () => () => {}, set: async () => {} }),
+				whileServed: (namespaces, register) => {
+					// The real service registers only while one of them is served.
+					return namespaces.length > 0 ? () => {} : register(new Set());
+				},
+			},
+			onRegister: (r) => { registeredUnserved = r; },
+		}),
+	);
+	check("an unserved namespace registers nothing (no trace of the page)", registeredUnserved === "untouched");
+
+	// (d) Disposal is owned by the plugin: the disposer `whileServed` returns is
+	// handed to `ctx.effect`, so HMR/dispose cannot leak a registration.
+	let disposed = false;
+	let effectDisposer = null;
+	const disposalContext = probeContext({ configForms: undefined });
+	disposalContext.configForms = {
+		get: () => ({ getSnapshot: () => ({ status: "ready", value: {}, writable: true }), subscribe: () => () => {}, set: async () => {} }),
+		whileServed: () => () => { disposed = true; },
+	};
+	disposalContext.effect = (fn) => { effectDisposer = fn(); return () => {}; };
+	client.apply(disposalContext);
+	check("the registration is wrapped in ctx.effect (disposal is owned)", typeof effectDisposer === "function");
+	effectDisposer();
+	check("disposing the effect disposes the whileServed registration", disposed === true);
+}
 
 console.log(`\n${checks - failures}/${checks} checks passed.`);
 if (failures > 0) {

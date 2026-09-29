@@ -636,20 +636,28 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		return sanitizeForPersist(textValue, credentials);
 	};
 
-	// Fase 1: register the deployment configuration as an installable settings
-	// section (namespace "odoo-sdd"). This makes dsh-odoo-sdd appear as a
-	// configurable card in Settings → Plugins → Plugin configuration, exactly
-	// like dsh-agent-loop / dsh-bash-local / dsh-llm-* do via installSection —
-	// no browser half needed.
+	// Settings section. Two host contracts, one namespace ("odoo-sdd"):
+	//
+	//   - OLD (dsh <= 0.1.7): the plugin PUSHED its Config schema into the host
+	//     with `settings.installSection(...)` and got a live thunk back.
+	//   - NEW (dsh >= 0.2.0): that API was REMOVED, and the host now DERIVES the
+	//     form from the plugin's own `Config` schema (dsh-settings reads
+	//     `configEditor.configuration()` and keeps one form per profile entry,
+	//     keyed by the entry id — our bundle patch declares `id: odoo-sdd`).
+	//
+	// There is nothing to REGISTER on the new host: the exported schema IS the
+	// form, and the resolved values arrive as this plugin's `config` argument.
+	// The old branch stays only so an instance running on an older host keeps
+	// feeding live edits into `effectiveConfig()`.
 	const ODOO_SDD_NAMESPACE = "odoo-sdd";
 	interface SddsSettingsHooks {
 		setSource(current: () => unknown): void;
 		onChange(): void;
 	}
 	type SddsSettingsProvider = {
-		settings: {
+		settings: Partial<{
 			installSection(owner: unknown, ns: string, schema: unknown, entry: unknown, hooks: SddsSettingsHooks): void;
-		};
+		}>;
 	};
 	const sddsDefaultConfig = {
 		// Kept in the schema for headless/CI hosts, but NOT offered as an
@@ -683,6 +691,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// it — is what makes edits in Settings → Odoo SDD actually reach the tools.
 	let settingsValues: (() => Record<string, unknown>) | null = null;
 	ctx.inject?.<SddsSettingsProvider>(["settings"], (settingsCtx) => {
+		// `Partial<>` plus this check: on the new host the service EXISTS but
+		// carries a different surface, and calling a method that is not there
+		// would throw during mount for a feature the host no longer needs.
+		if (typeof settingsCtx.settings?.installSection !== "function") return;
 		settingsCtx.settings.installSection(
 			ctx,
 			ODOO_SDD_NAMESPACE,

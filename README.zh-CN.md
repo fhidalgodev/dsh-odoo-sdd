@@ -154,12 +154,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.5.0`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.6.0`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.5.0，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.6.0，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]
@@ -557,6 +557,12 @@ DSH 能跑的地方插件就能跑，并声称支持 **Linux、macOS 和 Windows
 
 在 Web UI 中打开 **Settings → Odoo SDD**。一切都可以在那里编辑，另外在你需要的
 地方还提供了几个可复制粘贴的预设。
+
+> **宿主要求：**设置面板需要 **dsh >= 0.2.0-rc.1**。该版本移除了面板原先绑定的
+> `settingsScope` 服务，改为根据插件自身的 `Config` schema 生成表单（条目 `odoo-sdd`）。
+> 在更旧的宿主上该分区不会出现，插件会在控制台说明原因；工具与流水线照常工作，
+> 可用 `odoo_config mode=read|set` 在对话中编辑同样的值。
+
 
 <p align="center">
   <img src="assets/settings-panel.jpg" alt="Settings → Odoo SDD：spec 存放在哪里、谁批准各个阶段、许可策略，以及变更白名单" width="640" />

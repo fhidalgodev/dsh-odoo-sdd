@@ -3,12 +3,19 @@
  * Loaded by the DSH web ModuleLoader from a profile's installed plugin
  * (the `./client` export). Canonical dshmarket-shaped client:
  *   function apply(ctx) with ctx.effect / ctx.locale / ctx.slots.inject /
- *   ctx.inject(["settingsScope"]) / ctx.settingsScope.bind({ namespace }) /
+ *   ctx.configForms.get(NS) / ctx.configForms.whileServed([NS], register) /
  *   ctx.uiWorkspace.listDirectory (for the local-path folder browser).
  *
- * Contributes the "Odoo SDD" settings section (sidebar) and the matching card
- * in Settings → Plugins → Plugin configuration, both EDITABLE through the
- * bound settings scope (set()) so changes persist to the Host.
+ * Contributes the "Odoo SDD" settings section (sidebar), EDITABLE through the
+ * config form of our namespace (getSnapshot/subscribe to read, set/unset to
+ * write) so changes persist to the Host.
+ *
+ * WHY `configForms` AND NOT `settingsScope`: the host 0.2.0-rc.2 removed the
+ * `settingsScope` service, and the section used to be registered INSIDE the
+ * callback of `ctx.inject(["settingsScope"], …)`. An inject of a service that
+ * does not exist never runs its callback, so the section silently vanished from
+ * the sidebar — no error, no panel. `exports.inject` below is what makes
+ * `ctx.configForms` resolvable, and its absence is now reported out loud.
  *
  * UI/UX: theme-aware (host --dsw-alias-* tokens, light + dark), accessible
  * (labelled fields, visible focus, aria-live status, modal focus trap), smooth
@@ -28,7 +35,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"nav": "Odoo SDD",
 		"editable": "Editable",
 		"readonly": "Solo lectura",
-		"readonlyHint": "Este host no expone un settings scope; edita la configuración desde la conversación con odoo_config.",
+		"readonlyHint": "Este host no expone formularios de configuración; edita los ajustes desde la conversación con odoo_config.",
 		"delegation": "Delegación",
 		"delegationHint": "Quién aprueba las fases del pipeline.",
 		"supervised": "Supervisado",
@@ -97,7 +104,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		"nav": "Odoo SDD",
 		"editable": "Editable",
 		"readonly": "Read only",
-		"readonlyHint": "This host exposes no settings scope; edit the configuration from the conversation with odoo_config.",
+		"readonlyHint": "This host exposes no configuration forms; edit the settings from the conversation with odoo_config.",
 		"delegation": "Delegation",
 		"delegationHint": "Who approves the pipeline phases.",
 		"supervised": "Supervised",
@@ -246,15 +253,21 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 
 	/** Current, normalized snapshot of our namespace (defensive). */
 	/**
-	 * Read the settings scope snapshot. The snapshot is NOT the section itself:
+	 * Read the config-form snapshot. The snapshot is NOT the section itself:
 	 * it is { status, value, base, user, revision, writable, mode } — the
 	 * section lives under `value`. Reading the snapshot as if it were the
 	 * section yields undefined fields (and therefore composition defaults),
 	 * which is why writes appeared "not to persist".
+	 *
+	 * `form` is the namespace controller from `ctx.configForms.get(NS)`. It
+	 * exposes the same read/write face the previous `settingsScope.bind()`
+	 * returned (getSnapshot/subscribe/set), which is why only the transport
+	 * changed: `status: "unavailable"` still means "the Host does not serve this
+	 * namespace", and the section renders read-only in that case.
 	 */
-	function scopeState(scope) {
+	function scopeState(form) {
 		var raw = {};
-		try { raw = (scope && typeof scope.getSnapshot === "function") ? (scope.getSnapshot() || {}) : {}; } catch (e) { raw = {}; }
+		try { raw = (form && typeof form.getSnapshot === "function") ? (form.getSnapshot() || {}) : {}; } catch (e) { raw = {}; }
 		var value = (raw && typeof raw === "object" && raw.value && typeof raw.value === "object") ? raw.value : {};
 		return {
 			value: value,
@@ -263,8 +276,8 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		};
 	}
 
-	function readSnap(scope) {
-		var s = scopeState(scope).value;
+	function readSnap(form) {
+		var s = scopeState(form).value;
 		var asStr = function (v, fb) { return typeof v === "string" ? v : fb; };
 		var asList = function (v) { return Array.isArray(v) ? v.filter(function (x) { return typeof x === "string"; }) : []; };
 		var asBool = function (v, fb) { return typeof v === "boolean" ? v : fb; };
@@ -405,24 +418,24 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 
 	var SddSection = function (props) {
 		var t = props.t;
-		var scope = props.scope;
+		var formCtl = props.form;
 		var prefix = props.idPrefix || "odoo-sdd";
 		var listDirectory = props.listDirectory;
 		var pickDirectory = props.pickDirectory;
-		var ss = scopeState(scope);
-		var canWrite = Boolean(scope) && typeof scope === "object" && typeof scope.set === "function" && ss.writable && ss.status !== "unavailable";
+		var ss = scopeState(formCtl);
+		var canWrite = Boolean(formCtl) && typeof formCtl === "object" && typeof formCtl.set === "function" && ss.writable && ss.status !== "unavailable";
 
-		var st = react.useState(function () { return { form: toForm(readSnap(scope)), dirty: false, status: "idle", picker: null }; });
+		var st = react.useState(function () { return { form: toForm(readSnap(formCtl)), dirty: false, status: "idle", picker: null }; });
 		var model = st[0];
 		var setModel = st[1];
 		var form = model.form;
 
-		if (react.useEffect && scope && typeof scope.subscribe === "function") {
+		if (react.useEffect && formCtl && typeof formCtl.subscribe === "function") {
 			react.useEffect(function () {
-				return scope.subscribe(function () {
-					setModel(function (m) { return Object.assign({}, m, { form: toForm(readSnap(scope)), dirty: false, status: "idle" }); });
+				return formCtl.subscribe(function () {
+					setModel(function (m) { return Object.assign({}, m, { form: toForm(readSnap(formCtl)), dirty: false, status: "idle" }); });
 				});
-			}, [scope]);
+			}, [formCtl]);
 		}
 
 		var edit = function (patch) {
@@ -432,7 +445,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 
 		var persist = function () {
 			if (!canWrite) return;
-			var snap = readSnap(scope);
+			var snap = readSnap(formCtl);
 			var parseList = function (v) { return String(v || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean); };
 			var target = {
 				autonomy: form.autonomy,
@@ -466,7 +479,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			});
 			if (ops.length === 0) { setModel(function (m) { return Object.assign({}, m, { dirty: false, status: "saved" }); }); return; }
 			setModel(function (m) { return Object.assign({}, m, { status: "saving" }); });
-			Promise.all(ops.map(function (pair) { return scope.set(pair[0], pair[1]); })).then(function () {
+			Promise.all(ops.map(function (pair) { return formCtl.set(pair[0], pair[1]); })).then(function () {
 				setModel(function (m) { return Object.assign({}, m, { dirty: false, status: "saved", errorText: "" }); });
 			}).catch(function (err) {
 				var msg = (err && err.message) ? String(err.message) : "";
@@ -710,7 +723,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			h("div", { className: "odoo-sdd-actions" },
 				h("button", { type: "button", className: "odoo-sdd-btn odoo-sdd-btn--primary", disabled: !canWrite || !model.dirty || model.status === "saving", onClick: persist },
 					model.status === "saving" ? t("saving") : t("save")),
-				h("button", { type: "button", className: "odoo-sdd-btn odoo-sdd-btn--ghost", disabled: !canWrite || !model.dirty || model.status === "saving", onClick: function () { setModel({ form: toForm(readSnap(scope)), dirty: false, status: "idle", picker: null }); } }, t("discard")),
+				h("button", { type: "button", className: "odoo-sdd-btn odoo-sdd-btn--ghost", disabled: !canWrite || !model.dirty || model.status === "saving", onClick: function () { setModel({ form: toForm(readSnap(formCtl)), dirty: false, status: "idle", picker: null }); } }, t("discard")),
 				status)
 		);
 	};
@@ -730,31 +743,48 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 			// injected instead of leaking it into the document head forever.
 			ctx.effect(function () { injectCss(); return removeCss; }, "odoo-sdd: stylesheet");
 
-			ctx.inject(["settingsScope"], function (scoped) {
-				var scope = null;
-				try {
-					if (scoped && scoped.settingsScope && typeof scoped.settingsScope.bind === "function") {
-						scope = scoped.settingsScope.bind({ namespace: NS });
-					}
-				} catch (e) {
-					if (typeof console !== "undefined") console.warn("[dsh-odoo-sdd] settings scope bind failed:", e);
-					scope = null;
+			// Host folder picking (optional): native OS chooser first, then
+			// the in-app listing dialog — depending on the composed picker.
+			var listDirectory = null;
+			var pickDirectory = null;
+			try {
+				if (ctx.uiWorkspace && typeof ctx.uiWorkspace.listDirectory === "function") {
+					listDirectory = function (path) { return ctx.uiWorkspace.listDirectory(path); };
 				}
+				if (ctx.uiWorkspace && typeof ctx.uiWorkspace.pickDirectory === "function") {
+					pickDirectory = function () { return ctx.uiWorkspace.pickDirectory(); };
+				}
+			} catch (e) { listDirectory = null; pickDirectory = null; }
 
-				// Host folder picking (optional): native OS chooser first, then
-				// the in-app listing dialog — depending on the composed picker.
-				var listDirectory = null;
-				var pickDirectory = null;
-				try {
-					if (ctx.uiWorkspace && typeof ctx.uiWorkspace.listDirectory === "function") {
-						listDirectory = function (path) { return ctx.uiWorkspace.listDirectory(path); };
-					}
-					if (ctx.uiWorkspace && typeof ctx.uiWorkspace.pickDirectory === "function") {
-						pickDirectory = function () { return ctx.uiWorkspace.pickDirectory(); };
-					}
-				} catch (e) { listDirectory = null; pickDirectory = null; }
+			// `configForms` is a REQUIRED service (see `exports.inject`): without
+			// it there is no namespace form to read or write. Failing loudly here
+			// is deliberate — the previous contract made the whole section vanish
+			// without a word, which is exactly how a host upgrade broke it.
+			var configForms = ctx.configForms;
+			if (!configForms || typeof configForms.get !== "function") {
+				if (typeof console !== "undefined") {
+					console.error(
+						"[dsh-odoo-sdd] the `configForms` service is unavailable, so the \"Odoo SDD\" Settings section cannot be registered. " +
+						"This host is older than the client contract (dsh >= 0.2.0-rc.1). The tools and the SDD pipeline keep working; " +
+						"edit the configuration with `odoo_config mode=read|set` instead."
+					);
+				}
+				return;
+			}
 
-				ctx.slots.inject("settings.section", function () {
+			var sectionFor = function (form) {
+				return function () {
+					return h(SddSection, { t: t, form: form, listDirectory: listDirectory, pickDirectory: pickDirectory, idPrefix: "odoo-sdd-sec" });
+				};
+			};
+
+			// The section is registered while the Host actually SERVES our
+			// namespace, and disposed when it stops: a deployment that never
+			// composed it shows no trace of the page. `whileServed` returns the
+			// disposer and expects the caller to own it through `ctx.effect`.
+			ctx.effect(function () {
+				return configForms.whileServed([NS], function () {
+					var form = configForms.get(NS);
 					return ctx.slots.register({
 						name: "settings.section",
 						id: "odoo-sdd",
@@ -762,13 +792,13 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 						label: function () { return t("nav"); },
 						locale: NS,
 						inject: function () { return { t: t }; }
-					}, function () { return h(SddSection, { t: t, scope: scope, listDirectory: listDirectory, pickDirectory: pickDirectory, idPrefix: "odoo-sdd-sec" }); });
+					}, sectionFor(form));
 				});
+			}, "odoo-sdd: settings section");
 
-				// NOTE: deliberately NO `settings.plugin.item` registration — the
-				// configuration lives in its own standalone Settings section (the
-				// sidebar entry above), not as a card inside Settings → Plugins.
-			});
+			// NOTE: deliberately NO `settings.plugin.item` registration — the
+			// configuration lives in its own standalone Settings section (the
+			// sidebar entry above), not as a card inside Settings → Plugins.
 		} catch (e) {
 			if (typeof console !== "undefined") console.error("[dsh-odoo-sdd] client apply failed:", e);
 		}
@@ -783,7 +813,7 @@ window.__ModuleLoader__.load({ id: "dsh-odoo-sdd", factory: (require) => {
 		}
 		return missing;
 	};
-	var inject = ["slots", "locale", "theme", "uiWorkspace"];
+	var inject = ["slots", "locale", "theme", "uiWorkspace", "configForms"];
 	exports.apply = apply;
 	exports.inject = inject;
 	exports.name = "odoo-sdd";

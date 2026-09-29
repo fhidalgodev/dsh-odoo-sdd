@@ -163,12 +163,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.5.0`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.6.0`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.5.0, published with a provenance attestation
+npm install dsh-odoo-sdd        # 0.6.0, published with a provenance attestation
 ```
 
 > [!IMPORTANT]
@@ -617,6 +617,14 @@ name — a foreign folder is never adopted. `.sdd/` always stays with the projec
 
 Open **Settings → Odoo SDD** in the Web UI. Everything is editable there, plus a
 few copy-paste presets where you need them.
+
+> **Host requirement:** the Settings panel needs **dsh >= 0.2.0-rc.1**. That host
+> removed the `settingsScope` service this panel used to bind to, and it now
+> renders the form from the plugin's own `Config` schema (entry `odoo-sdd`). On an
+> older host the section is absent and the plugin says so in the console; the tools
+> and the pipeline keep working, and `odoo_config mode=read|set` edits the same
+> values from the conversation.
+
 
 <p align="center">
   <img src="assets/settings-panel.jpg" alt="Settings → Odoo SDD: where specs live, who approves the phases, licensing, and the mutation allowlist" width="640" />

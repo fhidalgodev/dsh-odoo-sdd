@@ -164,12 +164,12 @@ bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
 
 - **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
 - Acepta cualquier spec de pnpm, así que podés fijar una versión:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.5.0`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.6.0`.
 
 ¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.5.0, publicada con attestation de provenance
+npm install dsh-odoo-sdd        # 0.6.0, publicada con attestation de provenance
 ```
 
 > [!IMPORTANT]
@@ -616,6 +616,14 @@ carpeta — una carpeta ajena nunca se adopta. `.sdd/` siempre queda en el proye
 
 Abrí **Ajustes → Odoo SDD** en la Web UI. Todo es editable ahí, más algunos
 presets para copiar y pegar donde los necesites.
+
+> **Requisito del host:** el panel de Ajustes necesita **dsh >= 0.2.0-rc.1**. Ese host
+> eliminó el servicio `settingsScope` al que el panel se enlazaba, y ahora compone el
+> formulario a partir del propio esquema `Config` del plugin (entrada `odoo-sdd`). En un
+> host anterior la sección no aparece y el plugin lo dice en la consola; las tools y el
+> pipeline siguen funcionando, y `odoo_config mode=read|set` edita los mismos valores
+> desde la conversación.
+
 
 <p align="center">
   <img src="assets/settings-panel.jpg" alt="Ajustes → Odoo SDD: dónde viven las specs, quién aprueba las fases, licencia y el allowlist de mutaciones" width="640" />

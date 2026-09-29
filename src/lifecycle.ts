@@ -22,6 +22,7 @@ export type OwnedKind =
 	| "connection grants"
 	| "UI session cookie"
 	| "active run state"
+	| "session spec pointers"
 	| "audit log"
 	| "plugin configuration"
 	| "setup decision"
@@ -75,6 +76,7 @@ export function ownedStatePaths(projectRoot: string): OwnedPath[] {
 		{ rel: ".sdd/grants.json", kind: "connection grants", dir: false },
 		{ rel: ".sdd/session.json", kind: "UI session cookie", dir: false },
 		{ rel: ".sdd/active.json", kind: "active run state", dir: false },
+		{ rel: ".sdd/active", kind: "session spec pointers", dir: true },
 		{ rel: ".sdd/audit.jsonl", kind: "audit log", dir: false },
 		{ rel: ".sdd/config.json", kind: "plugin configuration", dir: false },
 		{ rel: ".sdd/setup-state.json", kind: "setup decision", dir: false },

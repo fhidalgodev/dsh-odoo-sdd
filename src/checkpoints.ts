@@ -265,19 +265,73 @@ export interface ActiveState {
 	updatedAt: string;
 }
 
+/**
+ * Why a pointer answered, and how much it may authorize.
+ *
+ * - `session`: this session's own pointer. The normal case.
+ * - `project`: no pointer of its own, and the project's last-spec summary is
+ *   fresh enough to be a HINT. Usable, but reported so callers can say so.
+ * - `none`: nothing usable. Callers must treat this as "no spec", never as
+ *   "phase null, so anything goes".
+ */
+export type ActiveStateSource = "session" | "project" | "none";
+
+/** A resolved pointer plus its provenance. */
+export interface ResolvedActiveState {
+	state: ActiveState;
+	source: ActiveStateSource;
+	/** Session the pointer belongs to. */
+	sessionId?: string;
+	/**
+	 * True when a session was identified but had no pointer of its own, so the
+	 * project summary answered instead.
+	 */
+	hinted: boolean;
+}
+
 const SDD_DIR = ".sdd";
 const ACTIVE_FILE = "active.json";
+const ACTIVE_DIR = "active";
+const ANONYMOUS_SESSION = "anonymous";
+/** How long the project's last-spec summary stays usable as a hint. */
+const PROJECT_HINT_TTL_MS = 12 * 60 * 60 * 1000;
 
 /** Absolute path of the plugin state directory. */
 function sddDir(projectRoot: string): string {
 	return join(projectRoot, SDD_DIR);
 }
 
-/** Read the active-run state (safe defaults when absent/corrupt). */
-export function readActiveState(projectRoot: string): ActiveState {
-	const file = join(sddDir(projectRoot), ACTIVE_FILE);
-	const fallback: ActiveState = { specId: null, phase: null, checkpointId: null, updatedAt: "" };
-	if (!existsSync(file)) return fallback;
+/**
+ * Sanitize a session identifier so it can be a FILE NAME.
+ *
+ * `Agent.id` is a `SessionId` (`session-<uuid>` in practice), but it reaches this
+ * module as an untyped value: a value carrying a separator or `..` would place the
+ * pointer outside `.sdd/active/`. Anything unusable becomes `anonymous` rather
+ * than silently sharing another session's file.
+ * @param sessionId - the raw identifier, when the call carried one.
+ * @returns a safe file-name segment.
+ */
+export function sessionFileKey(sessionId: string | undefined): string {
+	if (typeof sessionId !== "string") return ANONYMOUS_SESSION;
+	const trimmed = sessionId.trim();
+	if (trimmed === "" || trimmed.length > 128) return ANONYMOUS_SESSION;
+	if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(trimmed) || trimmed.includes("..")) return ANONYMOUS_SESSION;
+	return trimmed;
+}
+
+/** Absolute path of the directory holding the per-session pointers. */
+export function activeSessionsDir(projectRoot: string): string {
+	return join(sddDir(projectRoot), ACTIVE_DIR);
+}
+
+/** Absolute path of the pointer one session writes. */
+export function activeSessionPath(projectRoot: string, sessionId: string | undefined): string {
+	return join(activeSessionsDir(projectRoot), `${sessionFileKey(sessionId)}.json`);
+}
+
+/** Parse a pointer file, tolerating absence and corruption. */
+function parseActiveFile(file: string): ActiveState | null {
+	if (!existsSync(file)) return null;
 	try {
 		const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<ActiveState>;
 		return {
@@ -287,7 +341,150 @@ export function readActiveState(projectRoot: string): ActiveState {
 			updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : "",
 		};
 	} catch {
-		return fallback;
+		return null;
+	}
+}
+
+const EMPTY_ACTIVE: ActiveState = { specId: null, phase: null, checkpointId: null, updatedAt: "" };
+
+/**
+ * Read the PROJECT's last-spec summary.
+ *
+ * Its historical meaning is unchanged — "the spec the project last worked on" —
+ * and it stays readable for displays, tooling and the migration path. It is no
+ * longer the AUTHORITY for what a session may do: {@link resolveActiveState} is.
+ * @param projectRoot - workspace root.
+ * @returns the summary, with safe defaults when absent or corrupt.
+ */
+export function readActiveState(projectRoot: string): ActiveState {
+	return parseActiveFile(join(sddDir(projectRoot), ACTIVE_FILE)) ?? { ...EMPTY_ACTIVE };
+}
+
+/** Predicate telling whether a spec id still exists on disk. */
+export type SpecExists = (specId: string) => boolean;
+
+/**
+ * Resolve the pointer THIS session works against.
+ *
+ * The rules exist to prevent one failure specifically: a session authorizing its
+ * changes against a spec another session happened to leave in a shared file. So a
+ * session's own pointer always wins, and the project summary is only a HINT —
+ * fresh, and still naming a spec that exists — so a newly opened session can
+ * continue where the project left off.
+ * @param projectRoot - workspace root.
+ * @param sessionId - the calling session's identifier, when it has one.
+ * @param specExists - predicate telling whether a spec id is still on disk.
+ * @returns the pointer, its provenance, and whether it answered merely as a hint.
+ */
+export function resolveActiveState(
+	projectRoot: string,
+	sessionId: string | undefined,
+	specExists: SpecExists,
+): ResolvedActiveState {
+	const own = parseActiveFile(activeSessionPath(projectRoot, sessionId));
+	if (own !== null) {
+		// A session that wrote a pointer has SPOKEN, even when it wrote "no spec":
+		// falling back to the project summary here would re-authorize a session that
+		// deliberately cleared its own pointer.
+		return { state: own, source: "session", sessionId, hinted: false };
+	}
+	const project = parseActiveFile(join(sddDir(projectRoot), ACTIVE_FILE));
+	if (project !== null && project.specId !== null) {
+		const stamp = Date.parse(project.updatedAt);
+		const fresh = Number.isFinite(stamp) && Date.now() - stamp <= PROJECT_HINT_TTL_MS;
+		if (fresh && specExists(project.specId)) {
+			return { state: project, source: "project", sessionId, hinted: true };
+		}
+	}
+	// No pointer of its own and no usable hint: this session has no spec. That is a
+	// fail-closed answer, NOT an empty phase for a gate to read as "unknown".
+	return { state: { ...EMPTY_ACTIVE }, source: "none", sessionId, hinted: false };
+}
+
+/**
+ * Persist a pointer for one session, keeping the project summary in step.
+ *
+ * The summary is what a NEW session inherits, so the session that just acted
+ * rewrites it: the last one to work on the project is the best available answer
+ * to "where were we". It stays a convenience, never an authority — reading it
+ * still requires it to be fresh and to name an existing spec.
+ * @param projectRoot - workspace root.
+ * @param sessionId - the writing session's identifier.
+ * @param patch - fields to merge over that session's current pointer.
+ * @returns the resulting state.
+ */
+export function writeActiveStateFor(
+	projectRoot: string,
+	sessionId: string | undefined,
+	patch: Partial<ActiveState>,
+): ActiveState {
+	const own = parseActiveFile(activeSessionPath(projectRoot, sessionId)) ?? { ...EMPTY_ACTIVE };
+	const next: ActiveState = { ...own, ...patch, updatedAt: new Date().toISOString() };
+	try {
+		const dir = activeSessionsDir(projectRoot);
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		writeFileAtomic(join(dir, `${sessionFileKey(sessionId)}.json`), JSON.stringify(next, null, 2));
+	} catch {
+		// best effort: policy falls back to permissive-with-warning
+	}
+	try {
+		const dir = sddDir(projectRoot);
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		writeFileAtomic(join(dir, ACTIVE_FILE), JSON.stringify(next, null, 2));
+	} catch {
+		// the summary is a convenience: losing it must not fail the write above
+	}
+	return next;
+}
+
+/**
+ * Clear a field in EVERY pointer that references it.
+ *
+ * Dropping a checkpoint must not leave another session pointing at a snapshot that
+ * no longer exists: the guard would then accept a mutation believing a rollback
+ * target was still available.
+ * @param projectRoot - workspace root.
+ * @param field - field to null out.
+ * @param value - clear it only where the field currently equals this.
+ * @returns how many pointer files changed.
+ */
+export function clearActiveFieldEverywhere(
+	projectRoot: string,
+	field: "checkpointId" | "specId",
+	value: string,
+): number {
+	let changed = 0;
+	const targets: string[] = [];
+	try {
+		for (const entry of readdirSync(activeSessionsDir(projectRoot))) {
+			if (entry.endsWith(".json")) targets.push(join(activeSessionsDir(projectRoot), entry));
+		}
+	} catch {
+		// no session pointers yet
+	}
+	targets.push(join(sddDir(projectRoot), ACTIVE_FILE));
+	for (const file of targets) {
+		const state = parseActiveFile(file);
+		if (state === null || state[field] !== value) continue;
+		try {
+			writeFileAtomic(file, JSON.stringify({ ...state, [field]: null, updatedAt: new Date().toISOString() }, null, 2));
+			changed += 1;
+		} catch {
+			// best effort: the pointer is stale either way
+		}
+	}
+	return changed;
+}
+
+/** Session pointers present in a project (file names, without the extension). */
+export function listActiveSessions(projectRoot: string): string[] {
+	try {
+		return readdirSync(activeSessionsDir(projectRoot))
+			.filter((entry) => entry.endsWith(".json"))
+			.map((entry) => entry.slice(0, -".json".length))
+			.sort();
+	} catch {
+		return [];
 	}
 }
 
@@ -470,7 +667,15 @@ function copyTree(src: string, dst: string, rel: string, acc: Array<{ path: stri
  */
 export function createCheckpoint(
 	projectRoot: string,
-	options: { label: string; dirs: string[]; specId?: string | null; phase?: string | null; maxBytes?: number },
+	options: {
+		label: string;
+		dirs: string[];
+		specId?: string | null;
+		phase?: string | null;
+		maxBytes?: number;
+		/** Session whose pointer records this checkpoint as its rollback target. */
+		sessionId?: string;
+	},
 ): CheckpointManifest | null {
 	const id = `${new Date().toISOString().replace(/[:.]/g, "-")}-${slug(options.label)}`;
 	const root = join(checkpointsDir(projectRoot), id);
@@ -503,7 +708,13 @@ export function createCheckpoint(
 		};
 		writeFileAtomic(join(root, "manifest.json"), JSON.stringify(manifest, null, 2));
 		writeFileAtomic(join(root, "journal.json"), JSON.stringify([] satisfies DataOp[], null, 2));
-		writeActiveState(projectRoot, { checkpointId: id, specId: options.specId ?? undefined, phase: options.phase ?? undefined });
+		// The SNAPSHOT belongs to the project, the POINTER to the session that made
+		// it: another session must not inherit "a checkpoint exists" from this one.
+		writeActiveStateFor(projectRoot, options.sessionId, {
+			checkpointId: id,
+			specId: options.specId ?? undefined,
+			phase: options.phase ?? undefined,
+		});
 		return manifest;
 	} catch {
 		return null;
@@ -679,8 +890,10 @@ export function dropCheckpoint(projectRoot: string, id: string): boolean {
 	if (!existsSync(dir)) return false;
 	try {
 		rmSync(dir, { recursive: true, force: true });
-		const active = readActiveState(projectRoot);
-		if (active.checkpointId === id) writeActiveState(projectRoot, { checkpointId: null });
+		// Every session pointing at the deleted snapshot must stop pointing at it,
+		// otherwise its guard would authorize a mutation believing a rollback target
+		// was still available.
+		clearActiveFieldEverywhere(projectRoot, "checkpointId", id);
 		return true;
 	} catch {
 		return false;
@@ -707,9 +920,9 @@ export function purgeCheckpoints(projectRoot: string, max: number): number {
  * (captured in `.gitignore`), rather than to the model/handoff. Do NOT send
  * this journal through the model-facing content renderer.
  */
-export function appendDataOp(projectRoot: string, op: DataOp): void {
-	const active = readActiveState(projectRoot);
-	if (active.checkpointId === null) return; // no checkpoint: nothing to journal against
+export function appendDataOp(projectRoot: string, op: DataOp, checkpointId?: string | null): void {
+	const active = checkpointId === undefined ? readActiveState(projectRoot) : { checkpointId };
+	if (active.checkpointId === null || active.checkpointId === undefined) return; // no checkpoint: nothing to journal against
 	const file = join(checkpointsDir(projectRoot), active.checkpointId, "journal.json");
 	let ops: DataOp[] = [];
 	if (existsSync(file)) {
@@ -728,10 +941,10 @@ export function appendDataOp(projectRoot: string, op: DataOp): void {
 }
 
 /** Read the active checkpoint's journal. */
-export function readJournal(projectRoot: string): DataOp[] {
-	const active = readActiveState(projectRoot);
-	if (active.checkpointId === null) return [];
-	const file = join(checkpointsDir(projectRoot), active.checkpointId, "journal.json");
+export function readJournal(projectRoot: string, checkpointId?: string | null): DataOp[] {
+	const resolved = checkpointId === undefined ? readActiveState(projectRoot).checkpointId : checkpointId;
+	if (resolved === null || resolved === undefined) return [];
+	const file = join(checkpointsDir(projectRoot), resolved, "journal.json");
 	if (!existsSync(file)) return [];
 	try {
 		return JSON.parse(readFileSync(file, "utf8")) as DataOp[];
@@ -741,11 +954,11 @@ export function readJournal(projectRoot: string): DataOp[] {
 }
 
 /** Replace the active checkpoint's journal (after a successful undo). */
-export function writeJournal(projectRoot: string, ops: DataOp[]): void {
-	const active = readActiveState(projectRoot);
-	if (active.checkpointId === null) return;
+export function writeJournal(projectRoot: string, ops: DataOp[], checkpointId?: string | null): void {
+	const resolved = checkpointId === undefined ? readActiveState(projectRoot).checkpointId : checkpointId;
+	if (resolved === null || resolved === undefined) return;
 	try {
-		writeFileAtomic(join(checkpointsDir(projectRoot), active.checkpointId, "journal.json"), JSON.stringify(ops, null, 2));
+		writeFileAtomic(join(checkpointsDir(projectRoot), resolved, "journal.json"), JSON.stringify(ops, null, 2));
 	} catch {
 		// best effort
 	}

@@ -81,6 +81,12 @@ import { appendAuditLine, recordAudit } from "./audit.js";
 import {
 	readActiveState,
 	writeActiveState,
+	writeActiveStateFor,
+	resolveActiveState,
+	clearActiveFieldEverywhere,
+	activeSessionPath,
+	listActiveSessions,
+	activeSessionsDir,
 	readWaiver,
 	writeWaiver,
 	clearWaiver,
@@ -1879,7 +1885,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				}
 				if (requested !== null) state.mode = requested;
 				saveState(state);
-				writeActiveState(projectRoot, { specId: args.spec_id, phase: state.phase });
+				writeActiveStateFor(projectRoot, sessionIdOf(exec), { specId: args.spec_id, phase: state.phase });
 				return {
 					operation: "init" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
 					summary: summarize(state),
@@ -1890,7 +1896,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				};
 			}
 			if (args.operation === "rollback") {
-				const active = readActiveState(projectRoot);
+				const active = activeFor(cfgPhase, exec).state;
 				const checkpointId = args.checkpoint_id ?? active.checkpointId ?? null;
 				if (checkpointId === null) {
 					return {
@@ -1930,7 +1936,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				st.phase = st.mode === "functional" ? "APPLY_CONFIG" : "WRITE_CODE";
 				kbAppend(st, "blocker", `Rollback to ${checkpointId}: restored ${restored.restored.length} file(s). ${note}`.trim());
 				saveState(st);
-				writeActiveState(projectRoot, { specId: args.spec_id, phase: st.phase });
+				writeActiveStateFor(projectRoot, sessionIdOf(exec), { specId: args.spec_id, phase: st.phase });
 				appendAuditLine(projectRoot, "sdd_phase/rollback", { checkpoint: checkpointId, spec: args.spec_id }, clientFor(projectRoot).credentials, {
 					phase: st.phase, specId: args.spec_id, reason: note,
 				});
@@ -2006,7 +2012,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							"happened outside the pipeline.",
 					};
 				}
-				const active = readActiveState(projectRoot);
+				const active = activeFor(cfgPhase, exec).state;
 				const sessionId = sessionIdOf(exec);
 				if (sessionId === undefined) {
 					return {
@@ -2051,7 +2057,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			}
 			if (args.operation === "status") {
 				const kb = kbRead(specDir);
-				const active = readActiveState(projectRoot);
+				const resolved = activeFor(cfgPhase, exec);
+				const active = resolved.state;
 				const waiver = readWaiver(projectRoot);
 				const sameSession = waiver !== null && waiver.sessionId === sessionIdOf(exec);
 				writeActiveState(projectRoot, { specId: args.spec_id, phase: state.phase });
@@ -2158,9 +2165,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				// The ACTIVE pointer follows the canonical state even when the
 				// transition FAILED: reaching BLOCKED is persisted by `transition()`
 				// and returned with ok:false, and updating the pointer only on success
-				// left `.sdd/active.json` describing a phase the spec had already
-				// left — the guard then authorized a mutation from the stale copy.
-				writeActiveState(projectRoot, { specId: args.spec_id, phase: result.state.phase });
+				// left the pointer describing a phase the spec had already left — the
+				// guard then authorized a mutation from the stale copy.
+				writeActiveStateFor(projectRoot, sessionIdOf(exec), { specId: args.spec_id, phase: result.state.phase });
 				return {
 					operation: "advance" as string, phase: result.state.phase as string, ok: result.ok, requireDiagnosis: false,
 					summary: summarize(result.state),
@@ -2465,7 +2472,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					specsDir: cfg.specsDir,
 					specsRoot: cfg.specsRoot,
 				};
-				const active = readActiveState(cfg.projectRoot);
+				const active = activeFor(cfg, exec).state;
 				const activeSpec = active.specId === null ? "000-unnamed" : active.specId;
 				return {
 					projectRoot: cfg.projectRoot,
@@ -2888,20 +2895,33 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const root = rootFor(exec);
 			const cfg = effectiveConfig(exec);
 			const projectRoot = cfg.projectRoot;
-			const active = readActiveState(projectRoot);
+			// The SNAPSHOTS are the project's, the pointer is this session's: two
+			// sessions must not share "which checkpoint is my rollback target".
+			const resolvedActive = activeFor(cfg, exec);
+			const active = resolvedActive.state;
+			/** The session's checkpoint, or the project's last one when it has none. */
+			const checkpointRef = (): string | null => active.checkpointId ?? projectCheckpoint(projectRoot);
 
 			if (args.operation === "list") {
 				const all = listCheckpoints(projectRoot);
 				const lines = all.map((c) => `${c.id}  [${c.phase ?? "?"}] ${c.label} — ${c.files.length} file(s)`);
 				return {
-					ok: true, operation: "list" as string, activeCheckpoint: active.checkpointId ?? undefined,
+					ok: true, operation: "list" as string, activeCheckpoint: checkpointRef() ?? undefined,
 					restored: [] as string[],
-					detail: `Active: ${active.checkpointId ?? "none"}\nCheckpoints (${all.length}):\n${lines.join("\n") || "(none)"}\n${rootNote(root)}`,
+					detail:
+						`Active: ${checkpointRef() ?? "none"}` +
+						(active.checkpointId === null && checkpointRef() !== null
+							? " (this session has none of its own; that is the project's LAST checkpoint, created elsewhere)"
+							: "") +
+						`\nCheckpoints (${all.length}):\n${lines.join("\n") || "(none)"}\n${rootNote(root)}`,
 				};
 			}
 
 			if (args.operation === "journal") {
-				const ops = args.checkpoint_id ? readCheckpointJournalFile(projectRoot, args.checkpoint_id) : readJournal(projectRoot);
+				// The SESSION's journal, falling back to the project's LAST checkpoint so a
+				// fresh session can still inspect what was recorded before it existed.
+				const journalRef = args.checkpoint_id ?? checkpointRef();
+				const ops = journalRef === null ? [] : readCheckpointJournalFile(projectRoot, journalRef);
 				const lines = ops.map((o) => `${o.ts} ${o.model}.${o.method} ids=${JSON.stringify(o.ids)} created=${JSON.stringify(o.createdIds)}`);
 				return {
 					ok: true, operation: "journal" as string, activeCheckpoint: active.checkpointId ?? undefined,
@@ -2917,7 +2937,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				const dropped = dropCheckpoint(projectRoot, args.checkpoint_id);
 				return {
 					ok: dropped, operation: "drop" as string,
-					activeCheckpoint: readActiveState(projectRoot).checkpointId ?? undefined,
+					activeCheckpoint: checkpointRef() ?? undefined,
 					restored: [] as string[],
 					detail: dropped ? `Dropped ${args.checkpoint_id}.` : `Checkpoint ${args.checkpoint_id} not found.`,
 				};
@@ -2933,6 +2953,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					specId,
 					phase: active.phase,
 					maxBytes: 25 * 1024 * 1024,
+					// The snapshot is the project's; the pointer saying "this is MY rollback
+					// target" is the calling session's, so a second session cannot treat
+					// another change's checkpoint as its own.
+					sessionId: sessionIdOf(exec),
 				});
 				if (manifest === null) {
 					return { ok: false, operation: "create" as string, restored: [] as string[], detail: "Could not create the checkpoint (filesystem error)." };
@@ -2986,7 +3010,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							? `${files.pruned.length} removed (remove_created=true).`
 							: "Pass remove_created=true to delete them and match the snapshot exactly.");
 			return {
-				ok: true, operation: "restore" as string, activeCheckpoint: readActiveState(projectRoot).checkpointId ?? undefined,
+				ok: true, operation: "restore" as string, activeCheckpoint: checkpointRef() ?? undefined,
 				restored: files.restored,
 				detail:
 					`Restored ${files.restored.length} file(s) from ${args.checkpoint_id}` +
@@ -3112,7 +3136,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						all.push(op);
 					}
 				};
-				const activeId = readActiveState(cfg.projectRoot).checkpointId;
+				const activeId = activeFor(cfg, exec).state.checkpointId ?? projectCheckpoint(cfg.projectRoot);
 				for (const checkpoint of checkpoints) {
 					if (checkpoint.id === activeId) continue; // read once, below
 					if (checkpoint.specId !== args.spec_id) continue;
@@ -3485,9 +3509,22 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	};
 
 	/** Session id of a tool call (the host's `agent.id` IS the session id). */
+	/**
+	 * The calling session's identity.
+	 *
+	 * `Agent.id` IS a `SessionId` (`dsh-agent/lib/types/types.d.ts`), and
+	 * `Agent.session.id` carries the same value, so both work. `session.id` is read
+	 * first because it is the one the host documents as "the live session this agent
+	 * drives"; a plugin that loses this identity would fall back to a shared
+	 * pointer, which is the failure this whole scoping exists to prevent.
+	 * @param exec - the calling execution context.
+	 * @returns the session id, or undefined when the host did not provide one.
+	 */
 	const sessionIdOf = (exec: unknown): string | undefined => {
-		const e = (exec ?? {}) as { agent?: { id?: unknown } };
-		return typeof e.agent?.id === "string" && e.agent.id !== "" ? e.agent.id : undefined;
+		const agent = ((exec ?? {}) as { agent?: { id?: unknown; session?: { id?: unknown } } }).agent;
+		const fromSession = agent?.session?.id;
+		if (typeof fromSession === "string" && fromSession !== "") return fromSession;
+		return typeof agent?.id === "string" && agent.id !== "" ? agent.id : undefined;
 	};
 
 	/**
@@ -3526,7 +3563,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 
 	const denyWithAudit = (name: string, args: Record<string, unknown>, reason: string, exec?: unknown): string => {		try {
 			const cfg = effectiveConfig(exec);
-			const active = readActiveState(cfg.projectRoot);
+			const active = activeFor(cfg, exec).state;
 			recordAudit(
 				cfg.projectRoot,
 				{
@@ -3560,7 +3597,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	 */
 	const canonicalPhase = (
 		cfg: ReturnType<typeof effectiveConfig>,
-		active: ReturnType<typeof readActiveState>,
+		active: { specId: string | null; phase: string | null },
 	): string | null => {
 		if (active.specId === null) return active.phase;
 		try {
@@ -3575,6 +3612,51 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			return active.phase;
 		}
 	};
+
+	/**
+	 * The pointer THIS session works against, with its provenance.
+	 *
+	 * `.sdd/active.json` used to be the single authority, so two sessions in one
+	 * project overwrote each other and a session could end up authorizing changes
+	 * against a spec it had never opened. The pointer now lives per session
+	 * (`.sdd/active/<sessionId>.json`); the project file survives only as a HINT
+	 * for a session that has none — fresh, and naming a spec that still exists.
+	 * @param cfg - the session's effective configuration.
+	 * @param exec - the calling execution, source of the session identity.
+	 * @returns the resolved pointer; `state.specId === null` means "no spec here".
+	 */
+	const activeFor = (cfg: ReturnType<typeof effectiveConfig>, exec?: unknown): ReturnType<typeof resolveActiveState> => {
+		// "Exists" means the spec DIRECTORY is there, not that its state is readable:
+		// a spec whose state.json is missing or corrupt must still be adoptable, and
+		// the gate stays closed anyway because `canonicalPhase` then reads whatever
+		// `loadState` can (CLARIFY by default), never the hint's phase.
+		const specExists = (specId: string): boolean => {
+			try {
+				const dir = specDirOf(cfg.projectRoot, cfg.specsDir, specId, {
+					specsMode: cfg.specsMode,
+					specsRoot: cfg.specsRoot,
+				}, { create: false });
+				return existsSync(dir);
+			} catch {
+				return false;
+			}
+		};
+		return resolveActiveState(cfg.projectRoot, sessionIdOf(exec), specExists);
+	};
+
+	/**
+	 * The checkpoint the PROJECT last created, read from the summary file.
+	 *
+	 * Distinct from the session's own pointer on purpose: a NEW session that never
+	 * created a checkpoint can still be shown ("and roll back to") the project's
+	 * most recent snapshot. It is a fallback for read-only reporting and for an
+	 * explicit restore — never the value the guard trusts for "a checkpoint
+	 * exists", which is the session's own, because a session must not ride on a
+	 * snapshot another one took for a different change.
+	 * @param projectRoot - workspace root.
+	 * @returns the last checkpoint id, or null.
+	 */
+	const projectCheckpoint = (projectRoot: string): string | null => readActiveState(projectRoot).checkpointId;
 
 	/** Why the policy guard could not be installed, when that happened. */
 	let guardUnavailable: string | null = null;
@@ -3593,7 +3675,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					// The guard runs for the SESSION's project: a guard that read a
 					// plugin-wide root would arm the wrong project's policy.
 					const cfg = effectiveConfig(execution);
-					const active = readActiveState(cfg.projectRoot);
+					// The SESSION's pointer, not the project's shared file: with two
+					// sessions open on one project, the shared file let one authorize
+					// changes against the other's spec.
+					const active = activeFor(cfg, execution).state;
 
 					// 1) Emergency stop halts every tool.
 					const stopCandidates = [join(cfg.projectRoot, ".sdd", "stop.md")];
@@ -3724,7 +3809,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					const cfg = effectiveConfig(execution);
 					if (!cfg.auditAllTools) return;
 					const result = (eventArgs[1] ?? {}) as { isError?: unknown; error?: unknown };
-					const active = readActiveState(cfg.projectRoot);
+					const active = activeFor(cfg, execution).state;
 					const failed = Boolean(result.isError) || result.error !== undefined;
 					const callId = typeof execution.callId === "string" ? execution.callId : undefined;
 					const began = callId !== undefined ? startedAt.get(callId) : undefined;
@@ -3863,7 +3948,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		},
 		audit: (entry, exec) => {
 			const cfg = effectiveConfig(exec);
-			const active = readActiveState(cfg.projectRoot);
+			const active = activeFor(cfg, exec).state;
 			recordAudit(
 			cfg.projectRoot,
 			{
@@ -4015,7 +4100,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		auditFailure: (info, exec) => {
 	try {
 			const cfg = effectiveConfig(exec);
-			const active = readActiveState(cfg.projectRoot);
+			const active = activeFor(cfg, exec).state;
 			recordAudit(
 				cfg.projectRoot,
 				{

@@ -164,12 +164,12 @@ bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
 
 - **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
 - Acepta cualquier spec de pnpm, así que podés fijar una versión:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.7.0`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.7.1`.
 
 ¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.7.0, publicada con attestation de provenance
+npm install dsh-odoo-sdd        # 0.7.1, publicada con attestation de provenance
 ```
 
 > [!IMPORTANT]
@@ -621,7 +621,8 @@ carpeta — una carpeta ajena nunca se adopta. `.sdd/` siempre queda en el proye
 │   ├── session.json            # cookie de Playwright
 │   ├── audit.jsonl             # cada llamada, sanitizada
 │   ├── setup-state.json        # decisión de onboarding + delegación
-│   ├── active.json             # spec activa, fase, checkpoint
+│   ├── active/<sessionId>.json # puntero de ESTA sesión (spec, fase, checkpoint)
+│   ├── active.json             # última spec del proyecto (pista para sesiones nuevas)
 │   └── checkpoints/<id>/       # manifest + snapshot + journal de datos
 └── specs/<NNN>-<slug>/         # o la carpeta central
 ```

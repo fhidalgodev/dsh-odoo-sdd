@@ -154,12 +154,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.7.0`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.7.1`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.7.0，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.7.1，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]
@@ -561,7 +561,8 @@ DSH 能跑的地方插件就能跑，并声称支持 **Linux、macOS 和 Windows
 │   ├── session.json            # Playwright cookie
 │   ├── audit.jsonl             # 每一次工具调用，已脱敏
 │   ├── setup-state.json        # 上手引导 + 委派决定
-│   ├── active.json             # 活动 spec、阶段、checkpoint
+│   ├── active/<sessionId>.json # 本会话的指针（spec、阶段、checkpoint）
+│   ├── active.json             # 项目最近使用的 spec（供新会话参考）
 │   └── checkpoints/<id>/       # manifest + 文件快照 + 数据日志
 └── specs/<NNN>-<slug>/         # 或者 central 文件夹
 ```

@@ -1478,7 +1478,10 @@ console.log("== settings source drives the effective configuration ==");
 		const stC = sdd.loadState(specDirC);
 		stC.phase = phase;
 		sdd.saveState(stC);
-		cpsMod.writeActiveState(projSet, { specId: "001-from-settings", phase, checkpointId: null });
+		// The guard authorizes from the SESSION's pointer, and this harness calls it
+		// without an `exec`, so the session is the anonymous one. Writing the
+		// project summary here would describe something the guard never reads.
+		cpsMod.writeActiveStateFor(projSet, undefined, { specId: "001-from-settings", phase, checkpointId: null });
 	};
 	const settingsSpecDir = join(settingsRootForSpecs, specLocMod.projectSlug(projSet), "001-from-settings");
 	setSpecPhaseIn(settingsSpecDir, "WRITE_CODE");
@@ -1500,7 +1503,7 @@ console.log("== settings source drives the effective configuration ==");
 	// form is a lie, so the panel's value must reach the guard (and the project
 	// file must be able to relax it, like every other policy).
 	setSpecPhaseIn(settingsSpecDir, "DONE");
-	cpsMod.writeActiveState(projSet, { specId: "001-from-settings", phase: "DONE", checkpointId: "cp-any" });
+	cpsMod.writeActiveStateFor(projSet, undefined, { specId: "001-from-settings", phase: "DONE", checkpointId: "cp-any" });
 	const editCall = { name: "write", arguments: { file_path: join(projSet, "mod.py"), content: "x\n" } };
 	live = { ...centralSettings() };
 	hooks.onChange();
@@ -2903,14 +2906,14 @@ console.log("== change policy (spec, waiver, escape hatches) ==");
 		guardC({ name: "odoo_execute", arguments: { model: "sale.order", method: "_create_invoices" }, ...execC }) === undefined,
 	);
 	// A finished spec has answered its question: the next request is a NEW one.
-	cps.writeActiveState(projChange, { phase: "DONE" });
+	cps.writeActiveStateFor(projChange, "session-change", { phase: "DONE" });
 	setSpecPhase(projChange, "001-chg", "DONE");
 	d = guardC({ name: "write", arguments: srcEdit, ...execC });
 	check("a DONE spec does not authorize new changes", typeof d === "string" && /001-chg is in DONE/.test(d));
 
 	// 3) Writing phase: the edit passes, and only the checkpoint policy remains
 	// for things that mutate the instance.
-	cps.writeActiveState(projChange, { phase: "WRITE_CODE" });
+	cps.writeActiveStateFor(projChange, "session-change", { phase: "WRITE_CODE" });
 	setSpecPhase(projChange, "001-chg", "WRITE_CODE");
 	check("WRITE_CODE authorizes the edit", guardC({ name: "write", arguments: srcEdit, ...execC }) === undefined);
 	d = guardC({ name: "odoo_import", arguments: { use: "prepare" }, ...execC });
@@ -2949,10 +2952,10 @@ console.log("== change policy (spec, waiver, escape hatches) ==");
 	check("another session is still stopped for mutations", typeof d === "string");
 	const stray = await cpC.execute({ operation: "create", label: "two", dirs: ["mod"] }, execC);
 	check("a second checkpoint exists", stray.ok === true);
-	cps.writeActiveState(projChange, { checkpointId: null });
+	cps.writeActiveStateFor(projChange, "session-change", { checkpointId: null });
 	d = guardC({ name: "odoo_execute", arguments: { method: "create" }, ...execC });
 	check("the waiver does not excuse a missing checkpoint", typeof d === "string" && /no checkpoint/.test(d));
-	cps.writeActiveState(projChange, { checkpointId: cpC1.activeCheckpoint });
+	cps.writeActiveStateFor(projChange, "session-change", { checkpointId: cpC1.activeCheckpoint });
 	check("with a checkpoint, the waived session may mutate in a DONE spec", guardC({ name: "odoo_execute", arguments: { method: "create" }, ...execC }) === undefined);
 	// status and the handoff must both SURFACE it: a silent exception is how a
 	// policy rots.
@@ -3729,6 +3732,134 @@ console.log("== per-session isolation (two projects, one plugin) ==");
 	await phaseTool.execute({ operation: "status", spec_id: "001-a" }, execA);
 	await phaseTool.execute({ operation: "status", spec_id: "001-b" }, execB);
 	check("each session's active pointer names its OWN spec", cps.readActiveState(isoA).specId === "001-a" && cps.readActiveState(isoB).specId === "001-b");
+
+	// ---- the pointer belongs to the SESSION, not the project ---------------
+	// The failure this exists for: with ONE shared `.sdd/active.json`, two
+	// sessions in the same project overwrote each other, and a session ended up
+	// authorizing its changes against a spec it had never opened (observed live
+	// while fixing the settings section: the guard cited another session's spec).
+	const sharedProj = join(dir, "shared-pointer");
+	mkdirSync(sharedProj, { recursive: true });
+	const sharedCtx = { tools: new Map(), guard: null };
+	const sharedHost = {
+		tools: { register: (tool) => sharedCtx.tools.set(tool.name, tool), guard: (g) => { sharedCtx.guard = g; return () => {}; } },
+		on: () => () => {},
+		approval: { request: async () => "allowed-once" },
+		skills: { register: () => {} },
+	};
+	plugin.apply(sharedHost, { projectRoot: sharedProj });
+	const sharedPhase = sharedCtx.tools.get("sdd_phase");
+	const sX = { agent: { id: "session-x" }, callId: "cx" };
+	const sY = { agent: { id: "session-y" }, callId: "cy" };
+	await sharedPhase.execute({ operation: "init", spec_id: "001-x" }, sX);
+	await sharedPhase.execute({ operation: "init", spec_id: "002-y" }, sY);
+
+	const xPointer = cps.activeSessionPath(sharedProj, "session-x");
+	const yPointer = cps.activeSessionPath(sharedProj, "session-y");
+	check(
+		"two sessions in ONE project keep two pointers",
+		existsSync(xPointer) && existsSync(yPointer) && xPointer !== yPointer,
+	);
+	check(
+		"each pointer names the spec of ITS session",
+		cps.resolveActiveState(sharedProj, "session-x", () => true).state.specId === "001-x" &&
+			cps.resolveActiveState(sharedProj, "session-y", () => true).state.specId === "002-y",
+	);
+	// The regression proper: writing in one session must not move the other.
+	await sharedPhase.execute({ operation: "status", spec_id: "001-x" }, sX);
+	check(
+		"writing in one session does not change the other session's spec",
+		cps.resolveActiveState(sharedProj, "session-y", () => true).state.specId === "002-y",
+	);
+	check(
+		"...and the project summary follows the last one that acted",
+		cps.readActiveState(sharedProj).specId === "001-x",
+	);
+
+	// The guard must authorize from the SESSION's spec. X is in WRITE_CODE, Y is
+	// still in CLARIFY, and Y must keep being denied even though X just acted.
+	const setPhase = (specId, phase) => {
+		const stP = sdd.loadState(join(sharedProj, "specs", specId));
+		stP.phase = phase;
+		stP.mode = "create";
+		sdd.saveState(stP);
+	};
+	setPhase("001-x", "WRITE_CODE");
+	const editShared = { name: "write", arguments: { file_path: join(sharedProj, "mod.py"), content: "x\n" } };
+	check(
+		"the session with a WRITE_CODE spec may edit",
+		sharedCtx.guard({ ...editShared, ...sX }) === undefined,
+	);
+	const deniedY = sharedCtx.guard({ ...editShared, ...sY });
+	check(
+		"the OTHER session is still denied, on ITS OWN spec (the collision that happened live)",
+		typeof deniedY === "string" && /002-y/.test(deniedY),
+		String(deniedY).slice(0, 120),
+	);
+
+	// A session with no pointer adopts the project's summary as a HINT only...
+	const freshProj = join(dir, "fresh-hint");
+	mkdirSync(join(freshProj, "specs", "001-hint"), { recursive: true });
+	cps.writeActiveState(freshProj, { specId: "001-hint", phase: "WRITE_CODE" });
+	const hinted = cps.resolveActiveState(freshProj, "session-new", () => true);
+	check(
+		"a new session adopts the project summary as a HINT, and says so",
+		hinted.state.specId === "001-hint" && hinted.source === "project" && hinted.hinted === true,
+	);
+	// ...but never when that hint is stale or names a spec that is gone.
+	const gone = cps.resolveActiveState(freshProj, "session-new", () => false);
+	check(
+		"a hint naming a spec that no longer exists is refused (fail-closed)",
+		gone.state.specId === null && gone.source === "none",
+	);
+	// `writeActiveState` always stamps "now", so an old pointer is manufactured
+	// directly: this is exactly what a summary left behind days ago looks like.
+	writeFileSync(
+		join(freshProj, ".sdd", "active.json"),
+		JSON.stringify({ specId: "001-hint", phase: "WRITE_CODE", checkpointId: null, updatedAt: "2020-01-01T00:00:00.000Z" }),
+		{ mode: 0o600 },
+	);
+	const stale = cps.resolveActiveState(freshProj, "session-new", () => true);
+	check("a stale hint is refused too", stale.state.specId === null && stale.source === "none");
+
+	// A session that wrote "no spec" must NOT fall back to the project's.
+	cps.writeActiveStateFor(freshProj, "session-clear", { specId: null, phase: null });
+	const cleared = cps.resolveActiveState(freshProj, "session-clear", () => true);
+	check(
+		"a session that cleared its own pointer is not re-authorized by the summary",
+		cleared.state.specId === null && cleared.source === "session",
+	);
+
+	// An unusable session id cannot escape the pointer directory, and does not
+	// silently share another session's file either.
+	for (const bad of ["../evil", "a/b", "..", "", "x".repeat(200)]) {
+		const key = cps.sessionFileKey(bad);
+		const resolved = cps.activeSessionPath(sharedProj, bad);
+		check(
+			`an unusable session id (${JSON.stringify(bad.slice(0, 12))}) stays inside .sdd/active/`,
+			key === "anonymous" && resolved.startsWith(cps.activeSessionsDir(sharedProj)) && !resolved.includes(".."),
+		);
+	}
+	// Two sessions, one checkpoint: the snapshot is shared, the POINTER is not.
+	const cpShared = sharedCtx.tools.get("sdd_checkpoint");
+	const madeX = await cpShared.execute({ operation: "create", label: "shared", dirs: ["specs"] }, sX);
+	check("a checkpoint created by X is recorded for X", madeX.ok === true && cps.resolveActiveState(sharedProj, "session-x", () => true).state.checkpointId === madeX.activeCheckpoint);
+	check(
+		"Y does not inherit X's checkpoint (it is not Y's rollback target)",
+		cps.resolveActiveState(sharedProj, "session-y", () => true).state.checkpointId === null,
+	);
+	check(
+		"Y can still SEE X's checkpoint in the shared list",
+		cps.listCheckpoints(sharedProj).some((c) => c.id === madeX.activeCheckpoint),
+	);
+	// Dropping it must clear the reference EVERYWHERE, or a session would mutate
+	// believing a rollback target still existed.
+	await cpShared.execute({ operation: "drop", checkpoint_id: madeX.activeCheckpoint }, sX);
+	check(
+		"dropping a checkpoint clears every pointer that referenced it",
+		cps.resolveActiveState(sharedProj, "session-x", () => true).state.checkpointId === null &&
+			cps.readActiveState(sharedProj).checkpointId === null,
+	);
 	check("the pointer of one project is not written by the other", existsSync(join(isoA, ".sdd", "active.json")) && existsSync(join(isoB, ".sdd", "active.json")));
 
 	// The documentation language follows the session, not the fallback root.

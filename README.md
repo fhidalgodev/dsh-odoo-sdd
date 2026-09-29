@@ -163,12 +163,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.7.0`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.7.1`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.7.0, published with a provenance attestation
+npm install dsh-odoo-sdd        # 0.7.1, published with a provenance attestation
 ```
 
 > [!IMPORTANT]
@@ -499,9 +499,18 @@ has a way back and a way to prove what happened.
   guard cannot be installed) makes the plugin refuse to mount with the reason and
   the way out, instead of staying up and looking protected.
 - **The canonical phase decides.** Authorization reads the phase from
-  `specs/<id>/state.json`; `.sdd/active.json` is only the pointer to which spec
-  and checkpoint the session works on. A stale pointer can no longer authorize a
-  change for a spec that has already gone `BLOCKED`.
+  `specs/<id>/state.json`; the pointer only says WHICH spec and checkpoint the
+  session works on. A stale pointer can no longer authorize a change for a spec
+  that has already gone `BLOCKED`.
+- **The pointer belongs to the session.** It lives in
+  `.sdd/active/<sessionId>.json`, so two chats open on one project no longer
+  overwrite each other and neither can authorize its changes against the other's
+  spec — the failure this scoping exists for. `.sdd/active.json` remains only as
+  the project's *last* spec: a new session adopts it as a **hint** when it is
+  fresh (< 12 h) and names a spec that still exists, and otherwise starts with no
+  spec at all. Checkpoint *snapshots* stay shared (they are the project's), while
+  which checkpoint is *your* rollback target is per session; dropping one clears
+  the reference in every pointer that held it.
 - **File rollback.** `sdd_checkpoint restore` puts the snapshotted files back
   byte-for-byte; `sdd_phase rollback` returns the spec to the phase its MODE
   works in — `WRITE_CODE`, or `APPLY_CONFIG` for a functional spec — with the
@@ -624,7 +633,8 @@ name — a foreign folder is never adopted. `.sdd/` always stays with the projec
 │   ├── session.json            # Playwright cookie
 │   ├── audit.jsonl             # every tool call, sanitized
 │   ├── setup-state.json        # onboarding + delegation decision
-│   ├── active.json             # active spec, phase, checkpoint
+│   ├── active/<sessionId>.json  # THIS session's pointer (spec, phase, checkpoint)
+│   ├── active.json             # the project's last spec (a hint for new sessions)
 │   └── checkpoints/<id>/       # manifest + file snapshot + data journal
 └── specs/<NNN>-<slug>/         # or the central folder
 ```

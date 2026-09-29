@@ -138,29 +138,42 @@ export const name = "odoo-sdd";
 /** Services this plugin injects from the host. */
 export const inject = ["tools", "skills"];
 
-/** Deployment configuration schema (settable from cordis.patch.yml).
- * Schemastery convention: a property WITHOUT `.required()` is optional. */
+/**
+ * Deployment configuration schema (settable from cordis.patch.yml).
+ *
+ * Schemastery convention: a property WITHOUT `.required()` is optional.
+ *
+ * `.volatile()` is what makes a field EDITABLE in Settings. The host derives the
+ * plugin's form from this schema (`volatileForm` keeps only nodes flagged
+ * volatile) and refuses the whole entry when none is: "Plugin entry has no
+ * volatile fields". Without those markers the section has nothing to render, so
+ * a host that relies on the schema would show no panel at all.
+ *
+ * `projectRoot` is deliberately NOT volatile: it is a fallback for hosts with no
+ * session, and the effective root is the folder the developer opened in DSH —
+ * offering it as a plugin-wide field would be wrong for every project but one.
+ */
 export const Config = z.object({
 	projectRoot: z.string(),
-	specsMode: z.string(),
-	specsRoot: z.string(),
-	specsDir: z.string(),
-	executeAllowlist: z.array(z.string()),
-	methodAllowlist: z.array(z.string()),
-	communityRepoUrl: z.string(),
-	communityRepoPath: z.string(),
-	enterpriseRepoUrl: z.string(),
-	enterpriseRepoPath: z.string(),
-	autonomy: z.string(),
-	licensed: z.string(),
-	requireCheckpointBeforeMutation: z.boolean(),
-	requireSpecForChanges: z.boolean(),
-	securityReviewRequired: z.boolean(),
-	securityInterviewRequired: z.boolean(),
-	auditAllTools: z.boolean(),
-	maxCheckpoints: z.number(),
-	documentationPolicy: z.string(),
-	documentationLanguage: z.string(),
+	specsMode: z.string().volatile(),
+	specsRoot: z.string().volatile(),
+	specsDir: z.string().volatile(),
+	executeAllowlist: z.array(z.string()).volatile(),
+	methodAllowlist: z.array(z.string()).volatile(),
+	communityRepoUrl: z.string().volatile(),
+	communityRepoPath: z.string().volatile(),
+	enterpriseRepoUrl: z.string().volatile(),
+	enterpriseRepoPath: z.string().volatile(),
+	autonomy: z.string().volatile(),
+	licensed: z.string().volatile(),
+	requireCheckpointBeforeMutation: z.boolean().volatile(),
+	requireSpecForChanges: z.boolean().volatile(),
+	securityReviewRequired: z.boolean().volatile(),
+	securityInterviewRequired: z.boolean().volatile(),
+	auditAllTools: z.boolean().volatile(),
+	maxCheckpoints: z.number().volatile(),
+	documentationPolicy: z.string().volatile(),
+	documentationLanguage: z.string().volatile(),
 });
 
 /** Effective deployment configuration after validation. */

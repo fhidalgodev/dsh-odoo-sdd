@@ -4,6 +4,7 @@
  * security (S1 https/loopback guard, S2 redaction/scrub/path-masking),
  * and the Q3 fail-closed host guard.
  */
+import z from "@deepseek-ai/schemastery";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, statSync, mkdirSync, rmSync, symlinkSync, readdirSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
@@ -1234,6 +1235,57 @@ const grantsMod = await import(new URL("grants.js", libDir).href);
 }
 
 // ---- settings section must actually drive the tools (lote 3) ------------
+// ---- the Settings form the HOST derives from our schema ----------------
+// The host no longer accepts a pushed settings section: it builds the plugin's
+// form from its `Config` schema, keeping only the nodes flagged `.volatile()` and
+// REFUSING the entry when there are none ("Plugin entry has no volatile fields").
+// A schema with no markers therefore means no panel at all — which is exactly the
+// failure this pins. The algorithm below is a copy of the host's `volatileForm`
+// (dsh-settings/lib/index.js), so the check is the host's rule and not our taste.
+console.log("== settings schema (the host's volatileForm contract) ==");
+{
+	const { Config } = await import(new URL("index.js", libDir).href);
+	const plainSchema = (schema) => new z(schema.toJSON());
+	const volatileForm = (schema) => {
+		if (schema.meta.volatile) return plainSchema(schema);
+		if (schema.type === "object") {
+			const dict = Object.fromEntries(
+				Object.entries(schema.dict ?? {}).flatMap(([key, child]) => {
+					const field = volatileForm(child);
+					return field === undefined ? [] : [[key, field]];
+				}),
+			);
+			return Object.keys(dict).length === 0 ? undefined : z.object(dict);
+		}
+		return undefined;
+	};
+	const form = volatileForm(Config);
+	check("the host derives a Settings form from our Config schema", form !== undefined);
+	const fields = Object.keys(form?.dict ?? {});
+	check("the form carries the documented settings", fields.length >= 15, `${fields.length} field(s)`);
+	check(
+		"the project root is NOT offered as an editable plugin-wide field",
+		!fields.includes("projectRoot"),
+		fields.join(", "),
+	);
+	check(
+		"the fields the panel edits are all present",
+		["specsMode", "specsRoot", "specsDir", "executeAllowlist", "methodAllowlist", "autonomy", "licensed", "requireCheckpointBeforeMutation", "requireSpecForChanges", "documentationPolicy", "documentationLanguage", "maxCheckpoints"].every((f) => fields.includes(f)),
+		fields.join(", "),
+	);
+	check(
+		"every editable field still accepts its type (the schema validates a real payload)",
+		(() => {
+			try {
+				Config({ specsMode: "central", specsRoot: "/tmp/specs", executeAllowlist: ["res.partner"], maxCheckpoints: 3 });
+				return true;
+			} catch {
+				return false;
+			}
+		})(),
+	);
+}
+
 console.log("== settings source drives the effective configuration ==");
 {
 	let hooks = null;

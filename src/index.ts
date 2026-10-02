@@ -39,6 +39,8 @@ import {
 	listInstances,
 	readActiveInstance,
 	writeActiveInstance,
+	readSessionInstance,
+	writeSessionInstance,
 	removeInstance,
 	ambiguousInstances,
 	parseInstanceUrl,
@@ -112,6 +114,7 @@ import {
 	hasValidGrant,
 	writeGrant,
 	revokeGrants,
+	revokeGrantFor,
 	readGrants,
 } from "./grants.js";
 import { scanModule } from "./security-scan.js";
@@ -442,12 +445,20 @@ function asApiPreference(value: string | undefined): "auto" | "json2" | "jsonrpc
 	return value === "json2" || value === "jsonrpc" ? value : "auto";
 }
 
-function clientFor(projectRoot: string, api?: "auto" | "json2" | "jsonrpc"): {
+
+function clientFor(
+	projectRoot: string,
+	options: { api?: "auto" | "json2" | "jsonrpc"; sessionId?: string; instance?: string; adoptProjectHint?: boolean } = {},
+): {
 	client: OdooClient | null;
 	report: string;
 	credentials: OdooCredentials | null;
 } {
-	const loaded = loadCredentials(projectRoot);
+	const loaded = loadCredentials(projectRoot, {
+		...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+		...(options.instance === undefined ? {} : { instance: options.instance }),
+		...(options.adoptProjectHint === undefined ? {} : { adoptProjectHint: options.adoptProjectHint }),
+	});
 	if (!loaded.ok) {
 		return { client: null, report: `NOT CONFIGURED (${loaded.reason}): ${loaded.message}`, credentials: null };
 	}
@@ -467,9 +478,10 @@ function clientFor(projectRoot: string, api?: "auto" | "json2" | "jsonrpc"): {
 		};
 	}
 	return {
-		client: new OdooClient(creds, { api: api ?? "auto" }),
+		client: new OdooClient(creds, { api: options.api ?? "auto" }),
 		report:
 			describeCredentials(creds) +
+			(loaded.sourceNote === undefined ? "" : ` — ${loaded.sourceNote}`) +
 			(loaded.permissionNote === undefined ? "" : ` — NOTE: ${loaded.permissionNote}`) +
 			(loaded.credentialNote === undefined ? "" : ` — WARNING: ${loaded.credentialNote}`),
 		credentials: creds,
@@ -512,6 +524,7 @@ function setupStatusFor(projectRoot: string): { status: EffectiveSetupStatus; de
 			status: "configured",
 			detail:
 				`Credentials OK (${loaded.credentials.source}): ${describeCredentials(loaded.credentials)}` +
+				(loaded.sourceNote === undefined ? "" : ` — ${loaded.sourceNote}`) +
 				(others.length === 0
 					? ""
 					: ` — this project also has: ${others.map((entry) => entry.name).join(", ")} ` +
@@ -721,7 +734,13 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// the fallback root, a session working in project A would scrub the text with
 	// project B's secret — the redaction would look like it ran and leak anyway.
 	const sanitize = (textValue: string, exec?: unknown): string => {
-		const loaded = loadCredentials(effectiveConfig(exec).projectRoot);
+		// The session's OWN environment: with two sessions on different instances,
+		// redacting one session's output with the other's secret would fail to hide
+		// the value that actually needs hiding.
+		const loaded = loadCredentials(effectiveConfig(exec).projectRoot, {
+			sessionId: sessionIdOf(exec),
+			adoptProjectHint: effectiveConfig(exec).adoptProjectPointerHint,
+		});
 		const credentials: OdooCredentials | null = loaded.ok ? loaded.credentials : null;
 		return sanitizeForPersist(textValue, credentials);
 	};
@@ -856,7 +875,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const root = rootFor(exec);
 			const projectRoot = root.root;
 			const where = { projectRoot, rootSource: root.source as string };
-			const { client, report, credentials } = clientFor(projectRoot, asApiPreference(effectiveConfig(exec).odooApi));
+			const { client, report, credentials } = clientFor(projectRoot, { api: asApiPreference(effectiveConfig(exec).odooApi), sessionId: sessionIdOf(exec), adoptProjectHint: effectiveConfig(exec).adoptProjectPointerHint });
 			if (client === null) {
 				// Two different situations share a null client:
 				//  - credentials loaded but no live human grant => NOT AUTHORIZED
@@ -1031,7 +1050,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.mode === "instance") {
 				const operation = args.instance ?? "list";
 				const named = (args.name ?? "").trim();
-				const activeNow = readActiveInstance(projectRoot);
+				const activeNow = readSessionInstance(projectRoot, sessionIdOf(exec)) ?? readActiveInstance(projectRoot);
+				const activeScope = readSessionInstance(projectRoot, sessionIdOf(exec)) === null ? "project" : "session";
 				const describe = (): Array<Record<string, unknown>> =>
 					listInstances(projectRoot).map((entry) => ({
 						name: entry.name,
@@ -1165,8 +1185,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							detail:
 								`Instance ${named} has no live connection grant, so it was NOT activated` +
 								(entry.url === null ? " (and its file could not be read)." : ` (${entry.url} db=${entry.db}, user=${entry.username}).`) +
-								" Each target is authorized on its own: activate it after the developer approves it " +
-								"(complete its .env, then mode=authorize).",
+								" Each target is authorized on its own, and authorizing NO LONGER requires activating it " +
+								`first: run \`odoo_setup mode=authorize name=${named}\`, have the developer approve the ` +
+								"native prompt, then activate it here. Always run mode=instance instance=list to see which " +
+								"targets already have a live grant.",
 						};
 					}
 					if (entry.legacy) {
@@ -1183,22 +1205,27 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 								"new one is authorized — the plugin will not move a credential file on its own.",
 						};
 					}
-					if (!writeActiveInstance(projectRoot, named)) {
+					// The SESSION's pointer, and the project's "last used" alongside it. Two
+					// sessions on one project can now work in two environments; the project
+					// file only decides what a session that never chose inherits.
+					if (!writeSessionInstance(projectRoot, sessionIdOf(exec), named)) {
 						return {
 							mode: "instance" as string,
 							status: "error",
-							detail: `Could not record "${named}" as the active instance: the pointer under .sdd/instances/ is not writable.`,
+							detail: `Could not record "${named}" for this session: the pointer under .sdd/instances/ is not writable.`,
 						};
 					}
 					return {
 						mode: "instance" as string,
 						status: "ok",
 						activeInstance: named,
+						instanceSource: "session" as string,
 						envFile: displayPath(entry.path),
 						instances: describe(),
 						detail:
-							`Active instance: ${named} (${entry.url ?? "unreadable"} db=${entry.db ?? "?"}). ` +
-							"Every connection tool now uses it; the other instances stay configured and untouched.",
+							`Active instance for THIS session: ${named} (${entry.url ?? "unreadable"} db=${entry.db ?? "?"}). ` +
+							"Other sessions keep their own choice; no other session is affected. " +
+							"The other instances stay configured and untouched.",
 					};
 				}
 
@@ -1343,14 +1370,34 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			}
 
 			if (args.mode === "authorize") {
-				const loaded = loadCredentials(projectRoot);
+				// A NAMED target is loaded directly, without activating it. Requiring
+				// activation first was a closed circle: `instance=use` demands a live
+				// grant for the target, and authorize only ever saw the ACTIVE one — so
+				// once a grant expired there was no order of operations that worked.
+				const targetName = (args.name ?? "").trim();
+				if (targetName !== "" && instanceEnvPath(projectRoot, targetName) === null) {
+					return {
+						mode: "authorize" as string,
+						status: "invalid-name",
+						detail: `"${targetName}" is not a usable instance name, so no credential file can be resolved for it.`,
+					};
+				}
+				const loaded = loadCredentials(
+					projectRoot,
+					targetName === ""
+						? { sessionId: sessionIdOf(exec), adoptProjectHint: effectiveConfig(exec).adoptProjectPointerHint }
+						: { instance: targetName },
+				);
 				if (!loaded.ok) {
+					const known = listInstances(projectRoot).map((entry) => entry.name);
 					return {
 						mode: "authorize" as string,
 						status: "not-authorized",
 						detail:
 							`Cannot authorize yet: credentials are not configured (${loaded.reason}). ` +
-							"Complete .env first, then run mode=authorize.",
+							(targetName === ""
+								? "Complete .env first, then run mode=authorize."
+								: `Instance "${targetName}" has no readable credential file. Known instances: ${known.join(", ") || "(none)"}.`),
 					};
 				}
 				const creds = loaded.credentials;
@@ -1359,7 +1406,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					ctx,
 					exec,
 					"odoo_setup",
-					`Authorize Odoo connection to ${creds.url} (db=${creds.db}, user=${creds.username})? ` +
+					`Authorize Odoo connection to ${creds.url} (db=${creds.db}, user=${creds.username})` +
+						`${creds.instance === undefined ? "" : ` [instance=${creds.instance}]`}? ` +
 						"The grant covers this exact target and expires; any change to url/db/user requires a new one.",
 				);
 				if (outcome !== "allowed-once") {
@@ -1383,19 +1431,52 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					status: "authorized",
 					detail:
 						`Connection AUTHORIZED by the developer for ${creds.url} (db=${creds.db}, ` +
-						`user=${creds.username}). The grant is stored in .sdd/grants.json (0600, gitignored) ` +
+						`user=${creds.username})${creds.instance === undefined ? "" : ` — instance "${creds.instance}"`}. ` +
+						(creds.instance === undefined || targetName === ""
+							? ""
+							: `Activate it for THIS session with \`mode=instance instance=use name=${creds.instance}\`. `) +
+						`The grant is stored in .sdd/grants.json (0600, gitignored) ` +
 						"and expires; revoke it with mode=revoke or by changing the target.",
 				};
 			}
 
 			if (args.mode === "revoke") {
-				const removed = revokeGrants(projectRoot);
+				const revokeName = (args.name ?? "").trim();
+				if (revokeName === "") {
+					const removed = revokeGrants(projectRoot);
+					return {
+						mode: "revoke" as string,
+						status: "revoked",
+						detail:
+							`Revoked ${removed} stored grant(s). Every tool that would reach the Odoo instance ` +
+							"is blocked until a new human authorization (mode=authorize).",
+					};
+				}
+				// Revoking ONE target: dropping access to staging must not drop the
+				// grants for the environments you are still working in.
+				const target = loadCredentials(projectRoot, { instance: revokeName });
+				if (!target.ok) {
+					return {
+						mode: "revoke" as string,
+						status: "not-authorized",
+						detail:
+							`Cannot revoke "${revokeName}": its credential file could not be read (${target.reason}). ` +
+							`Known instances: ${listInstances(projectRoot).map((entry) => entry.name).join(", ") || "(none)"}.`,
+					};
+				}
+				const removed = revokeGrantFor(
+					projectRoot,
+					fingerprintOf(target.credentials.url, target.credentials.db, target.credentials.username),
+				);
 				return {
 					mode: "revoke" as string,
-					status: "revoked",
+					status: removed > 0 ? "revoked" : "no-grant",
 					detail:
-						`Revoked ${removed} stored grant(s). Every tool that would reach the Odoo instance ` +
-						"is blocked until a new human authorization (mode=authorize).",
+						removed > 0
+							? `Revoked ${removed} grant(s) for instance "${revokeName}" ` +
+								`(${target.credentials.url} db=${target.credentials.db}). Other targets keep their grants.`
+							: `Instance "${revokeName}" had no stored grant for ` +
+								`${target.credentials.url} db=${target.credentials.db}, so nothing changed.`,
 				};
 			}
 
@@ -1693,7 +1774,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			render: (_args: unknown, value: unknown) => [text((value as { output: string }).output)],
 		},
 		async execute(args: { operation: "info" | "install" | "upgrade"; modules: string[] }, exec?: unknown) {
-			const { client, report } = clientFor(rootFor(exec).root, asApiPreference(effectiveConfig(exec).odooApi));
+			const { client, report } = clientForExec(exec);
 			const fail = (output: string) => ({
 				operation: args.operation as string,
 				success: false,
@@ -1805,7 +1886,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		},
 		async execute(_args: unknown, exec?: unknown) {
 			const projectRoot = rootFor(exec).root;
-			const { client, report } = clientFor(projectRoot, asApiPreference(effectiveConfig(exec).odooApi));
+			const { client, report } = clientFor(projectRoot, { api: asApiPreference(effectiveConfig(exec).odooApi), sessionId: sessionIdOf(exec), adoptProjectHint: effectiveConfig(exec).adoptProjectPointerHint });
 			if (client === null) return { minted: false, detail: report };
 			const result = await client.mintSession(projectRoot);
 			if (!result.ok) return { minted: false, detail: result.error };
@@ -2472,6 +2553,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							projectRoot: { type: "string", required: true },
 							rootSource: { type: "string", required: true },
 							sessionId: { type: "string" },
+							instance: { type: "string" },
+							instanceSource: { type: "string" },
+							instanceChosenBySession: { type: "string" },
+							instanceProjectDefault: { type: "string" },
 							specsBase: { type: "string", required: true },
 							specDir: { type: "string", required: true },
 							specDirReason: { type: "string", required: true },
@@ -2564,9 +2649,23 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				};
 				const active = activeFor(cfg, exec).state;
 				const activeSpec = active.specId === null ? "000-unnamed" : active.specId;
+				// "Which environment am I on, and who chose it?" was unanswerable
+				// before: the pointer was one per project and the report never named it.
+				const sessionInstance = readSessionInstance(cfg.projectRoot, sessionIdOf(exec));
+				const projectInstance = readActiveInstance(cfg.projectRoot);
+				const resolvedEnv = loadCredentials(cfg.projectRoot, {
+					sessionId: sessionIdOf(exec),
+					adoptProjectHint: cfg.adoptProjectPointerHint,
+				});
 				return {
 					projectRoot: cfg.projectRoot,
 					rootSource: String(cfg.rootSource),
+					...(resolvedEnv.ok && resolvedEnv.credentials.instance !== undefined
+						? { instance: resolvedEnv.credentials.instance }
+						: {}),
+					instanceSource: sessionInstance !== null ? "session" : projectInstance !== null ? "project" : "default",
+					...(sessionInstance === null ? {} : { instanceChosenBySession: sessionInstance }),
+					...(projectInstance === null ? {} : { instanceProjectDefault: projectInstance }),
 					...(cfg.sessionId === undefined ? {} : { sessionId: cfg.sessionId }),
 					specsBase: specsBaseFor(layout),
 					specDir: specDirFor(layout, activeSpec),
@@ -2810,11 +2909,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	const undoJournal = async (
 		projectRoot: string,
 		checkpointId: string,
-		api?: "auto" | "json2" | "jsonrpc",
+		options: { api?: "auto" | "json2" | "jsonrpc"; sessionId?: string } = {},
 	): Promise<{ undone: string[]; detail: string }> => {
 		const ops = readCheckpointJournalFile(projectRoot, checkpointId);
 		if (ops.length === 0) return { undone: [], detail: "nothing journaled" };
-		const { client, credentials } = clientFor(projectRoot, api);
+		const { client, credentials } = clientFor(projectRoot, options);
 		if (client === null) return { undone: [], detail: "no instance configured — journal left intact" };
 		// Database identity: replaying a journal recorded against another database
 		// would mutate the wrong instance, so refuse instead of guessing.
@@ -3093,7 +3192,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						detail: `Files restored (${files.restored.length}). Data restore refused: restore_data=true requires confirm_destructive=true.`,
 					};
 				}
-				const undo = await undoJournal(projectRoot, args.checkpoint_id, asApiPreference(cfg.odooApi));
+				const undo = await undoJournal(projectRoot, args.checkpoint_id, {
+					api: asApiPreference(cfg.odooApi),
+					sessionId: sessionIdOf(exec),
+				});
 				restoredData.push(...undo.undone);
 				dataNote = undo.detail;
 			}
@@ -3729,6 +3831,28 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	 * @param exec - the calling execution, source of the session identity.
 	 * @returns the resolved pointer; `state.specId === null` means "no spec here".
 	 */
+/**
+ * Resolve the client for the SESSION that is calling, not for the project.
+ *
+ * Every per-session decision (transport preference, environment pointer, whether
+ * an unset session may inherit the project's last choice) is read from the
+ * session's own effective configuration, in one place. A caller that resolves a
+ * client per PROJECT would hand two concurrent sessions the same environment —
+ * which is the defect this exists to prevent.
+ * @param exec - the calling execution context.
+ * @param extra - an explicitly named instance, when the caller has one.
+ * @returns the client, its report, and the credentials behind it.
+ */
+	const clientForExec = (exec: unknown, extra: { instance?: string } = {}): ReturnType<typeof clientFor> => {
+		const cfg = effectiveConfig(exec);
+		return clientFor(cfg.projectRoot, {
+			api: asApiPreference(cfg.odooApi),
+			sessionId: sessionIdOf(exec),
+			adoptProjectHint: cfg.adoptProjectPointerHint,
+			...extra,
+		});
+	};
+
 	const activeFor = (cfg: ReturnType<typeof effectiveConfig>, exec?: unknown): ReturnType<typeof resolveActiveState> => {
 		// "Exists" means the spec DIRECTORY is there, not that its state is readable:
 		// a spec whose state.json is missing or corrupt must still be adoptable, and
@@ -4013,7 +4137,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		},
 		client: (exec) => {
 			const cfg = effectiveConfig(exec);
-			const { client, report, credentials } = clientFor(cfg.projectRoot, asApiPreference(cfg.odooApi));
+			const { client, report, credentials } = clientFor(cfg.projectRoot, { api: asApiPreference(cfg.odooApi), sessionId: sessionIdOf(exec), adoptProjectHint: cfg.adoptProjectPointerHint });
 			return {
 			client,
 			report,
@@ -4094,7 +4218,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		 */
 		runImport: async (op, exec) => {
 			const cfg = effectiveConfig(exec);
-			const { client } = clientFor(cfg.projectRoot, asApiPreference(cfg.odooApi));
+			const { client } = clientFor(cfg.projectRoot, { api: asApiPreference(cfg.odooApi), sessionId: sessionIdOf(exec), adoptProjectHint: cfg.adoptProjectPointerHint });
 			if (client === null) return { ok: false, error: "no instance configured" };
 			const version = (await versionFor(cfg.projectRoot)) ?? "";
 			const caps = capabilitiesFor(version);
@@ -4158,7 +4282,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		},
 		client: async (exec) => {
 			const cfg = effectiveConfig(exec);
-			const { client, report } = clientFor(cfg.projectRoot, asApiPreference(cfg.odooApi));
+			const { client, report } = clientFor(cfg.projectRoot, { api: asApiPreference(cfg.odooApi), sessionId: sessionIdOf(exec), adoptProjectHint: cfg.adoptProjectPointerHint });
 			const version = await versionFor(cfg.projectRoot);
 			return { client, report, ...(version === undefined ? {} : { serverVersion: version }) };
 		},
@@ -4180,7 +4304,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	});
 
 	registerRuntimeTools(ctx, {
-		client: (exec) => clientFor(effectiveConfig(exec).projectRoot, asApiPreference(effectiveConfig(exec).odooApi)),
+		client: (exec) => clientForExec(exec),
 		status: (pr) => setupStatusFor(pr),
 		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
 		allowlist: (exec) => effectiveConfig(exec).executeAllowlist,

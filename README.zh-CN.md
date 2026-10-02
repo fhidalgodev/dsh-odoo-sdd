@@ -154,12 +154,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.8.2`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.9.0`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.8.2，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.9.0，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]
@@ -216,14 +216,26 @@ odoo_setup mode=authorize   # 只问你一次，授权这个确切的目标
 ```bash
 odoo_setup mode=instance instance=list                       # 有哪些，非机密身份
 odoo_setup mode=instance instance=add name=staging url=https://stg.example.com db=stg username=ci
-# 在 .sdd/instances/staging.env 中手工填写 ODOO_PASSWORD，然后：
-odoo_setup mode=authorize                                    # 授权**这个**目标
-odoo_setup mode=instance instance=use name=staging            # 激活它
+# 在 .sdd/instances/staging.env 中手工填写密钥，然后：
+odoo_setup mode=authorize name=staging                       # 授权**那个**目标
+odoo_setup mode=instance instance=use name=staging            # 为**本会话**激活它
 odoo_setup mode=instance instance=remove name=staging         # 需要 confirm_destructive=true
+odoo_setup mode=revoke name=staging                           # 只撤销该目标的授权
 ```
 
+**激活的目标属于「会话」，不属于项目。** 每个对话保存自己的指针
+（`.sdd/instances/active-<sessionId>.json`），因此同一项目上的两个会话可以同时使用
+两个环境 —— 一个在预发，另一个在客户的服务器上 —— 互不影响。
+`.sdd/instances/active.json` 仅作为项目*最近使用*的目标保留，未做选择的会话会把它
+作为**默认值**继承，并会被告知这一点。设置 `adoptProjectPointerHint: false` 可完全
+取消该继承。
+
 授权是**按目标**的（`url`+`db`+`user`），因此同一台服务器上的两个实例是两个授权。
-激活一个没有有效授权的实例会被拒绝：指针决定变更发往哪里，所以它不能指向
+**`authorize` 接受目标的名称**，这正是让切换可恢复的关键：授权会在 12 小时后过期，
+而"必须先激活才能授权"曾是一个死循环 —— `use` 要求目标有有效授权，而 `authorize`
+只能看到当前激活的那个。直接命名即可打破循环：无需离开 `main` 就能授权 `staging`。
+
+激活一个没有有效授权的目标仍会被拒绝：指针决定变更发往哪里，所以它不能指向
 没有人批准过的目标。当存在**多个**实例且**没有**激活任何一个时，所有连接工具
 都会拒绝，而不是按顺序挑选 —— 旧的 `.sdd/.env` 会作为 `default` 原样继续工作，
 直到你自己决定迁移。

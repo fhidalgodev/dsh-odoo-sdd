@@ -26,9 +26,26 @@ import { readFileSync, statSync, existsSync, chmodSync, mkdirSync, writeFileSync
 import { homedir } from "node:os";
 import { isIP } from "node:net";
 import { join, resolve } from "node:path";
+// ONE session-identity convention for every per-session pointer (the spec pointer
+// in checkpoints.ts uses the same function): a second sanitizer here would drift.
+import { sessionFileKey } from "./checkpoints.js";
 
 /** Where a resolved credential file came from in the cascade. */
-export type CredentialSource = "env-var" | "instance" | "project" | "user" | "legacy";
+export type CredentialSource =
+	/** `$ODOO_SDD_ENV_FILE`: an explicit operator instruction, highest priority. */
+	| "env-var"
+	/** A target named explicitly on the call (authorize/revoke by name). */
+	| "forced"
+	/** The instance THIS session chose. */
+	| "instance"
+	/** The project's last-used instance, inherited by a session that chose none. */
+	| "instance-inherited"
+	/** `<root>/.sdd/.env`, the single-target layout. */
+	| "project"
+	/** `~/.config/dsh-odoo-sdd/.env`. */
+	| "user"
+	/** `<root>/.env`. */
+	| "legacy";
 
 /** One concrete credential location in the cascade. */
 export interface CredentialLocation {
@@ -157,6 +174,13 @@ export type CredentialsResult =
 			 * for instance). Non-secret by construction, so it may be shown.
 			 */
 			credentialNote?: string;
+			/**
+			 * Where the ENVIRONMENT came from, when that is worth saying out loud.
+			 * A session that never chose one and inherited the project's last choice
+			 * must be told so: otherwise "why is it pointing at another one?" has no
+			 * answer anywhere in the output.
+			 */
+			sourceNote?: string;
 	  }
 	| CredentialsProblem;
 
@@ -275,19 +299,39 @@ export function userConfigDir(): string {
 }
 
 /** Ordered credential search paths; the first existing file wins. */
-export function credentialCandidates(projectRoot: string): CredentialLocation[] {
+export function credentialCandidates(
+	projectRoot: string,
+	options: { sessionId?: string; instance?: string; adoptProjectHint?: boolean } = {},
+): CredentialLocation[] {
 	const candidates: CredentialLocation[] = [];
 	const override = process.env["ODOO_SDD_ENV_FILE"];
 	if (override !== undefined && override.trim() !== "") {
 		candidates.push({ path: resolve(override.trim()), source: "env-var" });
 	}
-	// The active NAMED instance, when the project chose one. It comes before the
-	// legacy file because it is the more specific choice, and after the env-var
-	// because an explicit override is an operator instruction.
-	const active = readActiveInstance(projectRoot);
-	const activePath = active === null ? null : instanceEnvPath(projectRoot, active);
-	if (active !== null && activePath !== null) {
-		candidates.push({ path: activePath, source: "instance", instance: active });
+	// A target named EXPLICITLY (authorize/revoke by name) outranks every pointer:
+	// asking about one environment must not answer about another.
+	if (options.instance !== undefined) {
+		const forced = instanceEnvPath(projectRoot, options.instance);
+		if (forced !== null) {
+			candidates.push({ path: forced, source: "forced", instance: options.instance });
+		}
+	}
+	// THIS session's choice, then the project's last-used as the inherited default.
+	// Named instances come before the legacy file because they are more specific,
+	// and after the env-var because an explicit override is an operator instruction.
+	const chosen = [
+		{ name: readSessionInstance(projectRoot, options.sessionId), source: "instance" as const },
+		{
+			name: options.adoptProjectHint === false ? null : readActiveInstance(projectRoot),
+			source: "instance-inherited" as const,
+		},
+	];
+	const seen = new Set<string>();
+	for (const entry of chosen) {
+		if (entry.name === null || seen.has(entry.name)) continue;
+		seen.add(entry.name);
+		const path = instanceEnvPath(projectRoot, entry.name);
+		if (path !== null) candidates.push({ path, source: entry.source, instance: entry.name });
 	}
 	candidates.push({ path: join(projectRoot, ".sdd", ".env"), source: "project", instance: "default" });
 	candidates.push({ path: join(userConfigDir(), ".env"), source: "user" });
@@ -312,8 +356,11 @@ export function ambiguousInstances(projectRoot: string): string[] {
 }
 
 /** Resolve the first existing credential source in the cascade, or null. */
-export function resolveCredentialSource(projectRoot: string): CredentialLocation | null {
-	for (const candidate of credentialCandidates(projectRoot)) {
+export function resolveCredentialSource(
+	projectRoot: string,
+	options: { sessionId?: string; instance?: string; adoptProjectHint?: boolean } = {},
+): CredentialLocation | null {
+	for (const candidate of credentialCandidates(projectRoot, options)) {
 		if (existsSync(candidate.path)) return candidate;
 	}
 	return null;
@@ -338,19 +385,100 @@ function instancesDir(projectRoot: string): string {
 	return join(projectRoot, ".sdd", "instances");
 }
 
-/** File recording which instance the project works against. */
+/** File recording which instance the PROJECT last worked against. */
 function activeInstanceFile(projectRoot: string): string {
 	return join(instancesDir(projectRoot), "active.json");
 }
 
-/** The instance the project works against, when one was chosen. */
-export function readActiveInstance(projectRoot: string): string | null {
+/**
+ * File recording which instance ONE session works against.
+ *
+ * The project file alone was the bug: it is rewritten by every session, so two
+ * chats on one project could not use two environments — the last `use` decided
+ * for everyone, and a session that had chosen `farmago` was silently pointed at
+ * whatever another session picked. The spec pointer was scoped per session for
+ * exactly this reason; this one was left behind.
+ */
+function sessionInstanceFile(projectRoot: string, sessionId: string | undefined): string {
+	return sessionInstancePath(projectRoot, sessionId);
+}
+
+/**
+ * Absolute path of one session's environment pointer.
+ *
+ * Exported for reporting and for tests: the sanitizer is applied HERE, so a
+ * caller cannot build an escaping path by forgetting to check the identifier.
+ * @param projectRoot - workspace root.
+ * @param sessionId - the session, when it has one.
+ * @returns the pointer path (always inside `.sdd/instances/`).
+ */
+export function sessionInstancePath(projectRoot: string, sessionId: string | undefined): string {
+	return join(instancesDir(projectRoot), `active-${sessionFileKey(sessionId)}.json`);
+}
+
+/** The instance THIS session works against, when it chose one. */
+export function readSessionInstance(projectRoot: string, sessionId: string | undefined): string | null {
+	return readInstanceNameFile(sessionInstanceFile(projectRoot, sessionId));
+}
+
+/**
+ * Record the session's instance, and keep the project's "last used" in step.
+ *
+ * The project file stays because a NEW session has to inherit somewhere: the last
+ * environment someone worked in is a better starting point than the legacy
+ * `.env`. It is a default, not an authority — a session that chooses overrides it.
+ * @param projectRoot - workspace root.
+ * @param sessionId - the writing session.
+ * @param name - the instance to activate (validated by the path builder).
+ * @returns true when the session pointer was written.
+ */
+export function writeSessionInstance(projectRoot: string, sessionId: string | undefined, name: string): boolean {
+	if (instanceEnvPath(projectRoot, name) === null) return false;
+	const payload = JSON.stringify({ name, updatedAt: new Date().toISOString() }, null, 2) + "\n";
+	let ok = false;
 	try {
-		const raw = JSON.parse(readFileSync(activeInstanceFile(projectRoot), "utf8")) as { name?: unknown };
+		const dir = instancesDir(projectRoot);
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		chmodSync(dir, 0o700);
+	} catch {
+		// best effort: the write below reports the real failure
+	}
+	try {
+		writeFileSync(sessionInstanceFile(projectRoot, sessionId), payload, { mode: 0o600 });
+		ok = true;
+	} catch {
+		ok = false;
+	}
+	try {
+		writeFileSync(activeInstanceFile(projectRoot), payload, { mode: 0o600 });
+	} catch {
+		// the project default is a convenience: losing it must not fail the session
+	}
+	return ok;
+}
+
+/** Read a `{ name }` pointer file, tolerating absence and corruption. */
+function readInstanceNameFile(file: string): string | null {
+	try {
+		const raw = JSON.parse(readFileSync(file, "utf8")) as { name?: unknown };
 		return isInstanceName(raw.name) ? raw.name : null;
 	} catch {
 		return null;
 	}
+}
+
+/** Drop ONE session's instance pointer (the project default is left alone). */
+export function clearSessionInstance(projectRoot: string, sessionId: string | undefined): void {
+	try {
+		rmSync(sessionInstanceFile(projectRoot, sessionId), { force: true });
+	} catch {
+		// an absent pointer is a valid state
+	}
+}
+
+/** The instance the PROJECT last worked against, when one was chosen. */
+export function readActiveInstance(projectRoot: string): string | null {
+	return readInstanceNameFile(activeInstanceFile(projectRoot));
 }
 
 /**
@@ -665,11 +793,18 @@ function parseEnv(content: string): Record<string, string> {
  * @param projectRoot - workspace root used for project-scoped locations.
  * @returns the loaded credentials or a structured problem report.
  */
-export function loadCredentials(projectRoot: string): CredentialsResult {
+export function loadCredentials(
+	projectRoot: string,
+	options: { sessionId?: string; instance?: string; adoptProjectHint?: boolean } = {},
+): CredentialsResult {
 	// Several instances and none chosen: refuse BEFORE picking one. Choosing by
 	// order here would aim the pipeline at a target nobody selected, which is the
-	// most expensive kind of guess this plugin can make.
-	const ambiguous = ambiguousInstances(projectRoot);
+	// most expensive kind of guess this plugin can make. A target named explicitly
+	// (or chosen by this session) is not ambiguous — it IS the choice.
+	const ambiguous =
+		options.instance !== undefined || readSessionInstance(projectRoot, options.sessionId) !== null
+			? []
+			: ambiguousInstances(projectRoot);
 	if (ambiguous.length > 0) {
 		const suggested = targetEnvPath("project", projectRoot, ambiguous[0]!);
 		return {
@@ -683,7 +818,7 @@ export function loadCredentials(projectRoot: string): CredentialsResult {
 				"connection grant). Nothing was sent anywhere.",
 		};
 	}
-	const location = resolveCredentialSource(projectRoot);
+	const location = resolveCredentialSource(projectRoot, options);
 	if (location === null) {
 		const suggested = targetEnvPath("user", projectRoot);
 		return {
@@ -772,6 +907,14 @@ export function loadCredentials(projectRoot: string): CredentialsResult {
 		},
 		...(permission.enforced ? {} : { permissionNote: permission.note ?? POSIX_MODE_NOTE }),
 		...(secret!.note === undefined ? {} : { credentialNote: secret!.note }),
+		...(location.source !== "instance-inherited" || location.instance === undefined
+			? {}
+			: {
+					sourceNote:
+						`environment "${location.instance}" was INHERITED from the project's last choice; this session ` +
+						`had not picked one. Choose your own with \`odoo_setup mode=instance instance=use name=<name>\` — ` +
+						"sessions no longer share the pointer.",
+				}),
 	};
 }
 

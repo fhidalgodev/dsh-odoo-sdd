@@ -164,12 +164,12 @@ bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
 
 - **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
 - Acepta cualquier spec de pnpm, así que podés fijar una versión:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.8.2`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.9.0`.
 
 ¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.8.2, publicada con attestation de provenance
+npm install dsh-odoo-sdd        # 0.9.0, publicada con attestation de provenance
 ```
 
 > [!IMPORTANT]
@@ -230,18 +230,39 @@ local, uno EE de staging y la instancia de un cliente ya no sobreescribe su úni
 ```bash
 odoo_setup mode=instance instance=list                       # qué existe, identidad sin secretos
 odoo_setup mode=instance instance=add name=staging url=https://stg.example.com db=stg username=ci
-# rellena ODOO_PASSWORD a mano en .sdd/instances/staging.env, y después:
-odoo_setup mode=authorize                                    # autoriza ESTE destino
-odoo_setup mode=instance instance=use name=staging            # lo activa
+# rellena el secreto a mano en .sdd/instances/staging.env, y después:
+odoo_setup mode=authorize name=staging                       # autoriza ESE destino
+odoo_setup mode=instance instance=use name=staging            # lo activa PARA ESTA SESIÓN
 odoo_setup mode=instance instance=remove name=staging         # exige confirm_destructive=true
+odoo_setup mode=revoke name=staging                           # retira solo el grant de ese destino
 ```
 
+**El destino activo pertenece a la SESIÓN, no al proyecto.** Cada chat guarda su
+propio puntero (`.sdd/instances/active-<sessionId>.json`), así que dos sesiones
+sobre un mismo proyecto pueden trabajar en dos entornos a la vez —una en staging y
+otra en el servidor de un cliente— sin que ninguna mueva la de la otra.
+`.sdd/instances/active.json` queda solo como *último usado* del proyecto, que una
+sesión que no eligió hereda como **valor por defecto** y del que se le avisa:
+
+```
+environment "farmago" was INHERITED from the project's last choice; this session
+had not picked one. Choose your own with `odoo_setup mode=instance instance=use name=<name>`
+```
+
+Poné `adoptProjectPointerHint: false` para quitar esa herencia por completo.
+
 La autorización es **por destino** (`url`+`db`+`user`), así que dos instancias en
-el mismo servidor son dos grants. Activar una instancia sin grant vivo se rechaza:
-el puntero decide a dónde van las mutaciones, así que no puede apuntar a un destino
-que nadie aprobó. Con **varias** instancias y **ninguna** activa, toda herramienta
-de conexión se niega en vez de elegir por orden — y un `.sdd/.env` antiguo sigue
-funcionando sin tocarlo, como `default`, hasta que decidas moverlo tú.
+el mismo servidor son dos grants. **`authorize` acepta el NOMBRE del destino**, y
+eso es lo que hace recuperable el cambio: los grants caducan (12 h), y exigir
+activar antes de autorizar era un círculo cerrado — `use` pide grant vivo para el
+destino, y `authorize` solo veía el activo. Nombrarlo rompe el círculo: autorizá
+`staging` sin dejar `main`.
+
+Activar un destino sin grant vivo se sigue rechazando: el puntero decide a dónde
+van las mutaciones, así que no puede apuntar a algo que nadie aprobó. Con **varias**
+instancias y **ninguna** activa, toda herramienta de conexión se niega en vez de
+elegir por orden, y un `.sdd/.env` antiguo sigue funcionando sin tocarlo, como
+`default`, hasta que decidas moverlo tú.
 
 ```bash
 mkdir -p ~/.config/dsh-odoo-sdd && cd ~/.config/dsh-odoo-sdd

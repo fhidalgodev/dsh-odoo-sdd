@@ -689,6 +689,118 @@ check("S1: http to a real 127.0.0.1 loopback allowed", realLoop.ok === true);
 	// A named instance OUTRANKS the legacy file, which is the whole point of the feature.
 	writeInstance2(legacyRoot, "other");
 	check("a named instance wins over the legacy file", creds.writeActiveInstance(legacyRoot, "other") === true && creds.loadCredentials(legacyRoot).ok === true && creds.loadCredentials(legacyRoot).credentials.instance === "other");
+
+	// ---- the ACTIVE INSTANCE belongs to the session, not the project -------
+	// The defect this exists for: one `.sdd/instances/active.json` per project
+	// meant the last `use` decided for every session, so a session that had chosen
+	// `farmago` was silently pointed at whatever another session picked. The spec
+	// pointer was scoped per session for the same reason; this one was left behind.
+	{
+		const twoRoot = join(dir, "two-sessions-instances");
+		mkdirSync(join(twoRoot, ".sdd", "instances"), { recursive: true });
+		const mkInst = (name, db) =>
+			writeFileSync(
+				join(twoRoot, ".sdd", "instances", `${name}.env`),
+				`ODOO_URL=http://localhost:8069\nODOO_DB=${db}\nODOO_USERNAME=admin\nODOO_PASSWORD=pw-${name}\n`,
+				{ mode: 0o600 },
+			);
+		mkInst("farmago", "farmago_db");
+		mkInst("main", "main_db");
+
+		check("session A activates one environment", creds.writeSessionInstance(twoRoot, "session-A", "farmago") === true);
+		check("session B activates ANOTHER one", creds.writeSessionInstance(twoRoot, "session-B", "main") === true);
+		const loadA = creds.loadCredentials(twoRoot, { sessionId: "session-A" });
+		const loadB = creds.loadCredentials(twoRoot, { sessionId: "session-B" });
+		check(
+			"each session resolves ITS OWN environment",
+			loadA.ok === true && loadA.credentials.instance === "farmago" && loadA.credentials.db === "farmago_db" &&
+				loadB.ok === true && loadB.credentials.instance === "main" && loadB.credentials.db === "main_db",
+			`A=${loadA.ok ? loadA.credentials.instance : loadA.reason} B=${loadB.ok ? loadB.credentials.instance : loadB.reason}`,
+		);
+		// The regression proper: writing in one session must not move the other.
+		creds.writeSessionInstance(twoRoot, "session-A", "main");
+		check(
+			"changing A does not change what B resolves",
+			creds.loadCredentials(twoRoot, { sessionId: "session-B" }).credentials.instance === "main" &&
+				creds.readSessionInstance(twoRoot, "session-B") === "main",
+		);
+		creds.writeSessionInstance(twoRoot, "session-A", "farmago");
+
+		// A session with no pointer of its own inherits the project's last choice...
+		const inherited = creds.loadCredentials(twoRoot, { sessionId: "session-new" });
+		check(
+			"a session without a pointer inherits the project's last choice",
+			inherited.ok === true && inherited.credentials.instance === "farmago" && inherited.credentials.source === "instance-inherited",
+			inherited.ok ? inherited.credentials.source : inherited.reason,
+		);
+		check("...and is TOLD it inherited, so 'why another one?' has an answer", typeof inherited.sourceNote === "string" && /INHERITED/.test(inherited.sourceNote));
+		// ...unless the operator turned inheritance off, in which case it falls through.
+		const strictEnv = creds.loadCredentials(twoRoot, { sessionId: "session-new", adoptProjectHint: false });
+		check(
+			"adoptProjectPointerHint=false stops the inheritance for instances too",
+			strictEnv.ok === false || strictEnv.credentials.source !== "instance-inherited",
+			strictEnv.ok ? strictEnv.credentials.source : strictEnv.reason,
+		);
+
+		// A pointer to an instance that no longer exists must not resolve.
+		writeFileSync(join(twoRoot, ".sdd", "instances", "active-session-gone.json"), JSON.stringify({ name: "deleted-env" }), { mode: 0o600 });
+		const goneEnv = creds.loadCredentials(twoRoot, { sessionId: "session-gone" });
+		check(
+			"a pointer naming a deleted instance falls through instead of crashing",
+			goneEnv.ok === false || goneEnv.credentials.instance !== "deleted-env",
+			goneEnv.ok ? String(goneEnv.credentials.instance) : goneEnv.reason,
+		);
+
+		// A session id that is not usable cannot escape the instances directory.
+		for (const bad of ["../evil", "a/b", "..", "", "x".repeat(200)]) {
+			const file = creds.sessionInstancePath(twoRoot, bad);
+			check(
+				`an unusable session id (${JSON.stringify(bad.slice(0, 12))}) stays inside .sdd/instances/`,
+				file.startsWith(join(twoRoot, ".sdd", "instances")) && !file.includes(".."),
+				file,
+			);
+		}
+	}
+
+	// ---- authorizing a target does not require activating it first ---------
+	// The closed circle: `instance=use` demands a live grant for the target, and
+	// `authorize` only ever saw the ACTIVE one. With grants expiring every 12 h,
+	// there was no order of operations that recovered.
+	{
+		const authRoot = join(dir, "authorize-by-name");
+		mkdirSync(join(authRoot, ".sdd", "instances"), { recursive: true });
+		writeFileSync(
+			join(authRoot, ".sdd", "instances", "staging.env"),
+			"ODOO_URL=https://stg.example.com\nODOO_DB=stg\nODOO_USERNAME=ci\nODOO_PASSWORD=pw\n",
+			{ mode: 0o600 },
+		);
+		writeFileSync(
+			join(authRoot, ".sdd", "instances", "local.env"),
+			"ODOO_URL=http://localhost:8069\nODOO_DB=dev\nODOO_USERNAME=admin\nODOO_PASSWORD=pw\n",
+			{ mode: 0o600 },
+		);
+		// Naming a target loads THAT file, not the active one — no activation needed.
+		const forced = creds.loadCredentials(authRoot, { instance: "staging" });
+		check(
+			"a target named explicitly is loaded without activating it",
+			forced.ok === true && forced.credentials.instance === "staging" && forced.credentials.source === "forced",
+			forced.ok ? `${forced.credentials.instance}/${forced.credentials.source}` : forced.reason,
+		);
+		check("...and naming it does NOT move any pointer", creds.readActiveInstance(authRoot) === null && creds.readSessionInstance(authRoot, "session-X") === null);
+		// The grants are per target, so revoking one leaves the other alone.
+		const grantsAuth = await import(new URL("grants.js", libDir).href);
+		const fpStaging = grantsAuth.fingerprintOf("https://stg.example.com", "stg", "ci");
+		const fpLocal = grantsAuth.fingerprintOf("http://localhost:8069", "dev", "admin");
+		grantsAuth.writeGrant(authRoot, { kind: "connection", fingerprint: fpStaging, callId: "c1", reason: "t" });
+		grantsAuth.writeGrant(authRoot, { kind: "connection", fingerprint: fpLocal, callId: "c2", reason: "t" });
+		check("both targets hold a grant", grantsAuth.hasValidGrant(authRoot, "connection", fpStaging) && grantsAuth.hasValidGrant(authRoot, "connection", fpLocal));
+		check("revoking ONE target removes only its grant", grantsAuth.revokeGrantFor(authRoot, fpStaging) === 1 && grantsAuth.hasValidGrant(authRoot, "connection", fpStaging) === false && grantsAuth.hasValidGrant(authRoot, "connection", fpLocal) === true);
+		// An unusable name resolves nothing, so nothing can be authorized or revoked.
+		check("an unusable target name resolves no file", creds.loadCredentials(authRoot, { instance: "../evil" }).ok === false && creds.instanceEnvPath(authRoot, "../evil") === null);
+		// A missing instance is reported with the ones that DO exist.
+		const missing = creds.loadCredentials(authRoot, { instance: "nope" });
+		check("an unknown target fails closed", missing.ok === false && missing.reason === "env_file_missing");
+	}
 }
 
 check("S2: scrubGeneric hides password= shapes", !creds.scrubGeneric("reset with password=Sup3rS3cret! now").includes("Sup3rS3cret!"));

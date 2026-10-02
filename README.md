@@ -163,12 +163,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.8.2`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.9.0`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.8.2, published with a provenance attestation
+npm install dsh-odoo-sdd        # 0.9.0, published with a provenance attestation
 ```
 
 > [!IMPORTANT]
@@ -228,18 +228,39 @@ each target gets its own file under `.sdd/instances/`, and one is active.
 ```bash
 odoo_setup mode=instance instance=list                      # what exists, non-secret identity
 odoo_setup mode=instance instance=add name=staging url=https://stg.example.com db=stg username=ci
-# fill ODOO_PASSWORD in .sdd/instances/staging.env by hand, then:
-odoo_setup mode=authorize                                   # grants THIS target
-odoo_setup mode=instance instance=use name=staging           # activate it
-odoo_setup mode=instance instance=remove name=staging        # needs confirm_destructive=true
+# fill the secret in .sdd/instances/staging.env by hand, then:
+odoo_setup mode=authorize name=staging                     # grants THAT target
+odoo_setup mode=instance instance=use name=staging          # activate it FOR THIS SESSION
+odoo_setup mode=instance instance=remove name=staging       # needs confirm_destructive=true
+odoo_setup mode=revoke name=staging                         # drops only that target's grant
 ```
 
+**The active target belongs to the SESSION, not the project.** Each chat keeps its
+own pointer (`.sdd/instances/active-<sessionId>.json`), so two sessions on one
+project can work in two environments at once — one on staging, another on a
+client's server — without either moving the other. `.sdd/instances/active.json`
+remains only as the project's *last used* target, which a session that has not
+chosen inherits as a **default** and is told about:
+
+```
+environment "farmago" was INHERITED from the project's last choice; this session
+had not picked one. Choose your own with `odoo_setup mode=instance instance=use name=<name>`
+```
+
+Set `adoptProjectPointerHint: false` to remove that inheritance entirely.
+
 Authorization is **per target** (`url`+`db`+`user`), so two instances on the same
-server are two grants. Activating an instance that has no live grant is refused:
-the pointer decides where mutations go, so it cannot be switched to a target
-nobody approved. With **several** instances and **none** active, every connection
-tool refuses instead of picking one by order — and an old `.sdd/.env` keeps
-working untouched as `default` until you choose to move it yourself.
+server are two grants. **`authorize` takes the target's NAME**, which is what makes
+switching recoverable: grants expire (12 h), and requiring activation before
+authorization used to be a closed circle — `use` demands a live grant for the
+target, while `authorize` only ever saw the active one. Naming it breaks the
+circle: authorize `staging` without leaving `main`.
+
+Activating a target that has no live grant is still refused — the pointer decides
+where mutations go, so it cannot be switched to something nobody approved. With
+**several** instances and **none** active, every connection tool refuses instead
+of picking one by order, and an old `.sdd/.env` keeps working untouched as
+`default` until you choose to move it yourself.
 
 ```bash
 mkdir -p ~/.config/dsh-odoo-sdd && cd ~/.config/dsh-odoo-sdd

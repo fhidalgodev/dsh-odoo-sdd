@@ -206,6 +206,24 @@ export function writeGrant(
  * @param kind - restrict the revocation to one kind.
  * @returns how many receipts were removed.
  */
+/**
+ * Revoke the grants that cover ONE target.
+ *
+ * The all-or-nothing revoke was the only option, which made "drop access to the
+ * staging server" impossible without dropping every other environment with it.
+ * @param projectRoot - workspace root.
+ * @param fingerprint - the target's `url+db+user` fingerprint.
+ * @returns how many grants were removed.
+ */
+export function revokeGrantFor(projectRoot: string, fingerprint: string): number {
+	const data = readGrants(projectRoot);
+	const before = data.grants.length;
+	data.grants = data.grants.filter((g) => g.fingerprint !== fingerprint);
+	const removed = before - data.grants.length;
+	if (removed > 0) persist(projectRoot, data);
+	return removed;
+}
+
 export function revokeGrants(projectRoot: string, kind?: GrantKind): number {
 	const data = readGrants(projectRoot);
 	const before = data.grants.length;

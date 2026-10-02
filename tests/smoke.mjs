@@ -800,6 +800,28 @@ check("S1: http to a real 127.0.0.1 loopback allowed", realLoop.ok === true);
 				"...and names the project default separately",
 				/^- farmago \(project default\)/m.test(listed.detail) && /Project default/.test(listed.detail),
 			);
+			// A payload that violates its own `additionalProperties: false` schema is a
+			// defect, not cosmetics: the harness reports a schema error on every
+			// `mode=instance` answer while the effect still happens. That is exactly
+			// what happened for several releases, because the fields had been declared
+			// on `odoo_connect`'s schema by mistake.
+			{
+				const schemaOf = (tool) => tool.output?.schema?.properties ?? {};
+				const setupProps = schemaOf(listCtx.tools.get("odoo_setup"));
+				const returned = new Set(Object.keys(listed));
+				const undeclared = [...returned].filter((key) => !(key in setupProps));
+				check(
+					"every field mode=instance returns is declared in its own output schema",
+					undeclared.length === 0,
+					undeclared.join(", "),
+				);
+				const connectProps = schemaOf(listCtx.tools.get("odoo_connect"));
+				check(
+					"...and odoo_connect does not declare fields it never returns",
+					!("activeInstance" in connectProps) && !("instances" in connectProps),
+				);
+			}
+
 			check(
 				"the structured payload carries both flags",
 				Array.isArray(listed.instances) &&

@@ -862,27 +862,6 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					uid: { type: "number" },
 					projectRoot: { type: "string" },
 					rootSource: { type: "string" },
-					activeInstance: { type: "string" },
-					instances: {
-						type: "array",
-						items: {
-							type: "object",
-							additionalProperties: false,
-							properties: {
-								name: { type: "string", required: true },
-								url: { type: "string" },
-								db: { type: "string" },
-								username: { type: "string" },
-								environment: { type: "string" },
-								active: { type: "boolean" },
-								projectDefault: { type: "boolean" },
-								authorized: { type: "boolean" },
-								legacy: { type: "boolean" },
-								secure: { type: "boolean" },
-								readable: { type: "boolean" },
-							},
-						},
-					},
 					detail: { type: "string", required: true },
 				},
 			},
@@ -1039,6 +1018,33 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					permissionsEnforced: { type: "boolean" },
 					projectRoot: { type: "string" },
 					rootSource: { type: "string" },
+					// The instance block returns these. They were declared on the WRONG
+					// tool for several releases (an anchor matched `odoo_connect`'s schema
+					// first), so every `mode=instance` answer violated its own
+					// `additionalProperties: false` and the harness reported a schema
+					// error while the effect still happened.
+					activeInstance: { type: "string" },
+					instanceSource: { type: "string" },
+					instances: {
+						type: "array",
+						items: {
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								name: { type: "string", required: true },
+								url: { type: "string" },
+								db: { type: "string" },
+								username: { type: "string" },
+								environment: { type: "string" },
+								active: { type: "boolean" },
+								projectDefault: { type: "boolean" },
+								authorized: { type: "boolean" },
+								legacy: { type: "boolean" },
+								secure: { type: "boolean" },
+								readable: { type: "boolean" },
+							},
+						},
+					},
 					detail: { type: "string", required: true },
 				},
 			},
@@ -1070,7 +1076,21 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				const activeNow = readSessionInstance(projectRoot, sessionIdOf(exec)) ?? readActiveInstance(projectRoot);
 				const activeScope = readSessionInstance(projectRoot, sessionIdOf(exec)) === null ? "project" : "session";
 				const projectActive = readActiveInstance(projectRoot);
-				const describe = (): Array<Record<string, unknown>> =>
+				/** One row of the instance listing, typed so the schema can be checked. */
+				type InstanceRow = {
+					name: string;
+					url?: string;
+					db?: string;
+					username?: string;
+					environment?: string;
+					active: boolean;
+					projectDefault: boolean;
+					authorized: boolean;
+					legacy: boolean;
+					secure: boolean;
+					readable: boolean;
+				};
+				const describe = (): InstanceRow[] =>
 					listInstances(projectRoot).map((entry) => ({
 						name: entry.name,
 						...(entry.url === null ? {} : { url: entry.url }),

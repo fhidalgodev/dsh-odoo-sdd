@@ -163,12 +163,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.10.1`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.11.0`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.10.1, published with a provenance attestation
+npm install dsh-odoo-sdd        # 0.11.0, published with a provenance attestation
 ```
 
 > [!IMPORTANT]
@@ -463,7 +463,7 @@ every tool result.
 
 ---
 
-## 🧰 The 15 tools
+## 🧰 The 16 tools
 
 | Tool | Purpose |
 |---|---|
@@ -480,6 +480,7 @@ every tool result.
 | `odoo_security_scan` | Local static security review (no instance needed): raw SQL by concatenation, `eval`/`exec`/`pickle`, hardcoded secrets, unjustified `sudo()`, `auth="none"`, disabled CSRF, QWeb `t-raw`. Findings carry `file:line` + a fix hint; any ERROR blocks `DONE`. |
 | `sdd_handoff` | Writes `specs/<id>/handoff.md` (final phase, verdict, decisions, blockers, checkpoints, the COMPLETE per-spec data journal, effective config, next steps) when the run closes. |
 | `odoo_config` | Reads or updates the persistent configuration and answers **"which project am I in?"**: the resolved root, its provenance (session cwd / configured / process cwd), the specs base, the effective spec directory and the config file in use. |
+| `odoo_i18n` | Translations through **Odoo's own models**: `base.language.export` supplies the translatable terms and `base.language.install` activates the language. `export` writes `<module>/i18n/<lang>.po` (creating the `i18n/` folder when missing) and MERGES with the file already there — a written translation is never replaced by what the export says, new terms are added, and terms the module dropped are kept as `#~` instead of deleted. `status` reports what each language covers, `check` fails while an entry still awaits its text. It does not translate: the export gives the message IDs and a person writes the text. Version-aware (Odoo 16 is the boundary, the same one that removed `ir.translation`). |
 | `odoo_import` | Preparation of a CSV/XLS/XLSX import through Odoo's OWN importer (`base_import`), never through a parser of this plugin: `prepare` uploads the authorised file with the web session and its own approval, `preview` reports what Odoo reads (sheets, headers, a bounded sample, the importable fields), `map` records a decision per column, `plan` turns it into an `apply` batch — and `odoo_functional` approves and executes it like any other, so this tool never applies an import on its own. A JSONP answer is parsed as data (never executed), the session cookie never leaves the plugin, and a version outside the verified families is refused with what to investigate. |
 | `odoo_functional` | The batch executor of the functional path: `plan` (validate and store a batch fail-closed), `approve` (native human approval bound to the spec, design, plan and batch hashes), `apply` (execute it one operation at a time, persisting each state before and after the call, and record it as **applied only after reading back the state the operation declared** — a call that answers but leaves the records untouched is a failure, not a success), `inspect` (read-only discovery under its own scope), `status`, `reconcile` (decide an outcome that came back as unknown), `verify` (evidence per acceptance criterion) and `compensate` (build the undo batch from the journal). The declared environment gates the run and production additionally needs a declared backup; while a batch runs, every other mutation path is denied. |
 
@@ -769,7 +770,7 @@ few copy-paste presets where you need them.
 
 ## 🤖 Model experience
 
-The agent sees 15 tools with self-contained descriptions. Typical flow:
+The agent sees 16 tools with self-contained descriptions. Typical flow:
 `sdd_phase init` → security interview + `odoo_connect` → gated phases with
 `APPROVED` → `sdd_checkpoint create` → code → `odoo_security_scan` →
 `odoo_module install` → on traceback, `odoo_errors` + `sdd_phase fail` (which may
@@ -845,7 +846,7 @@ settings section.
 
 | File | Role |
 |---|---|
-| `src/index.ts` | Plugin entry: registration of the 15 tools, config resolution and the policy guard |
+| `src/index.ts` | Plugin entry: registration of the 16 tools, config resolution and the policy guard |
 | `src/types.ts` | Public payload types (never contain secret material) |
 | `src/credentials.ts` | Credential cascade, `.env` load/validation, permission verification, `redact()`, fail-closed |
 | `src/odoo-client.ts` | JSON-RPC client: `common.version`, `authenticate`, `execute_kw`, `button_immediate_*`, `ir.logging`, `/web/session/authenticate` |

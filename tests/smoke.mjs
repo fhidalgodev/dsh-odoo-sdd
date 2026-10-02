@@ -1083,8 +1083,9 @@ const expectedTools = [
 	"odoo_connect", "odoo_setup", "odoo_module", "odoo_execute", "odoo_validate",
 	"odoo_errors", "odoo_session", "odoo_config", "sdd_phase", "sdd_checkpoint",
 	"odoo_security_scan", "sdd_handoff", "odoo_docs", "odoo_functional", "odoo_import",
+	"odoo_i18n",
 ];
-check("registers exactly the 15 documented tools", registered.size === expectedTools.length);
+check(`registers exactly the ${expectedTools.length} documented tools`, registered.size === expectedTools.length);
 check(
 	"registered tool names match the documented set",
 	expectedTools.every((n) => registered.has(n)),
@@ -3849,7 +3850,7 @@ console.log("== real cordis host: optional services ==");
 		// is awaited (or the fiber is otherwise activated).
 		await ctx.plugin({ name: plugin.name, inject: plugin.inject, apply: (c, cfg) => plugin.apply(c, cfg) }, { projectRoot: hostRoot });
 
-		check("the plugin mounts on a real cordis host", tools.size === 15);
+		check("the plugin mounts on a real cordis host", tools.size === 16, `${tools.size} tool(s)`);
 
 		// The premise: inside a plugin that did NOT inject the service, the
 		// property read throws (this is what silently disabled the session root).
@@ -4399,6 +4400,228 @@ console.log("== JSON-2 transport (Odoo 19+) ==");
 	} finally {
 		globalThis.fetch = realFetchJ2;
 	}
+}
+
+// == native translations (i18n) ============================================
+// The terms come from Odoo's own export models; the reconciliation with the file
+// already in the repository is where human work is either kept or destroyed.
+console.log("== native translations (i18n) ==");
+{
+	const poMod = await import(new URL("po.js", libDir).href);
+	const i18nMod = await import(new URL("odoo-i18n.js", libDir).href);
+
+	// ---- the parser ------------------------------------------------------
+	const sample = String.raw`msgid ""
+msgstr ""
+"Project-Id-Version: Odoo\n"
+"Language: es_VE\n"
+
+#. module: my_module
+#: model:ir.model.fields,field_description:my_module.field_x
+msgid "Hello"
+msgstr "Hola"
+
+# a translator note
+#, fuzzy
+msgid "World"
+msgstr "Mundo"
+
+msgid "Plural"
+msgid_plural "Plurals"
+msgstr[0] "uno"
+msgstr[1] "varios"
+
+#~ msgid "Gone"
+#~ msgstr "Ido"
+`;
+	const parsed = poMod.parsePo(sample);
+	check("the header block is read as metadata, one key per line", parsed.header["Language"] === "es_VE" && parsed.header["Project-Id-Version"] === "Odoo", JSON.stringify(parsed.header));
+	// The bug this pins: comments attached to the entry BEFORE them, so a `#, fuzzy`
+	// flag landed on the wrong message and a reviewed translation looked unreviewed.
+	const hello = parsed.entries.find((e) => e.msgid === "Hello");
+	const world = parsed.entries.find((e) => e.msgid === "World");
+	check(
+		"comments and flags belong to the entry that FOLLOWS them",
+		hello.flags.some((f) => f.startsWith("#.")) && world.comments.includes("# a translator note") && world.flags.includes("#, fuzzy"),
+		`hello=${JSON.stringify(hello.flags)} world=${JSON.stringify([...world.comments, ...world.flags])}`,
+	);
+	check("plural forms are read one msgstr per form", JSON.stringify(parsed.entries.find((e) => e.msgid === "Plural")?.msgstr) === JSON.stringify(["uno", "varios"]));
+	check("an obsolete entry stays whole", parsed.entries.find((e) => e.msgid === "Gone")?.obsolete === true);
+	check("serialize(parse(x)) is idempotent", poMod.serializePo(parsed) === poMod.serializePo(poMod.parsePo(poMod.serializePo(parsed))));
+	check("coverage counts only live entries", poMod.poCoverage(parsed).total === 3 && poMod.poCoverage(parsed).translated === 3);
+	const withPending = poMod.parsePo(String.raw`msgid ""` + "\n" + String.raw`msgstr ""` + "\n\n" + String.raw`msgid "Untranslated"` + "\n" + String.raw`msgstr ""` + "\n");
+	check("...and reports the ones still awaiting text", poMod.poCoverage(withPending).pending.length === 1);
+
+	// ---- the merge: human work survives the refresh ----------------------
+	const existing = poMod.parsePo(String.raw`msgid ""
+msgstr ""
+"Language: es_VE\n"
+
+msgid "Hello"
+msgstr "Hola (revisado)"
+
+msgid "Old term"
+msgstr "Viejo"
+`);
+	const exported = poMod.parsePo(String.raw`msgid ""
+msgstr ""
+"Project-Id-Version: Odoo\n"
+
+msgid "Hello"
+msgstr "Hola"
+
+msgid "New term"
+msgstr ""
+`);
+	const merged = poMod.mergePo(existing, exported, "es_VE");
+	check("a written translation is NOT replaced by what the export says", merged.file.entries.find((e) => e.msgid === "Hello")?.msgstr[0] === "Hola (revisado)");
+	check("...and it is reported as preserved", merged.preserved.includes("Hello"));
+	check("a new term is added and reported", merged.added.includes("New term"));
+	check("a term the module no longer has is kept as obsolete, not deleted", merged.obsoleted.includes("Old term") && merged.file.entries.find((e) => e.msgid === "Old term")?.obsolete === true);
+	check(
+		"the header is completed for the file to be usable",
+		merged.file.header["Language"] === "es_VE" && merged.file.header["Content-Type"] === "text/plain; charset=UTF-8" && merged.file.header["Plural-Forms"] !== undefined && merged.file.header["X-Generator"] === "dsh-odoo-sdd",
+		JSON.stringify(merged.file.header),
+	);
+
+	// ---- language codes --------------------------------------------------
+	check("a gettext language code is accepted", poMod.isLanguageCode("es_VE") && poMod.isLanguageCode("es_PA") && poMod.isLanguageCode("fr") && poMod.isLanguageCode("pt_BR"));
+	check("anything else is refused", ["es_VE!", "123", "spanish", "", "es_ve", "es-VE"].every((bad) => poMod.isLanguageCode(bad) === false));
+
+	// ---- the export flow, per version ------------------------------------
+	const i18nRoot = join(dir, "i18nModule");
+	const moduleDir = join(i18nRoot, "my_module");
+	mkdirSync(moduleDir, { recursive: true });
+	writeFileSync(join(moduleDir, "__manifest__.py"), "{'name': 'My Module', 'version': '19.0.1.0.0'}", { mode: 0o600 });
+	const PO_FROM_SERVER = String.raw`msgid ""
+msgstr ""
+"Project-Id-Version: Odoo\n"
+
+msgid "Hello"
+msgstr "Hola"
+
+msgid "Bye"
+msgstr ""
+`;
+	const fakeClient = (major, langActive) => {
+		const calls = [];
+		return {
+			calls,
+			serverMajor: major,
+			executeKw: async (model, method, args) => {
+				calls.push({ model, method, values: args[0] });
+				if (model === "ir.module.module" && method === "search_read") return { ok: true, value: [{ id: 42, state: "installed" }] };
+				if (model === "res.lang" && method === "search_read") return { ok: true, value: [{ id: 7, code: "es_VE", active: langActive, name: "Spanish (VE)" }] };
+				if (model === "base.language.install" && method === "create") return { ok: true, value: 99 };
+				if (model === "base.language.export" && method === "create") return { ok: true, value: 55 };
+				if (model === "base.language.export" && method === "act_getfile") return { ok: true, value: { type: "ir.actions.act_window" } };
+				if (model === "base.language.export" && method === "read") return { ok: true, value: [{ data: Buffer.from(PO_FROM_SERVER).toString("base64"), name: "es_VE.po" }] };
+				return { ok: true, value: true };
+			},
+		};
+	};
+	const runExport = async (client, extra = {}) => {
+		const tools = new Map();
+		i18nMod.registerI18nTools({ tools: { register: (tool) => tools.set(tool.name, tool) } }, {
+			projectRoot: () => i18nRoot,
+			client: () => ({ client, report: "stub" }),
+		});
+		return tools.get("odoo_i18n").execute({ operation: "export", module_dir: "my_module", lang: "es_VE", ...extra });
+	};
+
+	const modern = fakeClient(19, false);
+	const modernResult = await runExport(modern);
+	check("i18n export creates the i18n/ folder when it is missing", existsSync(join(moduleDir, "i18n", "es_VE.po")));
+	check("...and reports what it did", modernResult.ok === true && modernResult.created === true && modernResult.total === 2 && modernResult.pending === 1, JSON.stringify(modernResult).slice(0, 140));
+	const modernInstall = modern.calls.find((c) => c.model === "base.language.install" && c.method === "create");
+	check(
+		"an inactive language is activated with the lang_ids shape from Odoo 16 on",
+		JSON.stringify(modernInstall?.values) === JSON.stringify({ lang_ids: [[6, 0, [7]]], overwrite: false }),
+		JSON.stringify(modernInstall?.values),
+	);
+	const exportCreate = modern.calls.find((c) => c.model === "base.language.export" && c.method === "create");
+	check(
+		"the export uses Odoo's own wizard with the documented parameters",
+		exportCreate?.values?.format === "po" && exportCreate?.values?.export_type === "module" && JSON.stringify(exportCreate?.values?.modules) === JSON.stringify([[6, 0, [42]]]) && exportCreate?.values?.lang === "es_VE",
+		JSON.stringify(exportCreate?.values),
+	);
+	check("the file is read back from the record, not from the action", modern.calls.some((c) => c.model === "base.language.export" && c.method === "read"));
+
+	// The version boundary is 16, and it is the same one that removed ir.translation.
+	const legacy = fakeClient(15, false);
+	await runExport(legacy);
+	const legacyInstall = legacy.calls.find((c) => c.model === "base.language.install" && c.method === "create");
+	check(
+		"through Odoo 15 the install wizard takes `lang`, not `lang_ids`",
+		JSON.stringify(legacyInstall?.values) === JSON.stringify({ lang: "es_VE", overwrite: false }),
+		JSON.stringify(legacyInstall?.values),
+	);
+	check(
+		"...and the report points at the database being authoritative instead of a module upgrade",
+		/base.language.import|database is authoritative/.test((await runExport(fakeClient(15, false))).detail),
+	);
+
+	const alreadyActive = fakeClient(19, true);
+	await runExport(alreadyActive);
+	check("an already active language is not installed again", !alreadyActive.calls.some((c) => c.model === "base.language.install"));
+	check("the version boundary is the same one that dropped ir.translation", i18nMod.I18N_MODERN_MAJOR === 16);
+
+	// ---- the second export preserves the first one's work ----------------
+	const second = await runExport(fakeClient(19, true));
+	check("re-exporting updates the file instead of recreating it", second.created === false && second.preserved === 1, `created=${second.created} preserved=${second.preserved}`);
+
+	// ---- check: the acceptance criterion the test-plan consumes ----------
+	const checkTools = new Map();
+	i18nMod.registerI18nTools({ tools: { register: (tool) => checkTools.set(tool.name, tool) } }, {
+		projectRoot: () => i18nRoot,
+		client: () => ({ client: null, report: "unused" }),
+	});
+	const checked = await checkTools.get("odoo_i18n").execute({ operation: "check", module_dir: "my_module", lang: "es_VE" });
+	check("check FAILS while an entry awaits its translation", checked.ok === false && /EMPTY translation/.test(checked.detail));
+	// Translate the pending term and it passes.
+	const file = join(moduleDir, "i18n", "es_VE.po");
+	const filled = poMod.parsePo(readFileSync(file, "utf8"));
+	for (const entry of filled.entries) if (entry.msgstr.every((v) => v.trim() === "")) entry.msgstr = ["Traducido"];
+	writeFileSync(file, poMod.serializePo(filled), { mode: 0o600 });
+	const rechecked = await checkTools.get("odoo_i18n").execute({ operation: "check", module_dir: "my_module", lang: "es_VE" });
+	check("...and passes once every entry has text", rechecked.ok === true, rechecked.detail.slice(0, 120));
+	const status = await checkTools.get("odoo_i18n").execute({ operation: "status", module_dir: "my_module" });
+	check("status reports the languages the module ships", status.ok === true && /es_VE/.test(status.detail), status.detail.slice(0, 120));
+
+	// A file that does not parse is never overwritten: what it holds may be work
+	// this plugin cannot see.
+	writeFileSync(file, "this is not a PO file at all", { mode: 0o600 });
+	const refused = await runExport(fakeClient(19, true));
+	check(
+		"an unreadable PO is refused instead of being overwritten",
+		refused.ok === false && /does not parse/.test(refused.detail) && readFileSync(file, "utf8") === "this is not a PO file at all",
+		refused.detail.slice(0, 120),
+	);
+
+	// ---- the CLARIFY question records the languages on the SPEC ----------
+	const i18nProj = join(dir, "i18nSpec");
+	mkdirSync(i18nProj, { recursive: true });
+	const i18nCtx = { tools: new Map(), guard: null };
+	plugin.apply(
+		{ tools: { register: (tool) => i18nCtx.tools.set(tool.name, tool), guard: (g) => { i18nCtx.guard = g; return () => {}; } }, on: () => () => {}, approval: { request: async () => "allowed-once" } },
+		{ projectRoot: i18nProj },
+	);
+	const phaseI18n = i18nCtx.tools.get("sdd_phase");
+	await phaseI18n.execute({ operation: "init", spec_id: "001-i18n" });
+	const badLang = await phaseI18n.execute({ operation: "clarify", spec_id: "001-i18n", mode: "create", licensed: "community", translations: ["es_VE!"] });
+	check("clarify REFUSES a code Odoo would never load", badLang.ok === false && /Not a usable language code/.test(badLang.detail));
+	const okLang = await phaseI18n.execute({ operation: "clarify", spec_id: "001-i18n", mode: "create", licensed: "community", translations: ["es_VE", "es_PA"] });
+	check("clarify records the languages in the SPEC", okLang.ok === true);
+	const stateI18n = JSON.parse(readFileSync(join(i18nProj, "specs", "001-i18n", "state.json"), "utf8"));
+	check("...and they are per spec, like the edition", JSON.stringify(stateI18n.translations) === JSON.stringify(["es_VE", "es_PA"]), JSON.stringify(stateI18n.translations));
+	const statusI18n = await phaseI18n.execute({ operation: "status", spec_id: "001-i18n" });
+	check("status shows them", /es_VE/.test(String(statusI18n.detail)) || /es_VE/.test(JSON.stringify(statusI18n)), String(statusI18n.detail).slice(0, 140));
+	// Omitting them is a valid answer: an internal fix is not translated.
+	await phaseI18n.execute({ operation: "init", spec_id: "002-notrans" });
+	const noLang = await phaseI18n.execute({ operation: "clarify", spec_id: "002-notrans", mode: "bug", licensed: "community" });
+	check("omitting translations is accepted (not every job is translated)", noLang.ok === true);
+	const stateNo = JSON.parse(readFileSync(join(i18nProj, "specs", "002-notrans", "state.json"), "utf8"));
+	check("...and leaves the spec without languages", stateNo.translations === undefined, JSON.stringify(stateNo.translations));
 }
 
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);

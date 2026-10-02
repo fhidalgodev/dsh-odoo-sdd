@@ -74,6 +74,8 @@ import { withAudit } from "./audit.js";
 import { registerRuntimeTools } from "./tools-runtime.js";
 import { isReadMethod, isCallableMethodName } from "./method-classification.js";
 import { registerDocsTool } from "./docs-tool.js";
+import { registerI18nTools } from "./odoo-i18n.js";
+import { isLanguageCode } from "./po.js";
 import { registerFunctionalTool, activeFunctionalRun, functionalDir, readPlan, readRun, countOps } from "./functional.js";
 import { registerImportTool, readWebSession, capabilitiesFor, readImportOutcome, reportAppliedImport } from "./odoo-import.js";
 import { applyArguments } from "./import-capabilities.js";
@@ -1996,6 +1998,15 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				enum: ["community", "enterprise"],
 				description: "Licensing strategy (for operation=clarify): community or enterprise. OCA/community reuse is ALWAYS searched in addition.",
 			},
+			translations: {
+				type: "array",
+				items: { type: "string" },
+				description:
+					"operation=clarify only, and OPTIONAL: the languages this work must ship translations for, as " +
+					"gettext codes (es_VE, es_PA, pt_BR…). Ask the developer during the CLARIFY interview. Leaving it " +
+					"out means the work is not translated — that is a valid answer, not a missing one. Declaring " +
+					"languages makes odoo_i18n part of the plan and adds the matching acceptance criterion.",
+			},
 			next_phase: {
 				type: "string",
 				enum: [...PHASES],
@@ -2046,6 +2057,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			spec_id: string;
 			mode?: PipelineMode;
 			licensed?: "community" | "enterprise";
+			translations?: string[];
 			next_phase?: Phase;
 			approval_marker?: string;
 			approval_source?: "human" | "human-proxy";
@@ -2177,7 +2189,25 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						detail: `Unsupported mode "${String(args.mode)}" — expected one of: ${PIPELINE_MODES.join(", ")}.`,
 					};
 				}
-				const intent = recordIntent(stateC, args.mode, args.licensed);
+				// The languages are a gettext code each (`es_VE`, `es_PA`, `pt_BR`…). A
+				// code that Odoo would never load is refused HERE, while the answer can
+				// still be corrected, instead of becoming a file nobody reads.
+				const wantedLangs: string[] | undefined =
+					args.translations === undefined ? undefined : args.translations.map((value) => String(value).trim());
+				if (wantedLangs !== undefined) {
+					const bad = wantedLangs.filter((value) => !isLanguageCode(value));
+					if (bad.length > 0) {
+						return {
+							operation: "clarify" as string, phase: stateC.phase as string, ok: false, requireDiagnosis: false,
+							summary: summarize(stateC),
+							detail:
+								`Not a usable language code: ${bad.map((value) => JSON.stringify(value)).join(", ")}. ` +
+								"Odoo uses gettext codes — `ll` or `ll_CC` (es_VE, es_PA, pt_BR, fr). " +
+								"Nothing was recorded.",
+						};
+					}
+				}
+				const intent = recordIntent(stateC, args.mode, args.licensed, wantedLangs);
 				if (!intent.ok) {
 					return {
 						operation: "clarify" as string, phase: stateC.phase as string, ok: false, requireDiagnosis: false,
@@ -4165,6 +4195,13 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		}
 	}
 
+
+	// Native translations: the terms come from Odoo's own export models, so the
+	// `i18n/` files stay correct as the module changes.
+	registerI18nTools(ctx, {
+		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
+		client: (exec) => clientForExec(exec),
+	});
 
 	registerDocsTool(ctx, {
 		projectRoot: (exec) => effectiveConfig(exec).projectRoot,

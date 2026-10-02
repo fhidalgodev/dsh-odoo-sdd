@@ -164,12 +164,12 @@ bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
 
 - **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
 - Acepta cualquier spec de pnpm, así que podés fijar una versión:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.10.1`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.11.0`.
 
 ¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.10.1, publicada con attestation de provenance
+npm install dsh-odoo-sdd        # 0.11.0, publicada con attestation de provenance
 ```
 
 > [!IMPORTANT]
@@ -466,7 +466,7 @@ filas que contó no se reenvían. La cookie de sesión queda en `.sdd/session.js
 
 ---
 
-## 🧰 Las 15 tools
+## 🧰 Las 16 tools
 
 | Tool | Propósito |
 |---|---|
@@ -483,6 +483,7 @@ filas que contó no se reenvían. La cookie de sesión queda en `.sdd/session.js
 | `odoo_security_scan` | Revisión de seguridad estática local (sin instancia): SQL concatenado, `eval`/`exec`/`pickle`, secretos hardcodeados, `sudo()` sin justificar, `auth="none"`, CSRF desactivado, `t-raw` en QWeb. Hallazgos con `file:line` + sugerencia; cualquier ERROR bloquea `DONE`. |
 | `sdd_handoff` | Escribe `specs/<id>/handoff.md` (fase final, veredicto, decisiones, blockers, checkpoints, el journal de datos **completo** de la spec, config efectiva, próximos pasos) al cerrar la ejecución. |
 | `odoo_config` | Lee o actualiza la configuración persistente y responde **"¿en qué proyecto estoy?"**: la raíz resuelta, su procedencia (cwd de la sesión / configurada / cwd del proceso), la base de specs, el directorio de spec efectivo y el archivo de configuración en uso. |
+| `odoo_i18n` | Traducciones con los **modelos propios de Odoo**: `base.language.export` aporta los términos traducibles y `base.language.install` activa el idioma. `export` escribe `<módulo>/i18n/<lang>.po` (creando la carpeta `i18n/` si falta) y **fusiona** con el fichero existente — una traducción escrita nunca se reemplaza por lo que diga el export, los términos nuevos se añaden y los que el módulo ya no tiene se conservan como `#~` en vez de borrarse. `status` informa la cobertura de cada idioma y `check` falla mientras quede una entrada sin texto. No traduce: el export da los identificadores y el texto lo escribe una persona. Consciente de la versión (Odoo 16 es el corte, el mismo que eliminó `ir.translation`). |
 | `odoo_import` | Preparación de una importación CSV/XLS/XLSX por el importador **propio de Odoo** (`base_import`), nunca con un parser de este plugin: `prepare` sube el archivo autorizado con la sesión web y su propia aprobación, `preview` informa lo que Odoo lee (hojas, encabezados, una muestra acotada, los campos importables), `map` registra una decisión por columna y `plan` lo convierte en un lote `apply` — que `odoo_functional` aprueba y ejecuta como cualquier otro, así que esta tool nunca aplica una importación por sí sola. Una respuesta JSONP se parsea como dato (jamás se ejecuta), la cookie de sesión no sale del plugin, y una versión fuera de las familias verificadas se rechaza indicando qué investigar. |
 | `odoo_functional` | El ejecutor de lotes del camino funcional: `plan` (valida y guarda un lote fail-closed), `approve` (aprobación humana nativa atada a los hashes de spec, diseño, plan y lote), `apply` (lo ejecuta operación por operación, persistiendo cada estado antes y después de la llamada, y lo registra como **aplicado sólo después de releer el estado que la operación declaró** — una llamada que responde pero deja los registros intactos es un fallo, no un éxito), `inspect` (descubrimiento solo-lectura bajo su propio alcance), `status`, `reconcile` (decide un resultado que volvió desconocido), `verify` (evidencia por criterio de aceptación) y `compensate` (arma el lote de deshacer desde el journal). El entorno declarado condiciona la corrida y producción exige además un respaldo declarado; mientras un lote corre, toda otra vía de mutación queda denegada. |
 
@@ -763,7 +764,7 @@ presets para copiar y pegar donde los necesites.
 
 ## 🤖 Experiencia del modelo
 
-El agente ve 15 tools con descripciones autocontenidas. El flujo típico:
+El agente ve 16 tools con descripciones autocontenidas. El flujo típico:
 `sdd_phase init` → entrevista de seguridad + `odoo_connect` → fases con compuerta
 mediante `APPROVED` → `sdd_checkpoint create` → código → `odoo_security_scan` →
 `odoo_module install` → si hay traceback, `odoo_errors` + `sdd_phase fail` (puede
@@ -841,7 +842,7 @@ ModuleLoader que aporta la sección **Odoo SDD** en Ajustes.
 
 | Archivo | Rol |
 |---|---|
-| `src/index.ts` | Entrada del plugin: registro de las 15 tools, resolución de configuración y el guard de política |
+| `src/index.ts` | Entrada del plugin: registro de las 16 tools, resolución de configuración y el guard de política |
 | `src/types.ts` | Tipos públicos de payload (nunca contienen material secreto) |
 | `src/credentials.ts` | Cascada de credenciales, carga/validación del `.env`, verificación de permisos, `redact()`, fail-closed |
 | `src/odoo-client.ts` | Cliente JSON-RPC: `common.version`, `authenticate`, `execute_kw`, `button_immediate_*`, `ir.logging`, `/web/session/authenticate` |

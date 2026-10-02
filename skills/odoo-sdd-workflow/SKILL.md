@@ -112,9 +112,9 @@ Each row is a phase: its promise, and the file that owns the how.
 
 | # | Phase | Deliverable and gate |
 |---|---|---|
-| 0 | `CLARIFY` | `sdd_phase status`; the pipeline CANNOT leave it until `mode` + `licensed` are confirmed (`sdd_phase clarify`) → `advance next_phase=READ_SPEC`. In SUPERVISED mode interview the developer (`ask_user_question`): create or bug, licensing, the security questions, and an explicit "proceed?". In AUTONOMOUS mode detect `mode`/`licensed` from the request; if they are not confidently determinable, `advance next_phase=BLOCKED` — never invent them. |
+| 0 | `CLARIFY` | `sdd_phase status`; the pipeline CANNOT leave it until `mode` + `licensed` are confirmed (`sdd_phase clarify`) → `advance next_phase=READ_SPEC`. In SUPERVISED mode interview the developer (`ask_user_question`): create or bug, licensing, the security questions, TRANSLATIONS (see below), and an explicit "proceed?". In AUTONOMOUS mode detect `mode`/`licensed` from the request; if they are not confidently determinable, `advance next_phase=BLOCKED` — never invent them. |
 | 1 | `READ_SPEC` | Onboarding once per project (`odoo_setup mode=check` → configure now / later / skip, and `mode=authorize` for the target, and `mode=autonomy` for delegation). Write `spec.md` with these sections (the runtime refuses the advance without them): `## Context`, `## Acceptance Criteria` (numbered `- [ ] AC1: …` — the closing gate matches them against `test-plan.md` row by row), `## Constraints`, `## Target Odoo Version`. **No implementation code in this phase.** Gate: `mark_spec_loaded` → `advance next_phase=ARCHITECTURE` with the host's approval (native when available). |
-| 2 | `ARCHITECTURE` | `search before designing` — Odoo Community source for the target version, Enterprise only if licensed, and ALWAYS the OCA repositories. `roles/architect.md` owns the required sections (`## Models`, `## Views`, `## Tours`, `## Demo data`, `## Security`, `## Manifest`, `## Reports`, `## Documentation`), the per-model view-type decision, the reports, the design interview and the OCA module skeleton (`README.rst` + `static/description/index.html`) that `roles/documentation.md` writes. The `## Security` decision and a real (non-comment) `## Documentation` decision are the two content gates this phase enforces. Derive `test-plan.md`, one row per AC. Gate: `advance next_phase=WRITE_CODE` with approval. |
+| 2 | `ARCHITECTURE` | `search before designing` — Odoo Community source for the target version, Enterprise only if licensed, and ALWAYS the OCA repositories. `roles/architect.md` owns the required sections (`## Models`, `## Views`, `## Tours`, `## Demo data`, `## Security`, `## Manifest`, `## Reports`, `## Documentation`), the per-model view-type decision, the reports, the design interview and the OCA module skeleton (`README.rst` + `static/description/index.html`) that `roles/documentation.md` writes. When CLARIFY declared `translations`, this phase also fixes WHICH strings are translatable (`translate=True` on the fields that carry user-visible text, `_()` on the Python literals) — the export can only find what is marked. The `## Security` decision and a real (non-comment) `## Documentation` decision are the two content gates this phase enforces. Derive `test-plan.md`, one row per AC. Gate: `advance next_phase=WRITE_CODE` with approval. |
 | 3 | `WRITE_CODE` | `roles/developer.md` implements the approved design (English code/docstrings, version-pinned syntax, OCA ordering). Static gates before touching the instance: `odoo_validate`, `odoo_docs operation=check`, and the repo's own pre-commit/pylint/ruff when present. Confirm the instance sees the code (`odoo_module operation=info`). **Checkpoint before mutating** (the guard refuses otherwise). Then `advance next_phase=VERIFY`. |
 | 4 | `VERIFY` | `roles/qa.md` walks the pyramid in ascending order — static, server (`odoo_module install|upgrade`, `odoo_errors` on traceback), data/RPC (`odoo_execute`: reads first, `fields_get` before asserting, `read_group` for aggregates, `context` on multi-company), security review, UI. Every AC row must read `pass` before `sdd_phase succeed`. Any failure ⇒ `sdd_phase fail` ⇒ phase 5. |
 | 5 | `FIX_LOOP` | Respect `requireDiagnosis`: when the ladder trips, the retry is refused until the analysis is RECORDED (`sdd_phase operation=diagnose`). Without one: analyze against `architecture.md`, fix the defective fragment (**never** the spec), re-run static gates, return to phase 4. Prefer `sdd_phase operation=rollback` over layering another guess on a broken state. `BLOCKED` or ceiling ⇒ stop and hand over. |
@@ -124,6 +124,19 @@ immutable after approval and the phase graph has no way back. Stop the run
 (`BLOCKED`), say why, and propose a SUCCESSOR spec that carries the corrected
 design — linked in the KB and in the handoff. Never lower an acceptance criterion
 to reach green.
+
+### The translation question (CLARIFY)
+
+Ask it in the interview like `licensed`, and record the answer with the intent:
+
+> `sdd_phase operation=clarify spec_id=<id> mode=… licensed=… translations=["es_VE","es_PA"]`
+
+- **If CLARIFY recorded `translations`, the spec must say WHY those languages** (a client in Venezuela, a country rollout), and the `i18n/` files are part of the deliverable, not a bonus.
+- **Omit `translations` when the work is not translated.** That is a normal answer (an internal fix), not a missing one: unlike `mode` and `licensed`, this is NOT a fail-closed gate.
+- The languages are **gettext codes** (`ll` or `ll_CC`: `es_VE`, `es_PA`, `pt_BR`, `fr`). A malformed code is refused while it can still be corrected.
+- They are recorded **per spec**, like the edition: one workspace can hold a Spanish-for-Venezuela client project and an untranslated internal one.
+- When languages are declared, `test-plan.md` needs the matching acceptance criterion: *"`i18n/<lang>.po` exists and no exported term is left with an empty `msgstr`"* — `odoo_i18n operation=check` is what verifies it.
+- Generating and updating those files is `odoo_i18n operation=export`: the terms come from Odoo's OWN export models, so the list stays correct as the module changes. It never overwrites a translation a person wrote.
 
 ## A new request after the run closed (the intake rule)
 

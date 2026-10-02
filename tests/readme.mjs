@@ -70,7 +70,7 @@ plugin.apply(
 	{},
 );
 const toolNames = [...registered.keys()].sort();
-check("the plugin registers 15 tools", toolNames.length === 15, `got ${toolNames.length}`);
+check("the plugin registers 16 tools", toolNames.length === 16, `got ${toolNames.length}`);
 
 /**
  * Line indexes that are OUTSIDE fenced code blocks. Every structural assertion
@@ -129,7 +129,9 @@ function tableAfter(rawText, matcher) {
 	for (let k = at + 1; k < visible.length; k += 1) {
 		const line = lines[visible[k]];
 		if (/^#{2,3} /.test(line)) break;
-		const m = /^\| `([a-z_]+)`/.exec(line);
+		// Tool names may contain DIGITS (`odoo_i18n`): a `[a-z_]+` class silently
+		// dropped it and reported a table that "missed" the tool.
+		const m = /^\| `([a-z0-9_]+)`/.exec(line);
 		if (m) out.push(m[1]);
 	}
 	return out;

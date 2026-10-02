@@ -99,3 +99,25 @@ state. Your job is to check it as documentation:
 - Do NOT mark a scaffolded fragment as finished, and do NOT approve your own
   work: the report's verdict comes from `odoo_docs operation=report`.
 - NO automatic commits.
+
+## Translations (`i18n/`)
+
+When the spec declared languages in CLARIFY (`state.translations`), the `i18n/` files are part
+of the deliverable and this role owns them:
+
+1. `odoo_i18n operation=export module_dir=<dir> lang=<code>` — the terms come from Odoo's own
+   export models, so they stay correct as the module changes. The tool creates `i18n/` when it
+   is missing and MERGES with the file already there: a translation a person wrote is never
+   replaced by what the export says, new terms are appended, and terms the module dropped are
+   kept as `#~`.
+2. Write the text of every entry the export left empty. Use the module's own vocabulary: the
+   glossary of the client, not a literal word-for-word rendering. A term that names a model
+   field means what the field means.
+3. `odoo_i18n operation=check module_dir=<dir> lang=<code>` — it fails while an entry still
+   awaits text. That is the acceptance criterion the test plan carries.
+4. On Odoo 16+ the files are the source: applying them means upgrading the module
+   (`odoo_module operation=upgrade`). Through 15 the database is authoritative and
+   `base.language.import` loads the file.
+
+Marking what IS translatable is the architect's call (`translate=True` on the fields that carry
+user-visible text, `_()` on the Python literals): the export can only find what is marked.

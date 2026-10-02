@@ -136,6 +136,13 @@ export interface SddState {
 	mode: PipelineMode | null;
 	/** Licensing strategy for reused functionality. */
 	licensed: LicenseStrategy | null;
+	/**
+	 * Languages this spec must ship translations for, as gettext codes (`es_VE`,
+	 * `es_PA`…). Absent means "this work is not translated", which is the normal
+	 * case for an internal fix — so unlike `mode` and `licensed` this is NOT a
+	 * fail-closed gate: an unanswered question is an answer here.
+	 */
+	translations?: string[];
 	/** Consecutive failures in the current verify/fix cycle. */
 	failureCount: number;
 	/** Total verify/fix iterations consumed for the current criterion set. */
@@ -1350,6 +1357,9 @@ export function summarize(state: SddState): string {
 		`failures: ${state.failureCount}/${state.maxFailuresBeforeDiagnosis} (diagnosis ${state.diagnosisDone ? "done" : "pending"})`,
 		`iterations: ${state.iterationsUsed}/${state.maxIterations}`,
 		`verdict: ${verdict === null ? "none yet" : verdict.passed ? "PASSED" : "FAILED"}`,
+		// The languages the spec must ship are part of what the run IS: a reader
+		// checking "did we translate this?" should not have to open state.json.
+		`translations: ${state.translations === undefined || state.translations.length === 0 ? "none (not translated)" : state.translations.join(", ")}`,
 		`stop.md: ${stopRequested(state.specDir) === null ? "absent" : "PRESENT — pipeline halted"}`,
 		logbook,
 	];
@@ -1469,6 +1479,7 @@ export function recordIntent(
 	state: SddState,
 	mode: PipelineMode,
 	licensed: LicenseStrategy,
+	translations?: string[],
 ): { ok: boolean; reason?: string } {
 	const settled = state.mode !== null && (state.phase !== "CLARIFY" || state.specLoaded);
 	if (settled && state.mode !== mode) {
@@ -1483,5 +1494,8 @@ export function recordIntent(
 	}
 	state.mode = mode;
 	state.licensed = licensed;
+	// Optional, and re-recordable: the languages are a plan detail, not a graph
+	// decision like `mode`. Declaring none clears them.
+	if (translations !== undefined) state.translations = translations;
 	return { ok: true };
 }

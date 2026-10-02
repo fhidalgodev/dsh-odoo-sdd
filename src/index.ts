@@ -859,6 +859,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 								username: { type: "string" },
 								environment: { type: "string" },
 								active: { type: "boolean" },
+								projectDefault: { type: "boolean" },
 								authorized: { type: "boolean" },
 								legacy: { type: "boolean" },
 								secure: { type: "boolean" },
@@ -1052,6 +1053,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				const named = (args.name ?? "").trim();
 				const activeNow = readSessionInstance(projectRoot, sessionIdOf(exec)) ?? readActiveInstance(projectRoot);
 				const activeScope = readSessionInstance(projectRoot, sessionIdOf(exec)) === null ? "project" : "session";
+				const projectActive = readActiveInstance(projectRoot);
 				const describe = (): Array<Record<string, unknown>> =>
 					listInstances(projectRoot).map((entry) => ({
 						name: entry.name,
@@ -1060,6 +1062,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						...(entry.username === null ? {} : { username: entry.username }),
 						...(entry.environment === null ? {} : { environment: entry.environment }),
 						active: entry.name === activeNow,
+						// Distinguishing the two is the whole point: "active" is THIS
+						// session's choice, "projectDefault" is only what a session that
+						// never chose inherits. Reporting one number for both is how the
+						// collision stayed invisible.
+						projectDefault: entry.name === projectActive,
 						// Authorization is per TARGET: two instances on the same server
 						// are two different grants.
 						authorized:
@@ -1079,7 +1086,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					const lines = found.length === 0
 						? ["No instance is configured in this project."]
 						: found.map((entry) => {
-							const flag = entry.name === activeNow ? " (ACTIVE)" : "";
+							const marks = [
+								entry.name === activeNow ? "ACTIVE for this session" : "",
+								entry.name === projectActive && entry.name !== activeNow ? "project default" : "",
+							].filter(Boolean);
+							const flag = marks.length === 0 ? "" : ` (${marks.join("; ")})`;
 							const where = entry.url === null ? "unreadable" : `${entry.url} db=${entry.db ?? "?"} user=${entry.username ?? "?"}`;
 							const notes = [
 								entry.legacy ? "legacy single file: `use` it or add a named instance and remove it" : "",
@@ -1099,7 +1110,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 								? `\nSeveral instances and none active (${ambiguous.join(", ")}): every connection tool refuses ` +
 									"until one is chosen with mode=instance instance=use name=<name>. Nothing is picked by order."
 								: "") +
-							(activeNow === null ? "" : `\nActive: ${activeNow}`),
+							(activeNow === null
+							? ""
+							: `\nActive for this session: ${activeNow} (${activeScope})` +
+								(projectActive === null || projectActive === activeNow
+									? ""
+									: `\nProject default (what a session that never chose inherits): ${projectActive}`)),
 					};
 				}
 

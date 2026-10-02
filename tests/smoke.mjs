@@ -742,6 +742,42 @@ check("S1: http to a real 127.0.0.1 loopback allowed", realLoop.ok === true);
 			strictEnv.ok ? strictEnv.credentials.source : strictEnv.reason,
 		);
 
+		// `instance=list` must tell the SESSION's choice apart from the project's
+		// default: reporting one number for both is how the collision stayed
+		// invisible in the first place.
+		{
+			// Imported locally: this block runs before the file-wide `plugin` binding
+			// exists, and ESM caching makes it the same module.
+			const pluginForList = await import(new URL("index.js", libDir).href);
+			const listCtx = { tools: new Map(), guard: null };
+			pluginForList.apply(
+				{ tools: { register: (tool) => listCtx.tools.set(tool.name, tool), guard: () => () => {} }, on: () => () => {}, approval: { request: async () => "allowed-once" } },
+				{ projectRoot: twoRoot },
+			);
+			// Two sessions chose, so the project default follows the last one to act.
+			creds.writeSessionInstance(twoRoot, "session-B", "main");
+			creds.writeSessionInstance(twoRoot, "session-A", "farmago");
+			const listed = await listCtx.tools.get("odoo_setup").execute(
+				{ mode: "instance", instance: "list" },
+				{ agent: { session: { id: "session-B" } } },
+			);
+			check(
+				"instance=list marks the SESSION's target, not the project's",
+				/^- main \(ACTIVE for this session\)/m.test(listed.detail),
+				listed.detail.split("\n").slice(0, 3).join(" | "),
+			);
+			check(
+				"...and names the project default separately",
+				/^- farmago \(project default\)/m.test(listed.detail) && /Project default/.test(listed.detail),
+			);
+			check(
+				"the structured payload carries both flags",
+				Array.isArray(listed.instances) &&
+					listed.instances.find((i) => i.name === "main")?.active === true &&
+					listed.instances.find((i) => i.name === "farmago")?.projectDefault === true,
+			);
+		}
+
 		// A pointer to an instance that no longer exists must not resolve.
 		writeFileSync(join(twoRoot, ".sdd", "instances", "active-session-gone.json"), JSON.stringify({ name: "deleted-env" }), { mode: 0o600 });
 		const goneEnv = creds.loadCredentials(twoRoot, { sessionId: "session-gone" });

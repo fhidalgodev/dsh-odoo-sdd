@@ -163,12 +163,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.7.2`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.8.0`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.7.2, published with a provenance attestation
+npm install dsh-odoo-sdd        # 0.8.0, published with a provenance attestation
 ```
 
 > [!IMPORTANT]
@@ -244,8 +244,41 @@ working untouched as `default` until you choose to move it yourself.
 ```bash
 mkdir -p ~/.config/dsh-odoo-sdd && cd ~/.config/dsh-odoo-sdd
 cp <plugin>/.env.example .env && chmod 600 .env
-# fill: ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD
+# fill: ODOO_URL, ODOO_DB, ODOO_USERNAME, and ONE secret:
+#   ODOO_PASSWORD=<account password>   or   ODOO_API_KEY=<api key>
 ```
+
+**The secret has two accepted names.** `ODOO_PASSWORD` and `ODOO_API_KEY` are both
+read, and the API key is the recommended one: Odoo accepts it wherever it accepts
+a password over RPC (Settings → Users → API Keys, and use a key with the global
+scope). If both are set, `ODOO_PASSWORD` wins and the plugin **reports** that the
+other was ignored, so a rotated credential cannot go unnoticed.
+
+There is one place an API key does **not** work, and it is Odoo's rule, not this
+plugin's: `odoo_session` and `odoo_import` authenticate a **web session**, and
+Odoo authenticates interactive logins with `interactive: True` while only
+consulting the API-key table otherwise. Configure an account password if you need
+those two; everything else works with the key.
+
+### Which API the plugin speaks
+
+| Server | Transport | Credential |
+|---|---|---|
+| **Odoo 19+** | `POST /json/2/<model>/<method>` — named parameters, `Authorization: Bearer` | API key |
+| Any version | `POST /jsonrpc` — `execute_kw` | password **or** API key |
+
+On 19+ the plugin uses the modern JSON-2 API: no `uid` round-trip, named
+parameters validated by Odoo itself, read-replica routing for `@api.readonly`
+methods, and errors that arrive as an HTTP status with a structured body. It falls
+back to classic JSON-RPC automatically — if the route is missing, or the server
+predates it — and **never** re-sends a refused call over the other transport. Pin
+the choice with `odooApi: auto | json2 | jsonrpc` in the panel or with
+`odoo_config`; `json2` reports a missing route instead of degrading quietly.
+
+Business actions (`action_*`, `button_*`, `do_*`) always use `execute_kw`: JSON-2
+has no positional-argument form, and inventing a position→name mapping for a
+method whose signature the plugin does not know is exactly the kind of silent
+mis-send it refuses to make.
 
 > [!WARNING]
 > Never paste a password into the chat, a spec, a commit or an issue. The plugin

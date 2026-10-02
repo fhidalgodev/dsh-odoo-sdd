@@ -154,12 +154,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.7.2`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.8.0`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.7.2，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.8.0，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]
@@ -231,8 +231,36 @@ odoo_setup mode=instance instance=remove name=staging         # 需要 confirm_d
 ```bash
 mkdir -p ~/.config/dsh-odoo-sdd && cd ~/.config/dsh-odoo-sdd
 cp <plugin>/.env.example .env && chmod 600 .env
-# 填写：ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD
+# 填写：ODOO_URL, ODOO_DB, ODOO_USERNAME，以及**一个**密钥：
+#   ODOO_PASSWORD=<账户密码>   或   ODOO_API_KEY=<API 密钥>
 ```
+
+**密钥有两个被接受的名字。** 会读取 `ODOO_PASSWORD` 和 `ODOO_API_KEY`，推荐使用
+API 密钥：Odoo 在通过 RPC 接受密码的任何地方都接受它（设置 → 用户 → API 密钥，
+并使用全局范围的密钥）。如果两者都设置了，`ODOO_PASSWORD` 优先，插件会**报告**
+另一个被忽略，这样轮换后的凭据不会被漏掉。
+
+只有一个地方 API 密钥**不**适用，这是 Odoo 的规则而非插件的规定：`odoo_session`
+和 `odoo_import` 认证的是 **Web 会话**，而 Odoo 以 `interactive: True` 认证交互式
+登录，仅在相反情况下才查询 API 密钥表。若需要这两者，请配置账户密码；其他一切
+都可以用密钥完成。
+
+### 插件使用哪个 API
+
+| 服务器 | 传输 | 凭据 |
+|---|---|---|
+| **Odoo 19+** | `POST /json/2/<model>/<method>` —— 具名参数，`Authorization: Bearer` | API 密钥 |
+| 任意版本 | `POST /jsonrpc` —— `execute_kw` | 密码**或** API 密钥 |
+
+在 19+ 上插件使用现代的 JSON-2 API：没有 `uid` 往返，具名参数由 Odoo 自身校验，
+`@api.readonly` 方法路由到只读副本，错误以 HTTP 状态加结构化响应体返回。当路由缺失
+或服务器版本更旧时，会自动回退到经典 JSON-RPC，并且**绝不**把被拒绝的调用改用另一
+种传输重发。可用面板或 `odoo_config` 的 `odooApi: auto | json2 | jsonrpc` 固定选择；
+`json2` 会报告路由缺失，而不是静默降级。
+
+业务动作（`action_*`、`button_*`、`do_*`）始终使用 `execute_kw`：JSON-2 没有位置
+参数形式，而为插件并不知道签名的方法臆造位置→名称映射，正是它拒绝做出的那种静默
+误发。
 
 > [!WARNING]
 > 绝不要把密码粘贴到聊天、spec、commit 或 issue 里。插件会拒绝组/其他用户可读的

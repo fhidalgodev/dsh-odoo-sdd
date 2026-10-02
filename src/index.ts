@@ -213,6 +213,7 @@ export const Config = z.object({
 	requireCheckpointBeforeMutation: markVolatile(z.boolean()),
 	requireSpecForChanges: markVolatile(z.boolean()),
 	adoptProjectPointerHint: markVolatile(z.boolean()),
+	odooApi: markVolatile(z.string()),
 	securityReviewRequired: markVolatile(z.boolean()),
 	securityInterviewRequired: markVolatile(z.boolean()),
 	auditAllTools: markVolatile(z.boolean()),
@@ -256,6 +257,11 @@ interface OdooSddConfig {
 	 * declare its own spec before anything authorizes a change.
 	 */
 	adoptProjectPointerHint?: boolean;
+	/**
+	 * Transport for model calls: "auto" (JSON-2 where the server offers it),
+	 * "json2" (pinned; a missing route is reported) or "jsonrpc" (classic).
+	 */
+	odooApi?: string;
 	/** Refuse mutating calls until a checkpoint exists (fail-closed). */
 	requireCheckpointBeforeMutation?: boolean;
 	/** Require a clean security review before DONE. */
@@ -423,7 +429,20 @@ async function requestNativeApproval(
 }
 
 /** Load credentials and build a client, or a remediation report. */
-function clientFor(projectRoot: string): {
+/**
+ * Narrow a configured string to a transport preference.
+ *
+ * The configuration layer is a string (it comes from JSON/YAML), so the value is
+ * validated at the boundary instead of being trusted: an unknown value degrades
+ * to `auto`, which self-detects, rather than to a pinned transport nobody asked for.
+ * @param value - the configured value.
+ * @returns a valid preference.
+ */
+function asApiPreference(value: string | undefined): "auto" | "json2" | "jsonrpc" {
+	return value === "json2" || value === "jsonrpc" ? value : "auto";
+}
+
+function clientFor(projectRoot: string, api?: "auto" | "json2" | "jsonrpc"): {
 	client: OdooClient | null;
 	report: string;
 	credentials: OdooCredentials | null;
@@ -448,10 +467,11 @@ function clientFor(projectRoot: string): {
 		};
 	}
 	return {
-		client: new OdooClient(creds),
+		client: new OdooClient(creds, { api: api ?? "auto" }),
 		report:
 			describeCredentials(creds) +
-			(loaded.permissionNote === undefined ? "" : ` — NOTE: ${loaded.permissionNote}`),
+			(loaded.permissionNote === undefined ? "" : ` — NOTE: ${loaded.permissionNote}`) +
+			(loaded.credentialNote === undefined ? "" : ` — WARNING: ${loaded.credentialNote}`),
 		credentials: creds,
 	};
 }
@@ -505,8 +525,9 @@ function setupStatusFor(projectRoot: string): { status: EffectiveSetupStatus; de
 			status: "needs-secret",
 			detail:
 				`NEEDS_SECRET: a credential scaffold exists at ${displayPath(loaded.envFile)} ` +
-				"but ODOO_PASSWORD is empty. Ask the developer to fill it directly in the " +
-				"file (never through chat), then retry odoo_connect.",
+				"but neither ODOO_PASSWORD nor ODOO_API_KEY is filled. Ask the developer to fill ONE " +
+				"of them directly in the file (an Odoo API key is recommended: Odoo accepts it wherever " +
+				"a password is accepted over RPC). Never through chat, then retry odoo_connect.",
 		};
 	}
 	if (marker?.status === "skipped") {
@@ -747,6 +768,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		requireCheckpointBeforeMutation: config.requireCheckpointBeforeMutation ?? true,
 		requireSpecForChanges: config.requireSpecForChanges ?? true,
 		adoptProjectPointerHint: config.adoptProjectPointerHint ?? true,
+		odooApi: config.odooApi ?? "auto",
 		securityReviewRequired: config.securityReviewRequired ?? true,
 		securityInterviewRequired: config.securityInterviewRequired ?? true,
 		auditAllTools: config.auditAllTools ?? true,
@@ -834,7 +856,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const root = rootFor(exec);
 			const projectRoot = root.root;
 			const where = { projectRoot, rootSource: root.source as string };
-			const { client, report, credentials } = clientFor(projectRoot);
+			const { client, report, credentials } = clientFor(projectRoot, asApiPreference(effectiveConfig(exec).odooApi));
 			if (client === null) {
 				// Two different situations share a null client:
 				//  - credentials loaded but no live human grant => NOT AUTHORIZED
@@ -870,12 +892,33 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					...where,
 				};
 			}
+			// Prove the transport this session will actually use. `auto` decides from
+			// the version plus a live attempt, so a key that works over JSON-RPC but
+			// not over JSON-2 (or a route a proxy swallows) surfaces HERE, where the
+			// developer is looking, instead of in the middle of a batch.
+			let apiNote = "";
+			const transport = client.transport;
+			if (transport.api === "json2") {
+				const probe = await client.executeKw<unknown>("res.users", "search_count", [[]], { limit: 1 });
+				apiNote = probe.ok
+					? ` Transport: JSON-2 (POST /json/2, Bearer API key) — verified with a live call.`
+					: ` Transport: JSON-2 was reported available but a live call FAILED (${probe.error.slice(0, 200)}); ` +
+						"the classic transport still works. Check that the API key is valid and not expired.";
+			} else {
+				apiNote = ` Transport: classic JSON-RPC (execute_kw) — ${transport.reason}.`;
+			}
+			const kindNote =
+				credentials?.secretKind === "api_key"
+					? " Credential: an API key (odoo_session/odoo_import need the account PASSWORD: Odoo skips the API-key check for interactive logins)."
+					: "";
 			return {
 				connected: true,
 				target: report,
 				serverVersion: version.value.server_version,
 				uid: auth.value.uid,
-				detail: `Connected to ${version.value.server_version} as uid=${auth.value.uid}. Target: ${report}\n${rootNote(root)}`,
+				detail:
+					`Connected to ${version.value.server_version} as uid=${auth.value.uid}. Target: ${report}` +
+					`${apiNote}${kindNote}\n${rootNote(root)}`,
 				...where,
 			};
 		},
@@ -1185,7 +1228,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						target,
 						[
 							`# dsh-odoo-sdd credentials — instance "${named}", written by odoo_setup (mode=instance).`,
-							"# Fill ODOO_PASSWORD below (an Odoo API key is recommended).",
+							"# Fill the secret by hand: ODOO_PASSWORD=<account password>",
+							"# or ODOO_API_KEY=<api key> — the API key is recommended, and Odoo accepts it",
+							"# wherever a password is accepted over RPC (Settings > Users > API Keys).",
 							"# NEVER commit this file; it must stay chmod 600.",
 							`ODOO_URL=${args.url?.trim() ?? "http://localhost:8069"}`,
 							`ODOO_DB=${args.db?.trim() ?? "dev_sdd"}`,
@@ -1513,7 +1558,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					status: "needs-setup",
 					detail:
 						`mode=interactive requires: ${missingFields.join(", ")} ` +
-						"(non-secret fields only — the password is never accepted here).",
+						"(non-secret fields only — neither the password nor the API key is ever " +
+						"accepted here: they belong in the file, filled by hand).",
 				};
 			}
 			const parsed = parseInstanceUrl(args.url!.trim());
@@ -1548,7 +1594,9 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			}
 			const scaffold = [
 				"# dsh-odoo-sdd credentials — written by odoo_setup (mode=interactive).",
-				"# Fill ODOO_PASSWORD below (an Odoo API key is recommended).",
+				"# Fill the secret by hand: ODOO_PASSWORD=<account password>",
+				"# or ODOO_API_KEY=<api key> — the API key is recommended, and Odoo accepts it",
+				"# wherever a password is accepted over RPC (Settings > Users > API Keys).",
 				"# NEVER commit this file; it must stay chmod 600.",
 				`ODOO_URL=${parsed.url}`,
 				`ODOO_DB=${args.db!.trim()}`,
@@ -1636,7 +1684,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			render: (_args: unknown, value: unknown) => [text((value as { output: string }).output)],
 		},
 		async execute(args: { operation: "info" | "install" | "upgrade"; modules: string[] }, exec?: unknown) {
-			const { client, report } = clientFor(rootFor(exec).root);
+			const { client, report } = clientFor(rootFor(exec).root, asApiPreference(effectiveConfig(exec).odooApi));
 			const fail = (output: string) => ({
 				operation: args.operation as string,
 				success: false,
@@ -1748,7 +1796,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		},
 		async execute(_args: unknown, exec?: unknown) {
 			const projectRoot = rootFor(exec).root;
-			const { client, report } = clientFor(projectRoot);
+			const { client, report } = clientFor(projectRoot, asApiPreference(effectiveConfig(exec).odooApi));
 			if (client === null) return { minted: false, detail: report };
 			const result = await client.mintSession(projectRoot);
 			if (!result.ok) return { minted: false, detail: result.error };
@@ -2342,6 +2390,15 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					".",
 			},
 			requireCheckpointBeforeMutation: { type: "boolean", description: "Refuse mutations until a checkpoint exists (fail-closed)." },
+			odooApi: {
+				type: "string",
+				enum: ["auto", "json2", "jsonrpc"],
+				description:
+					"Transport for model calls. auto (default) uses Odoo's JSON-2 API " +
+					"(POST /json/2, Bearer API key) on servers that offer it and classic JSON-RPC " +
+					"elsewhere. json2 pins it and REPORTS a missing route instead of degrading; " +
+					"jsonrpc pins the classic transport (works on every version).",
+			},
 			adoptProjectPointerHint: {
 				type: "boolean",
 				description:
@@ -2385,6 +2442,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							requireCheckpointBeforeMutation: { type: "boolean", required: true },
 							requireSpecForChanges: { type: "boolean" },
 							adoptProjectPointerHint: { type: "boolean" },
+							odooApi: { type: "string" },
 							securityReviewRequired: { type: "boolean", required: true },
 							securityInterviewRequired: { type: "boolean", required: true },
 							auditAllTools: { type: "boolean", required: true },
@@ -2437,6 +2495,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			requireCheckpointBeforeMutation?: boolean;
 			requireSpecForChanges?: boolean;
 			adoptProjectPointerHint?: boolean;
+			odooApi?: string;
 			securityReviewRequired?: boolean;
 			securityInterviewRequired?: boolean;
 			auditAllTools?: boolean;
@@ -2466,6 +2525,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					requireCheckpointBeforeMutation: typeof data["requireCheckpointBeforeMutation"] === "boolean" ? data["requireCheckpointBeforeMutation"] : true,
 					requireSpecForChanges: typeof data["requireSpecForChanges"] === "boolean" ? data["requireSpecForChanges"] : true,
 					adoptProjectPointerHint: typeof data["adoptProjectPointerHint"] === "boolean" ? data["adoptProjectPointerHint"] : true,
+					odooApi: ((): string => {
+						const v = asString(data["odooApi"], "auto");
+						return v === "json2" || v === "jsonrpc" ? v : "auto";
+					})(),
 					securityReviewRequired: typeof data["securityReviewRequired"] === "boolean" ? data["securityReviewRequired"] : true,
 					securityInterviewRequired: typeof data["securityInterviewRequired"] === "boolean" ? data["securityInterviewRequired"] : true,
 					auditAllTools: typeof data["auditAllTools"] === "boolean" ? data["auditAllTools"] : true,
@@ -2573,6 +2636,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.requireCheckpointBeforeMutation !== undefined) updates["requireCheckpointBeforeMutation"] = args.requireCheckpointBeforeMutation;
 			if (args.requireSpecForChanges !== undefined) updates["requireSpecForChanges"] = args.requireSpecForChanges;
 			if (args.adoptProjectPointerHint !== undefined) updates["adoptProjectPointerHint"] = args.adoptProjectPointerHint;
+			if (args.odooApi !== undefined) updates["odooApi"] = args.odooApi;
 			if (args.securityReviewRequired !== undefined) updates["securityReviewRequired"] = args.securityReviewRequired;
 			if (args.securityInterviewRequired !== undefined) updates["securityInterviewRequired"] = args.securityInterviewRequired;
 			if (args.auditAllTools !== undefined) updates["auditAllTools"] = args.auditAllTools;
@@ -2690,6 +2754,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			requireCheckpointBeforeMutation: asBool(merged["requireCheckpointBeforeMutation"], config.requireCheckpointBeforeMutation ?? true),
 			requireSpecForChanges: asBool(merged["requireSpecForChanges"], config.requireSpecForChanges ?? true),
 			adoptProjectPointerHint: asBool(merged["adoptProjectPointerHint"], config.adoptProjectPointerHint ?? true),
+			odooApi: ((): string => {
+				const v = asString(merged["odooApi"], config.odooApi ?? "auto");
+				return v === "json2" || v === "jsonrpc" ? v : "auto";
+			})(),
 			securityReviewRequired: asBool(merged["securityReviewRequired"], config.securityReviewRequired ?? true),
 			securityInterviewRequired: asBool(merged["securityInterviewRequired"], config.securityInterviewRequired ?? true),
 			auditAllTools: asBool(merged["auditAllTools"], config.auditAllTools ?? true),
@@ -2730,10 +2798,14 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	 *     one the journal was recorded against.
 	 * What cannot be undone is reported, never silently swallowed.
 	 */
-	const undoJournal = async (projectRoot: string, checkpointId: string): Promise<{ undone: string[]; detail: string }> => {
+	const undoJournal = async (
+		projectRoot: string,
+		checkpointId: string,
+		api?: "auto" | "json2" | "jsonrpc",
+	): Promise<{ undone: string[]; detail: string }> => {
 		const ops = readCheckpointJournalFile(projectRoot, checkpointId);
 		if (ops.length === 0) return { undone: [], detail: "nothing journaled" };
-		const { client, credentials } = clientFor(projectRoot);
+		const { client, credentials } = clientFor(projectRoot, api);
 		if (client === null) return { undone: [], detail: "no instance configured — journal left intact" };
 		// Database identity: replaying a journal recorded against another database
 		// would mutate the wrong instance, so refuse instead of guessing.
@@ -3012,7 +3084,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						detail: `Files restored (${files.restored.length}). Data restore refused: restore_data=true requires confirm_destructive=true.`,
 					};
 				}
-				const undo = await undoJournal(projectRoot, args.checkpoint_id);
+				const undo = await undoJournal(projectRoot, args.checkpoint_id, asApiPreference(cfg.odooApi));
 				restoredData.push(...undo.undone);
 				dataNote = undo.detail;
 			}
@@ -3932,7 +4004,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		},
 		client: (exec) => {
 			const cfg = effectiveConfig(exec);
-			const { client, report, credentials } = clientFor(cfg.projectRoot);
+			const { client, report, credentials } = clientFor(cfg.projectRoot, asApiPreference(cfg.odooApi));
 			return {
 			client,
 			report,
@@ -4013,7 +4085,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		 */
 		runImport: async (op, exec) => {
 			const cfg = effectiveConfig(exec);
-			const { client } = clientFor(cfg.projectRoot);
+			const { client } = clientFor(cfg.projectRoot, asApiPreference(cfg.odooApi));
 			if (client === null) return { ok: false, error: "no instance configured" };
 			const version = (await versionFor(cfg.projectRoot)) ?? "";
 			const caps = capabilitiesFor(version);
@@ -4077,7 +4149,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		},
 		client: async (exec) => {
 			const cfg = effectiveConfig(exec);
-			const { client, report } = clientFor(cfg.projectRoot);
+			const { client, report } = clientFor(cfg.projectRoot, asApiPreference(cfg.odooApi));
 			const version = await versionFor(cfg.projectRoot);
 			return { client, report, ...(version === undefined ? {} : { serverVersion: version }) };
 		},
@@ -4099,7 +4171,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	});
 
 	registerRuntimeTools(ctx, {
-		client: (exec) => clientFor(effectiveConfig(exec).projectRoot),
+		client: (exec) => clientFor(effectiveConfig(exec).projectRoot, asApiPreference(effectiveConfig(exec).odooApi)),
 		status: (pr) => setupStatusFor(pr),
 		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
 		allowlist: (exec) => effectiveConfig(exec).executeAllowlist,

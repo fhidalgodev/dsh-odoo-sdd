@@ -164,12 +164,12 @@ bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
 
 - **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
 - Acepta cualquier spec de pnpm, así que podés fijar una versión:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.7.2`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.8.0`.
 
 ¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.7.2, publicada con attestation de provenance
+npm install dsh-odoo-sdd        # 0.8.0, publicada con attestation de provenance
 ```
 
 > [!IMPORTANT]
@@ -246,8 +246,40 @@ funcionando sin tocarlo, como `default`, hasta que decidas moverlo tú.
 ```bash
 mkdir -p ~/.config/dsh-odoo-sdd && cd ~/.config/dsh-odoo-sdd
 cp <plugin>/.env.example .env && chmod 600 .env
-# completá: ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD
+# completá: ODOO_URL, ODOO_DB, ODOO_USERNAME, y UN secreto:
+#   ODOO_PASSWORD=<contraseña de la cuenta>   o   ODOO_API_KEY=<api key>
 ```
+
+**El secreto tiene dos nombres aceptados.** Se leen `ODOO_PASSWORD` y
+`ODOO_API_KEY`, y la API key es la recomendada: Odoo la acepta donde acepta una
+contraseña por RPC (Ajustes → Usuarios → Claves API, y usá una clave con alcance
+global). Si están las dos, gana `ODOO_PASSWORD` y el plugin **reporta** que la otra
+fue ignorada, para que una credencial rotada no pase desapercibida.
+
+Hay un solo sitio donde la API key **no** sirve, y es una regla de Odoo, no del
+plugin: `odoo_session` y `odoo_import` autentican una **sesión web**, y Odoo
+autentica los inicios interactivos con `interactive: True` y solo consulta la tabla
+de claves API en el caso contrario. Configurá una contraseña de cuenta si necesitás
+esas dos; todo lo demás funciona con la clave.
+
+### Qué API habla el plugin
+
+| Servidor | Transporte | Credencial |
+|---|---|---|
+| **Odoo 19+** | `POST /json/2/<modelo>/<método>` — parámetros con nombre, `Authorization: Bearer` | API key |
+| Cualquier versión | `POST /jsonrpc` — `execute_kw` | contraseña **o** API key |
+
+En 19+ el plugin usa la API moderna JSON-2: sin ida y vuelta de `uid`, parámetros
+con nombre validados por el propio Odoo, enrutado a réplica de lectura para los
+métodos `@api.readonly`, y errores que llegan como estado HTTP con cuerpo
+estructurado. Repliega solo al JSON-RPC clásico —si falta la ruta o el servidor es
+anterior— y **nunca** reenvía por el otro transporte una llamada rechazada. Fijá la
+elección con `odooApi: auto | json2 | jsonrpc` en el panel o con `odoo_config`;
+`json2` reporta la ruta ausente en vez de degradar en silencio.
+
+Las acciones de negocio (`action_*`, `button_*`, `do_*`) usan siempre `execute_kw`:
+JSON-2 no tiene forma posicional, e inventar un mapeo posición→nombre para un método
+cuya firma el plugin no conoce es justo el envío equivocado y silencioso que evita.
 
 > [!WARNING]
 > Nunca pegues una contraseña en el chat, en un spec, en un commit ni en un

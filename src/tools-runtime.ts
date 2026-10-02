@@ -36,6 +36,12 @@ export interface RuntimeDeps {
 				// Without it in the type, odoo_execute could not report that
 				// distinction for a business action.
 			): Promise<{ ok: true; value: T } | { ok: false; error: string; errorKind?: RpcErrorKind }>;
+			/**
+			 * Major version of the server, or null while it is unknown. Read by the
+			 * version-dependent rules, which treat "unknown" as "do not invent a
+			 * restriction" rather than "assume the newest".
+			 */
+			readonly serverMajor?: number | null;
 		} | null;
 		report: string;
 	};
@@ -89,6 +95,7 @@ import {
 	READ_METHODS,
 	MUTATING_METHODS,
 	isReadMethod,
+	retiredReadReason,
 	isCallableMethodName,
 	isBusinessMethod,
 	isIndeterminateFor,
@@ -109,6 +116,9 @@ export function registerRuntimeTools(
 			"Execute a JSON-RPC call (execute_kw) against the connected instance. ANY public method of the model is " +
 			"callable, and what it needs is decided by what it is. " +
 			`READS (${[...READ_METHODS].join(", ")}) run freely. ` +
+			"Two names in that read list are VERSION-DEPENDENT and refused early with the replacement named: " +
+			"`exists` (private since Odoo 19 — use search_count) and `name_get` (left the core in 18 — read " +
+			"`display_name`). " +
 			`CRUD mutations (${[...MUTATING_METHODS].join(", ")}) require confirm_destructive=true AND the model in ` +
 			"executeAllowlist, and are journaled so sdd_checkpoint can undo them. Every OTHER method is a BUSINESS " +
 			'ACTION (action_*, button_*, do_*…): it runs with confirm_destructive=true and NO allowlist, because the ' +
@@ -142,7 +152,7 @@ export function registerRuntimeTools(
 			order: { type: "string", description: "Order clause for search_read." },
 			confirm_destructive: { type: "boolean", description: "REQUIRED true for create/write/unlink." },
 			limit: { type: "number", description: "Row cap for reads (default 10)." },
-			offset: { type: "number", description: "Rows to skip before the window (search_read/read_group/search_count), so a large model can be paged instead of relying on one truncated response." },
+			offset: { type: "number", description: "Rows to skip before the window (search_read/read_group). search_count has no offset parameter in Odoo, so it is not sent for it." },
 			groupby: { type: "array", items: { type: "string" }, description: "read_group: fields to group by, e.g. [\"state\"]." },
 			// A business action takes the recordset as its first argument (Odoo
 			// dispatches on `args[0]`), then whatever the method declares. `args`
@@ -278,11 +288,17 @@ export function registerRuntimeTools(
 			let callKwargs: Record<string, unknown> = {};
 			if (method === "search_read" || method === "search_count") {
 				callArgs = [Array.isArray(a.domain) ? a.domain : []];
-				if (typeof a.offset === "number") callKwargs["offset"] = a.offset;
 				if (method === "search_read") {
+					// `offset` belongs to search_read/search (offset=0, limit=None, order=None).
+					// search_count's signature is search_count(domain, limit=None): sending it
+					// an `offset` made Odoo raise TypeError, and the tool description invited
+					// exactly that by listing offset for search_count.
+					if (typeof a.offset === "number") callKwargs["offset"] = a.offset;
 					if (Array.isArray(a.fields)) callKwargs["fields"] = a.fields;
 					callKwargs["limit"] = typeof a.limit === "number" ? a.limit : 10;
 					if (typeof a.order === "string" && a.order !== "") callKwargs["order"] = a.order;
+				} else if (typeof a.limit === "number") {
+					callKwargs["limit"] = a.limit;
 				}
 			} else if (method === "read_group") {
 				// Aggregations: positional (domain, fields, groupby) with the
@@ -400,6 +416,14 @@ export function registerRuntimeTools(
 				// credentials) or NOT AUTHORIZED (no live human grant).
 				return { denied: true, reason: report, result: "" };
 			}
+
+			// A read the plugin advertises but THIS server no longer exposes is refused
+			// with the replacement named, before anything is sent: Odoo would otherwise
+			// answer with an AccessError about private methods, which reads like a
+			// permission problem instead of a version one. The check needs the client
+			// because only it knows the server version.
+			const retired = retiredReadReason(method, client.serverMajor ?? null);
+			if (retired !== null) return { denied: true, reason: retired, result: "" };
 
 			// The state guard runs BEFORE anything is sent: a declared precondition
 			// that does not hold is a refusal with no side effect at all.

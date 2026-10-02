@@ -1597,7 +1597,11 @@ console.log("== data undo (context, write shapes, progressive compensation) ==")
 	const target = grantsMod.fingerprintOf("http://127.0.0.1:8069", "dev", "admin");
 	grantsMod.writeGrant(undoProj, { kind: "connection", fingerprint: target, reason: "undo test" });
 
-	plugin.apply(fakeCtx, { projectRoot: undoProj });
+	// Pinned to the classic transport ON PURPOSE: the stub below answers every URL
+	// with a JSON-RPC envelope, and what this block tests is the JOURNAL and the
+	// compensation, which are transport-independent. The JSON-2 transport has its
+	// own block, where the stub speaks JSON-2 and the URL is asserted.
+	plugin.apply(fakeCtx, { projectRoot: undoProj, odooApi: "jsonrpc" });
 	const undoTool = registered.get("sdd_checkpoint");
 	const created = await undoTool.execute({ operation: "create", label: "before data", dirs: ["mod"] });
 	check("a checkpoint exists to journal the data ops", created.ok === true && typeof created.activeCheckpoint === "string");
@@ -2033,7 +2037,7 @@ console.log("== transport details (log query, abort signal, web session) ==");
 		return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: true }), { status: 200 });
 	};
 	try {
-		const oc = new odooMod.OdooClient(creds);
+		const oc = new odooMod.OdooClient(creds, { api: "jsonrpc" });
 		const errs = await oc.recentErrors(5, 30);
 		check("recentErrors round-trips", errs.ok === true);
 		const logCall = calls.find((c) => c.body?.params?.args?.[3] === "ir.logging");
@@ -2093,7 +2097,7 @@ console.log("== effect contract (error class survives, receipt survives) ==");
 		stubFetch(() => {
 			throw new TypeError("fetch failed");
 		});
-		const clientEc = new odooMod.OdooClient(credsEc);
+		const clientEc = new odooMod.OdooClient(credsEc, { api: "jsonrpc" });
 		const failed = await clientEc.executeKw("sale.order", "create", [{ name: "x" }]);
 		check("executeKw keeps the failure classification", failed.ok === false && failed.errorKind === "transport", JSON.stringify(failed));
 		check(
@@ -2109,7 +2113,7 @@ console.log("== effect contract (error class survives, receipt survives) ==");
 				{ status: 200 },
 			),
 		);
-		const domainErr = await new odooMod.OdooClient(credsEc).executeKw("sale.order", "create", [{ name: "x" }]);
+		const domainErr = await new odooMod.OdooClient(credsEc, { api: "jsonrpc" }).executeKw("sale.order", "create", [{ name: "x" }]);
 		check("a server error keeps its class", domainErr.ok === false && domainErr.errorKind === "server", JSON.stringify(domainErr));
 		check("a server error is NOT indeterminate (Odoo answered and rolled back)", clsModEc.isIndeterminateFor("create", domainErr.errorKind) === false);
 
@@ -2123,7 +2127,7 @@ console.log("== effect contract (error class survives, receipt survives) ==");
 		runtimeModEc.registerRuntimeTools(
 			{ tools: { register: (t) => ecTools.set(t.name, t) } },
 			{
-				client: () => ({ client: new odooMod.OdooClient(credsEc), report: "stub" }),
+				client: () => ({ client: new odooMod.OdooClient(credsEc, { api: "jsonrpc" }), report: "stub" }),
 				status: () => ({ detail: "stub" }),
 				projectRoot: dir,
 				allowlist: () => ["sale.order"],
@@ -2372,8 +2376,15 @@ console.log("== odoo_execute capability (context, read_group, fields_get) ==");
 	await rx.execute({ model: "sale.order", method: "search_read", domain: [], limit: 10 });
 	check("no offset is invented when the caller omits it", rpcCalls[0].kwargs.offset === undefined);
 	rpcCalls.length = 0;
-	await rx.execute({ model: "sale.order", method: "search_count", domain: [], offset: 25 });
-	check("search_count forwards offset too", rpcCalls[0].kwargs.offset === 25);
+	await rx.execute({ model: "sale.order", method: "search_count", domain: [], offset: 25, limit: 25 });
+	// search_count's signature is search_count(domain, limit=None): it has NO offset,
+	// so forwarding one made Odoo raise TypeError while the tool description invited
+	// exactly that. `limit` is the parameter that does exist.
+	check(
+		"search_count does NOT forward offset (Odoo has no such parameter) but does forward limit",
+		rpcCalls[0].kwargs.offset === undefined && rpcCalls[0].kwargs.limit === 25,
+		JSON.stringify(rpcCalls[0].kwargs),
+	);
 	rpcCalls.length = 0;
 	await rx.execute({ model: "sale.order", method: "read_group", domain: [], fields: ["amount_total:sum"], groupby: ["partner_id"], limit: 5, offset: 10 });
 	check("read_group forwards offset", rpcCalls[0].kwargs.offset === 10);
@@ -3966,6 +3977,222 @@ console.log("== per-session isolation (two projects, one plugin) ==");
 		"the functional state is read from the session's folder",
 		!existsSync(join(isoA, "specs", "001-b")) && !existsSync(join(isoB, "specs", "001-a")),
 	);
+}
+
+// == an API key is a first-class credential ================================
+// The secret always CARRIED both — Odoo accepts an API key wherever it accepts a
+// password over RPC — but it was only ever NAMED after one, so a developer who
+// wrote the accurate name was told their file lacked ODOO_PASSWORD.
+console.log("== API key as a first-class credential ==");
+{
+	const credRoot = (body) => {
+		const root = mkdtempSync(join(tmpdir(), "apikey-"));
+		mkdirSync(join(root, ".sdd"), { recursive: true });
+		writeFileSync(join(root, ".sdd", ".env"), body, { mode: 0o600 });
+		return root;
+	};
+	const base = "ODOO_URL=http://localhost:8069\nODOO_DB=dev\nODOO_USERNAME=admin\n";
+
+	const onlyKey = creds.loadCredentials(credRoot(base + "ODOO_API_KEY=key-abc\n"));
+	check("ODOO_API_KEY alone satisfies the secret requirement", onlyKey.ok === true);
+	check("...and is reported as an API key, not as a password", onlyKey.ok === true && onlyKey.credentials.secretKind === "api_key");
+	check("...with the value coming from that name", onlyKey.ok === true && onlyKey.credentials.secret === "key-abc");
+
+	const onlyPassword = creds.loadCredentials(credRoot(base + "ODOO_PASSWORD=pw-abc\n"));
+	check("ODOO_PASSWORD alone still works", onlyPassword.ok === true && onlyPassword.credentials.secret === "pw-abc");
+	check("...and is reported as a password", onlyPassword.ok === true && onlyPassword.credentials.secretKind === "password");
+
+	const both = creds.loadCredentials(credRoot(base + "ODOO_PASSWORD=pw-abc\nODOO_API_KEY=key-abc\n"));
+	check("with BOTH names, ODOO_PASSWORD wins", both.ok === true && both.credentials.secret === "pw-abc" && both.credentials.secretKind === "password");
+	check("...and the ignored one is REPORTED, not swallowed", both.ok === true && typeof both.credentialNote === "string" && /IGNORED/.test(both.credentialNote));
+
+	const neither = creds.loadCredentials(credRoot(base));
+	check("with neither name the load fails closed", neither.ok === false && neither.reason === "required_var_missing");
+	check("...and the message names BOTH accepted names", neither.ok === false && /ODOO_PASSWORD or ODOO_API_KEY/.test(neither.message), neither.ok ? "" : neither.message.slice(0, 120));
+	check("...and says an API key is accepted where a password is", neither.ok === false && /API key/.test(neither.message));
+
+	// The declared kind is not a secret, so it may be shown; the value never is.
+	check("describeCredentials shows the declared kind but never the value", /secretKind=api_key/.test(creds.describeCredentials(onlyKey.credentials)) && !creds.describeCredentials(onlyKey.credentials).includes("key-abc"));
+
+	// A web session cannot use an API key, and must say so BEFORE calling:
+	// `Session.authenticate` passes `interactive: True` and Odoo only consults the
+	// API-key table under `if not interactive` (res.users._check_credentials).
+	const clientModKey = await import(new URL("odoo-client.js", libDir).href);
+	let sessionCalls = 0;
+	const realFetchKey = globalThis.fetch;
+	globalThis.fetch = async () => {
+		sessionCalls += 1;
+		return new Response(JSON.stringify({ jsonrpc: "2.0", id: "1", result: { uid: 7, session_id: "s" } }), { status: 200 });
+	};
+	try {
+		const keyed = new clientModKey.OdooClient(onlyKey.credentials, { api: "jsonrpc" });
+		const minted = await keyed.mintSession(dir);
+		check("an API key is refused for a web session", minted.ok === false);
+		check("...BEFORE any request is sent", sessionCalls === 0, `requests=${sessionCalls}`);
+		check("...and the message explains why and what still works", /interactive logins/.test(minted.error) && /JSON-2/.test(minted.error), minted.ok ? "" : minted.error.slice(0, 110));
+		// A password is not blocked by that guard: the request does go out.
+		const pwClient = new clientModKey.OdooClient(onlyPassword.credentials, { api: "jsonrpc" });
+		await pwClient.mintSession(dir);
+		check("a password IS attempted for a web session (the guard is specific)", sessionCalls === 1, `requests=${sessionCalls}`);
+	} finally {
+		globalThis.fetch = realFetchKey;
+	}
+}
+
+// == the method list stops advertising what modern Odoo removed ============
+// Verified in the installed sources: `exists` is @api.private since 19 (public in
+// 18) and `get_public_method` refuses private names, so calling it over RPC can
+// only produce an AccessError. `name_get` left the core in 18.
+console.log("== version-dependent method classification ==");
+{
+	const clsV = await import(new URL("method-classification.js", libDir).href);
+	check("exists is a read on Odoo 18", clsV.retiredReadReason("exists", 18) === null);
+	check("exists is REFUSED on Odoo 19, with the replacement named", typeof clsV.retiredReadReason("exists", 19) === "string" && /search_count/.test(clsV.retiredReadReason("exists", 19)));
+	check("name_get is still fine on 17", clsV.retiredReadReason("name_get", 17) === null);
+	check("name_get is refused from 18 on, pointing at display_name", typeof clsV.retiredReadReason("name_get", 18) === "string" && /display_name/.test(clsV.retiredReadReason("name_get", 18)));
+	check("an unknown version invents no restriction", clsV.retiredReadReason("exists", null) === null);
+	check("a method that never retired is never refused", clsV.retiredReadReason("search_read", 19) === null);
+	check("the advertised list follows the same rule", clsV.advertisedReadMethods(18).includes("exists") && !clsV.advertisedReadMethods(19).includes("exists") && clsV.advertisedReadMethods(19).includes("search_read"));
+	// It is still classified as a READ (a harmless query), never as a mutation:
+	// demanding confirmation for it would train the operator to confirm blindly.
+	check("a retired read is not reclassified as a mutation", clsV.isReadMethod("exists") === true && clsV.isCrudMutation("exists") === false);
+}
+
+// == the JSON-2 transport (Odoo 19+) =======================================
+// Odoo 19 added `POST /json/2/<model>/<method>`: Named parameters validated with
+// `signature.bind`, an API key in `Authorization: Bearer`, no uid and no db in the
+// body, and errors as an HTTP status plus `{name, message, arguments, context,
+// debug}`. These checks pin the translation and the classification, because a
+// wrong body would be a silent mis-send, not a crash.
+console.log("== JSON-2 transport (Odoo 19+) ==");
+{
+	const apiMod = await import(new URL("api-transport.js", libDir).href);
+	const clientMod = await import(new URL("odoo-client.js", libDir).href);
+	const clsJ2 = await import(new URL("method-classification.js", libDir).href);
+
+	// ---- the translation table, method by method -------------------------
+	const plan = (method, args, kwargs = {}) => apiMod.planJson2Body(method, args, kwargs);
+	check("search_read becomes NAMED parameters", JSON.stringify(plan("search_read", [[]], { limit: 10, order: "id" })) === JSON.stringify({ domain: [], limit: 10, order: "id" }));
+	check("search_count keeps domain and limit but drops offset", JSON.stringify(plan("search_count", [[]], { limit: 5, offset: 9 })) === JSON.stringify({ domain: [], limit: 5 }));
+	check("read_group names (domain, fields, groupby)", JSON.stringify(plan("read_group", [[], ["name"], ["state"]], { orderby: "id" })) === JSON.stringify({ domain: [], fields: ["name"], groupby: ["state"], orderby: "id" }));
+	check("fields_get carries attributes and no ids", JSON.stringify(plan("fields_get", [], { attributes: ["type"] })) === JSON.stringify({ attributes: ["type"] }));
+	check("read carries ids", JSON.stringify(plan("read", [[1, 2]], { fields: ["name"] })) === JSON.stringify({ ids: [1, 2], fields: ["name"] }));
+	// The two renames are the ones that would silently do the wrong thing.
+	check("create renames `values` to `vals_list`", JSON.stringify(plan("create", [{ name: "x" }])) === JSON.stringify({ vals_list: { name: "x" } }));
+	check("...and accepts a list of dicts untouched", JSON.stringify(plan("create", [[{ a: 1 }, { a: 2 }]])) === JSON.stringify({ vals_list: [{ a: 1 }, { a: 2 }] }));
+	check("write renames `values` to `vals` and carries ids", JSON.stringify(plan("write", [[7], { name: "y" }])) === JSON.stringify({ ids: [7], vals: { name: "y" } }));
+	check("unlink carries ids only", JSON.stringify(plan("unlink", [[7, 8]])) === JSON.stringify({ ids: [7, 8] }));
+	check("context travels as a top-level parameter", plan("read", [[1]], { context: { lang: "es" } }).context.lang === "es");
+	// The safe outcome for anything the table cannot express.
+	check("a business action is NOT translated (positionals have no JSON-2 form)", plan("action_confirm", [[1]]) === null);
+	check("an unknown method is NOT translated", plan("some_custom_thing", []) === null);
+	check("a shape the table does not expect falls back instead of guessing", plan("write", [[7]]) === null && plan("create", ["not-a-dict"]) === null);
+	check("isJson2Method covers exactly the classified set", apiMod.isJson2Method("unlink") === true && apiMod.isJson2Method("action_post") === false);
+
+	// ---- the wire: URL, header, body, and what must NOT be there ---------
+	const realFetchJ2 = globalThis.fetch;
+	const j2Creds = { url: "http://127.0.0.1:8069", db: "dev", username: "admin", secret: "s3cr3t-key", envFile: "/tmp/x", source: "project", secretKind: "api_key" };
+	const seen = [];
+	let j2Responder = () => new Response(JSON.stringify([]), { status: 200 });
+	globalThis.fetch = async (url, init) => {
+		seen.push({ url: String(url), headers: init.headers, body: JSON.parse(init.body) });
+		return j2Responder(String(url), init);
+	};
+	try {
+		const j2 = new clientMod.OdooClient(j2Creds, { api: "auto" });
+		await j2.executeKw("res.partner", "search_read", [[]], { limit: 3 });
+		const call = seen[seen.length - 1];
+		check("JSON-2 posts to /json/2/<model>/<method>", call.url.endsWith("/json/2/res.partner/search_read"), call.url);
+		check("...with the API key as a Bearer header", call.headers.Authorization === "Bearer s3cr3t-key");
+		check("...and NO credential in the body (no db/uid/password)", call.body.db === undefined && call.body.uid === undefined && call.body.password === undefined && call.body.args === undefined, JSON.stringify(call.body));
+		check("...and the body carries the NAMED parameters", call.body.domain !== undefined && call.body.limit === 3);
+		check("...and it never authenticates first (no uid round-trip)", !seen.some((c) => c.url.includes("/jsonrpc")));
+		check("the client reports the transport it used", j2.transport.api === "json2" && /json\/2/.test(j2.transport.reason));
+
+		// ---- errors: the classification must come from the HTTP status ----
+		const statusCase = async (status, body) => {
+			j2Responder = () => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+			return new clientMod.OdooClient(j2Creds, { api: "json2" }).executeKw("res.partner", "create", [{ name: "x" }]);
+		};
+		const unauthorized = await statusCase(401, { name: "werkzeug.exceptions.Unauthorized", message: "Invalid apikey" });
+		check("401 is a SERVER error (a definite refusal), and mentions the Bearer API key", unauthorized.ok === false && unauthorized.errorKind === "server" && /API key/.test(unauthorized.error), unauthorized.ok ? "" : unauthorized.error.slice(0, 90));
+		const forbidden = await statusCase(403, { name: "odoo.exceptions.AccessError", message: "not allowed" });
+		check("403 (AccessError) is a SERVER error", forbidden.ok === false && forbidden.errorKind === "server");
+		const unprocessable = await statusCase(422, { name: "werkzeug.exceptions.UnprocessableEntity", message: "missing a required argument: 'vals_list'" });
+		check("422 (signature mismatch) is a SERVER error and names the problem", unprocessable.ok === false && unprocessable.errorKind === "server" && /vals_list/.test(unprocessable.error));
+		const serverError = await statusCase(500, { name: "builtins.ValueError", message: "Invalid field" });
+		check("500 is a SERVER error (Odoo rolled the transaction back)", serverError.ok === false && serverError.errorKind === "server");
+		check("...so a rejected mutation is NOT indeterminate", clsJ2.isIndeterminateFor("create", serverError.errorKind) === false);
+
+		// A 200 that is not JSON proves nothing about what the server did.
+		j2Responder = () => new Response("<html>login</html>", { status: 200 });
+		const notJson = await new clientMod.OdooClient(j2Creds, { api: "json2" }).executeKw("res.partner", "create", [{ name: "x" }]);
+		check("a 200 with a non-JSON body is a PROTOCOL failure", notJson.ok === false && notJson.errorKind === "protocol");
+		check("...which for a mutation IS indeterminate (the outcome is unknown)", clsJ2.isIndeterminateFor("create", notJson.errorKind) === true);
+
+		// ---- a missing route degrades, a refusal does not -----------------
+		let routed = 0;
+		globalThis.fetch = async (url, init) => {
+			if (String(url).includes("/json/2/")) {
+				routed += 1;
+				// Odoo answers an unknown route with an HTML 404, not the JSON error shape.
+				return new Response("<html>URL was not found in the server-wide controllers.</html>", { status: 404 });
+			}
+			// The classic path authenticates first; answering it with the query result
+			// would make the uid a list and the fallback would fail for the wrong reason.
+			const body = JSON.parse(init.body);
+			if (body?.params?.method === "authenticate") {
+				return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: 7 }), { status: 200 });
+			}
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: [{ id: 1 }] }), { status: 200 });
+		};
+		const fallbackClient = new clientMod.OdooClient(j2Creds, { api: "auto" });
+		const viaFallback = await fallbackClient.executeKw("res.partner", "search_read", [[]], {});
+		check("a server without the route falls back to execute_kw and still answers", viaFallback.ok === true && Array.isArray(viaFallback.value));
+		check("...and remembers the decision (one attempt, not one per call)", routed === 1 && fallbackClient.transport.api === "jsonrpc");
+		await fallbackClient.executeKw("res.partner", "search_read", [[]], {});
+		check("...so the next call does not try the route again", routed === 1, `attempts=${routed}`);
+
+		// A REFUSAL must never be re-sent over the other transport.
+		let reSent = 0;
+		globalThis.fetch = async (url) => {
+			reSent += 1;
+			if (String(url).includes("/json/2/")) {
+				return new Response(JSON.stringify({ name: "odoo.exceptions.AccessError", message: "nope" }), { status: 403 });
+			}
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: "1", result: true }), { status: 200 });
+		};
+		await new clientMod.OdooClient(j2Creds, { api: "auto" }).executeKw("res.partner", "unlink", [[1]]);
+		check("a 403 is NOT retried over execute_kw (a rejection is final)", reSent === 1, `requests=${reSent}`);
+
+		// Pinned json2 must REPORT the missing route instead of degrading quietly.
+		globalThis.fetch = async () => new Response("<html>nope</html>", { status: 404 });
+		const pinned = await new clientMod.OdooClient(j2Creds, { api: "json2" }).executeKw("res.partner", "search_read", [[]], {});
+		check("odooApi=json2 pinned reports the missing route instead of degrading", pinned.ok === false && /odooApi=json2 is pinned/.test(pinned.error), pinned.ok ? "" : pinned.error.slice(0, 90));
+
+		// Pinned jsonrpc never touches /json/2, whatever the server offers.
+		let json2Touched = 0;
+		globalThis.fetch = async (url) => {
+			if (String(url).includes("/json/2/")) json2Touched += 1;
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: "1", result: [] }), { status: 200 });
+		};
+		const classic = new clientMod.OdooClient(j2Creds, { api: "jsonrpc" });
+		await classic.executeKw("res.partner", "search_read", [[]], {});
+		check("odooApi=jsonrpc never touches /json/2", json2Touched === 0 && classic.transport.api === "jsonrpc");
+
+		// A known-old server is not even tried: version() fills the major for free.
+		let oldTouched = 0;
+		globalThis.fetch = async (url) => {
+			if (String(url).includes("/json/2/")) oldTouched += 1;
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: "1", result: { server_version: "18.0", server_serie: "18.0", protocol_version: 1 } }), { status: 200 });
+		};
+		const oldServer = new clientMod.OdooClient(j2Creds, { api: "auto" });
+		await oldServer.version();
+		await oldServer.executeKw("res.partner", "search_read", [[]], {});
+		check("a server whose version predates /json/2 is never sent a JSON-2 request", oldTouched === 0 && oldServer.serverMajor === 18, `touched=${oldTouched}`);
+	} finally {
+		globalThis.fetch = realFetchJ2;
+	}
 }
 
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);

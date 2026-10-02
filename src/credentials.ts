@@ -77,6 +77,12 @@ export interface OdooCredentials {
 	username: string;
 	/** Password or API key. NEVER serialize, log, or render this value. */
 	secret: string;
+	/**
+	 * Which NAME the secret was declared under. Never the value itself: knowing
+	 * that a credential is an API key is what lets the web-session path warn
+	 * BEFORE calling, instead of surfacing an opaque failure afterwards.
+	 */
+	secretKind?: "password" | "api_key";
 	/** Absolute path of the .env file the credentials were loaded from. */
 	envFile: string;
 	/** Cascade tier the .env file was loaded from. */
@@ -145,10 +151,58 @@ export type CredentialsResult =
 			 * MUST surface it to the developer instead of silently ignoring it.
 			 */
 			permissionNote?: string;
+			/**
+			 * Present when the credential file carries something the developer should
+			 * know about but that does not block the load (an ignored duplicate name,
+			 * for instance). Non-secret by construction, so it may be shown.
+			 */
+			credentialNote?: string;
 	  }
 	| CredentialsProblem;
 
-const REQUIRED_VARS = ["ODOO_URL", "ODOO_DB", "ODOO_USERNAME", "ODOO_PASSWORD"] as const;
+/** Variables always required. The SECRET is checked separately: it has two names. */
+const REQUIRED_VARS = ["ODOO_URL", "ODOO_DB", "ODOO_USERNAME"] as const;
+
+/**
+ * Accepted names of the secret, in precedence order.
+ *
+ * Odoo accepts an API key anywhere a password is accepted over RPC, so the field
+ * has always CARRIED both — but it was only ever NAMED after one. A developer who
+ * wrote the accurate name got "Missing required variable(s): ODOO_PASSWORD",
+ * which is a naming failure, not a configuration one.
+ */
+const SECRET_VARS = ["ODOO_PASSWORD", "ODOO_API_KEY"] as const;
+
+/**
+ * Resolve the secret from either accepted name.
+ * @param vars - parsed .env values.
+ * @returns the value, its DECLARED kind, and a note when a name was ignored.
+ */
+function resolveSecret(vars: Record<string, string>): {
+	value: string;
+	kind: "password" | "api_key";
+	note?: string;
+} | null {
+	const password = (vars["ODOO_PASSWORD"] ?? "").trim();
+	const apiKey = (vars["ODOO_API_KEY"] ?? "").trim();
+	// ODOO_PASSWORD wins: it is the historical name, and silently switching which
+	// credential is in use would be the worst possible reading of an ambiguous file.
+	if (password !== "") {
+		return {
+			value: vars["ODOO_PASSWORD"]!,
+			kind: "password",
+			...(apiKey === ""
+				? {}
+				: {
+						note:
+							"ODOO_API_KEY is also set and was IGNORED: ODOO_PASSWORD takes precedence. " +
+							"Remove whichever one is stale, so the credential in use is unambiguous.",
+					}),
+		};
+	}
+	if (apiKey !== "") return { value: vars["ODOO_API_KEY"]!, kind: "api_key" };
+	return null;
+}
 
 /** Hostnames treated as local for transport-security purposes (S1). */
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]", "ip6-localhost"]);
@@ -658,7 +712,14 @@ export function loadCredentials(projectRoot: string): CredentialsResult {
 		};
 	}
 	const vars = parseEnv(readFileSync(envFile, "utf8"));
-	const missing = REQUIRED_VARS.filter((name) => (vars[name] ?? "").trim() === "");
+	const secret = resolveSecret(vars);
+	// The secret has two accepted names, so it is reported as a choice rather than
+	// as one variable: telling a developer their API key file lacks
+	// "ODOO_PASSWORD" is what sent them looking for a password they never had.
+	const missing = [
+		...REQUIRED_VARS.filter((name) => (vars[name] ?? "").trim() === ""),
+		...(secret === null ? [`${SECRET_VARS.join(" or ")}`] : []),
+	];
 	if (missing.length > 0) {
 		return {
 			ok: false,
@@ -666,6 +727,8 @@ export function loadCredentials(projectRoot: string): CredentialsResult {
 			envFile,
 			message:
 				`Missing required variable(s) in ${displayPath(envFile)}: ${missing.join(", ")}. ` +
+				`The secret may be named ${SECRET_VARS[0]} (password) OR ${SECRET_VARS[1]} (API key; ` +
+				"recommended, since Odoo accepts it wherever a password is accepted over RPC). " +
 				"Ask the developer to complete the file directly (see " +
 				".env.example). Do not request secret values through chat.",
 		};
@@ -700,13 +763,15 @@ export function loadCredentials(projectRoot: string): CredentialsResult {
 			url: parsed.url,
 			db: vars["ODOO_DB"]!.trim(),
 			username: vars["ODOO_USERNAME"]!.trim(),
-			secret: vars["ODOO_PASSWORD"]!,
+			secret: secret!.value,
+			secretKind: secret!.kind,
 			envFile,
 			source: location.source,
 			...(location.instance === undefined ? {} : { instance: location.instance }),
 			...(environment === null ? {} : { environment }),
 		},
 		...(permission.enforced ? {} : { permissionNote: permission.note ?? POSIX_MODE_NOTE }),
+		...(secret!.note === undefined ? {} : { credentialNote: secret!.note }),
 	};
 }
 
@@ -744,9 +809,12 @@ export function describeCredentials(credentials: OdooCredentials): string {
 			? " environment=UNDECLARED (the functional executor will refuse to apply batches)"
 			: ` environment=${credentials.environment}`;
 	const instanceNote = credentials.instance === undefined ? "" : ` instance=${credentials.instance}`;
+	// The NAME the secret was declared under is not a secret, and it answers the
+	// first question a failed web session raises ("is this an API key?").
+	const kindNote = credentials.secretKind === undefined ? "" : ` secretKind=${credentials.secretKind}`;
 	return (
 		`url=${credentials.url} db=${credentials.db} user=${credentials.username} ` +
-		`secret=***masked*** (source: ${credentials.source}${instanceNote}, file: ` +
+		`secret=***masked*** (source: ${credentials.source}${instanceNote}${kindNote}, file: ` +
 		displayPath(credentials.envFile) + ")" + legacyNote + environment
 	);
 }

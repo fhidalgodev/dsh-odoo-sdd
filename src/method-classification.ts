@@ -65,13 +65,85 @@ export const READ_METHODS: ReadonlySet<string> = new Set([
 export const CRUD_METHODS: ReadonlySet<string> = new Set(["create", "write", "unlink"]);
 
 /**
+ * The read methods this server can actually answer, for advertising them in a
+ * tool description. A retired name is left out instead of promised.
+ * @param major - the ORM major version, when known.
+ * @returns the callable read method names.
+ */
+export function advertisedReadMethods(major: number | null = null): string[] {
+	return [...READ_METHODS].filter((method) => retiredReadReason(method, major) === null);
+}
+
+/**
  * Historical name kept for the surfaces that already use it. It means exactly
  * `CRUD_METHODS`: a business method is mutating too, but it is not *replayable*,
  * and conflating the two is what would make `compensate` lie.
  */
 export const MUTATING_METHODS: ReadonlySet<string> = CRUD_METHODS;
 
-/** True for a query method. */
+/**
+ * Methods the ORM CHANGED the visibility of, keyed by the first major where the
+ * plugin's classification stops being true.
+ *
+ * Both entries were verified in the installed sources, not assumed:
+ * - `exists` is `@api.private` since 19 (`odoo/orm/models.py`: the decorator sits
+ *   right above it) and public in 18 (`odoo/models.py`, `@api.returns('self')`).
+ *   `get_public_method` refuses private names, so calling it over RPC on 19 can
+ *   only ever produce an AccessError.
+ * - `name_get` left the core in 18 (it is in `odoo/models.py` up to 17,
+ *   deprecated there, and absent from 18 on).
+ *
+ * Advertising them as free reads was the plugin's own version of a stale
+ * assumption: the tool description promised a query the server would refuse.
+ * With no version known the historical behaviour is kept, so a caller that never
+ * resolves a version is never worse off than before.
+ */
+const READ_METHOD_RETIRED: ReadonlyMap<string, number> = new Map([
+	["exists", 19],
+	["name_get", 18],
+]);
+
+/** The replacement to point at, per retired method. */
+const READ_METHOD_REPLACEMENT: ReadonlyMap<string, string> = new Map([
+	["exists", "search_count with the same domain, or read the ids you already have"],
+	["name_get", "read the `display_name` field, which is a stored computed field since 17"],
+]);
+
+/**
+ * Why a read the plugin advertises cannot work on this server, if it cannot.
+ *
+ * The remedy is NOT to reclassify the method: `exists` is a harmless query, and
+ * demanding `confirm_destructive` for something that only reads would train the
+ * operator to confirm reflexively. The honest answer is to refuse it early, with
+ * the name of what to use instead, instead of letting Odoo answer with an
+ * `AccessError` about private methods.
+ * @param method - the method name.
+ * @param major - the ORM major version, or null when it is unknown.
+ * @returns the refusal reason, or null when the method is usable.
+ */
+export function retiredReadReason(method: string, major: number | null): string | null {
+	const retiredFrom = READ_METHOD_RETIRED.get(method);
+	if (retiredFrom === undefined) return null;
+	// No version to judge by: keep the historical answer rather than inventing a
+	// restriction the server may not have.
+	if (major === null || major < retiredFrom) return null;
+	const replacement = READ_METHOD_REPLACEMENT.get(method);
+	return (
+		`"${method}" is classified as a read but this server (Odoo ${major}) does not expose it over ` +
+		`RPC any more${method === "exists" ? ": it is @api.private since 19" : ": it left the core in 18"}. ` +
+		`Use ${replacement ?? "a supported query"} instead — nothing was sent.`
+	);
+}
+
+/**
+ * True for a query method.
+ *
+ * Version-independent by design: this answers "what KIND of call is this", which
+ * decides the confirmation policy. Whether the SERVER still offers it is a
+ * separate question, answered by {@link retiredReadReason}.
+ * @param method - the method name.
+ * @returns true for the well-known public read API.
+ */
 export function isReadMethod(method: string): boolean {
 	return READ_METHODS.has(method);
 }

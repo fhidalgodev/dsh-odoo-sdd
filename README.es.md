@@ -164,12 +164,12 @@ bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
 
 - **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
 - Acepta cualquier spec de pnpm, así que podés fijar una versión:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.9.1`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.10.0`.
 
 ¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.9.1, publicada con attestation de provenance
+npm install dsh-odoo-sdd        # 0.10.0, publicada con attestation de provenance
 ```
 
 > [!IMPORTANT]
@@ -241,15 +241,26 @@ odoo_setup mode=revoke name=staging                           # retira solo el g
 propio puntero (`.sdd/instances/active-<sessionId>.json`), así que dos sesiones
 sobre un mismo proyecto pueden trabajar en dos entornos a la vez —una en staging y
 otra en el servidor de un cliente— sin que ninguna mueva la de la otra.
-`.sdd/instances/active.json` queda solo como *último usado* del proyecto, que una
-sesión que no eligió hereda como **valor por defecto** y del que se le avisa:
+**Una sesión que no eligió se PREGUNTA, nunca recibe un valor por defecto.** La
+primera operación contra Odoo en un chat nuevo se rechaza y devuelve la pregunta,
+con los destinos disponibles y su identidad sin secretos:
 
 ```
-environment "farmago" was INHERITED from the project's last choice; this session
-had not picked one. Choose your own with `odoo_setup mode=instance instance=use name=<name>`
+This session has no environment chosen yet, and this project defines 2 instance(s):
+  - argelia: https://… db=argelia user=admin
+  - farmago: https://… db=farmago user=admin   (the project's last used)
+ASK THE DEVELOPER which one THIS session should use, then record the answer:
+  - an existing one: `odoo_setup mode=instance instance=use name=<name>`
+  - a new one: `odoo_setup mode=instance instance=add name=<name> url=… db=… username=…`, …
 ```
 
-Poné `adoptProjectPointerHint: false` para quitar esa herencia por completo.
+Heredar el último usado del proyecto es cómodo exactamente una vez y peligroso
+después: otra sesión cambiando de entorno redirigiría en silencio a la que está
+trabajando, y sus respuestas seguirían diciendo `OK`. Una pregunta por sesión lo
+elimina. `.sdd/instances/active.json` se conserva solo como la *sugerencia* que
+muestra la pregunta. Un proyecto sin instancias con nombre (solo `.sdd/.env`, la
+disposición de un único destino) nunca se pregunta, y
+`requireInstanceChoice: false` restaura la herencia anterior para quien la prefiera.
 
 La autorización es **por destino** (`url`+`db`+`user`), así que dos instancias en
 el mismo servidor son dos grants. **`authorize` acepta el NOMBRE del destino**, y

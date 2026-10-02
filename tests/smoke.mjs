@@ -660,10 +660,35 @@ check("S1: http to a real 127.0.0.1 loopback allowed", realLoop.ok === true);
 			creds.loadCredentials(instRoot).reason === "needs_instance",
 	);
 	check("activating one is recorded", creds.writeActiveInstance(instRoot, "staging") === true);
-	const activeLoad = creds.loadCredentials(instRoot);
+	// The project pointer is a SUGGESTION now: a session that never chose is ASKED,
+	// because inheriting is how two sessions end up in the same database by accident.
+	const asked = creds.loadCredentials(instRoot, { sessionId: "sesion-sin-elegir" });
 	check(
-		"the active instance is the one the credentials come from",
+		"a session that has not chosen is ASKED, even with a project default set",
+		asked.ok === false && asked.reason === "needs_instance",
+		asked.ok ? String(asked.credentials.instance) : asked.reason,
+	);
+	check(
+		"...and the question lists the options and both ways forward",
+		asked.ok === false && /local/.test(asked.message) && /staging/.test(asked.message) && /instance=use/.test(asked.message) && /instance=add/.test(asked.message),
+	);
+	check(
+		"...and names the project's last used as a suggestion, not as the answer",
+		asked.ok === false && /the project's last used/.test(asked.message),
+	);
+	// A session that HAS chosen resolves without any question.
+	creds.writeSessionInstance(instRoot, "sesion-elige", "staging");
+	const activeLoad = creds.loadCredentials(instRoot, { sessionId: "sesion-elige" });
+	check(
+		"a session that chose resolves its own instance",
 		activeLoad.ok === true && activeLoad.credentials.instance === "staging" && activeLoad.credentials.db === "stg",
+	);
+	// Opting out restores the inheritance.
+	const inheritedLoad = creds.loadCredentials(instRoot, { sessionId: "sesion-sin-elegir", requireChoice: false });
+	check(
+		"requireInstanceChoice=false restores the inheritance",
+		inheritedLoad.ok === true && inheritedLoad.credentials.source === "instance-inherited",
+		inheritedLoad.ok ? inheritedLoad.credentials.source : inheritedLoad.reason,
 	);
 	check("...and the ambiguity disappears once one is chosen", creds.ambiguousInstances(instRoot).length === 0);
 
@@ -688,7 +713,12 @@ check("S1: http to a real 127.0.0.1 loopback allowed", realLoop.ok === true);
 	check("one legacy file is NOT ambiguous (single-target projects keep working)", creds.ambiguousInstances(legacyRoot).length === 0 && creds.loadCredentials(legacyRoot).ok === true);
 	// A named instance OUTRANKS the legacy file, which is the whole point of the feature.
 	writeInstance2(legacyRoot, "other");
-	check("a named instance wins over the legacy file", creds.writeActiveInstance(legacyRoot, "other") === true && creds.loadCredentials(legacyRoot).ok === true && creds.loadCredentials(legacyRoot).credentials.instance === "other");
+	check(
+		"a named instance wins over the legacy file (with the choice waived, the cascade is unchanged)",
+		creds.writeActiveInstance(legacyRoot, "other") === true &&
+			creds.loadCredentials(legacyRoot, { requireChoice: false }).ok === true &&
+			creds.loadCredentials(legacyRoot, { requireChoice: false }).credentials.instance === "other",
+	);
 
 	// ---- the ACTIVE INSTANCE belongs to the session, not the project -------
 	// The defect this exists for: one `.sdd/instances/active.json` per project
@@ -727,7 +757,7 @@ check("S1: http to a real 127.0.0.1 loopback allowed", realLoop.ok === true);
 		creds.writeSessionInstance(twoRoot, "session-A", "farmago");
 
 		// A session with no pointer of its own inherits the project's last choice...
-		const inherited = creds.loadCredentials(twoRoot, { sessionId: "session-new" });
+		const inherited = creds.loadCredentials(twoRoot, { sessionId: "session-new", requireChoice: false });
 		check(
 			"a session without a pointer inherits the project's last choice",
 			inherited.ok === true && inherited.credentials.instance === "farmago" && inherited.credentials.source === "instance-inherited",

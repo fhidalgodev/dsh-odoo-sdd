@@ -163,12 +163,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.9.1`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.10.0`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.9.1, published with a provenance attestation
+npm install dsh-odoo-sdd        # 0.10.0, published with a provenance attestation
 ```
 
 > [!IMPORTANT]
@@ -238,16 +238,29 @@ odoo_setup mode=revoke name=staging                         # drops only that ta
 **The active target belongs to the SESSION, not the project.** Each chat keeps its
 own pointer (`.sdd/instances/active-<sessionId>.json`), so two sessions on one
 project can work in two environments at once — one on staging, another on a
-client's server — without either moving the other. `.sdd/instances/active.json`
-remains only as the project's *last used* target, which a session that has not
-chosen inherits as a **default** and is told about:
+client's server — without either moving the other.
+
+**A session that has not chosen is ASKED, never given a default.** The first Odoo
+operation in a new chat refuses and returns the question, with the available
+targets and their non-secret identity:
 
 ```
-environment "farmago" was INHERITED from the project's last choice; this session
-had not picked one. Choose your own with `odoo_setup mode=instance instance=use name=<name>`
+This session has no environment chosen yet, and this project defines 2 instance(s):
+  - argelia: https://… db=argelia user=admin
+  - farmago: https://… db=farmago user=admin   (the project's last used)
+ASK THE DEVELOPER which one THIS session should use, then record the answer:
+  - an existing one: `odoo_setup mode=instance instance=use name=<name>`
+  - a new one: `odoo_setup mode=instance instance=add name=<name> url=… db=… username=…`, …
 ```
 
-Set `adoptProjectPointerHint: false` to remove that inheritance entirely.
+Inheriting the project's last-used target is convenient exactly once and dangerous
+afterwards: another session switching environments would silently redirect a
+working one, and its tool answers would still just say `OK`. One question per
+session buys that away. `.sdd/instances/active.json` is kept only as the
+*suggestion* shown in the question. A project with no named instances (just
+`.sdd/.env`, the single-target layout) is never asked, and
+`requireInstanceChoice: false` restores the old inheritance for anyone who
+prefers it.
 
 Authorization is **per target** (`url`+`db`+`user`), so two instances on the same
 server are two grants. **`authorize` takes the target's NAME**, which is what makes

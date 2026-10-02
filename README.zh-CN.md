@@ -154,12 +154,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.9.1`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.10.0`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.9.1，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.10.0，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]
@@ -226,9 +226,23 @@ odoo_setup mode=revoke name=staging                           # 只撤销该目�
 **激活的目标属于「会话」，不属于项目。** 每个对话保存自己的指针
 （`.sdd/instances/active-<sessionId>.json`），因此同一项目上的两个会话可以同时使用
 两个环境 —— 一个在预发，另一个在客户的服务器上 —— 互不影响。
-`.sdd/instances/active.json` 仅作为项目*最近使用*的目标保留，未做选择的会话会把它
-作为**默认值**继承，并会被告知这一点。设置 `adoptProjectPointerHint: false` 可完全
-取消该继承。
+**未做选择的会话会被「询问」，而不会得到默认值。** 新对话中的第一次 Odoo 操作会被拒绝
+并返回该问题，其中包含可用目标及其非机密身份：
+
+```
+This session has no environment chosen yet, and this project defines 2 instance(s):
+  - argelia: https://… db=argelia user=admin
+  - farmago: https://… db=farmago user=admin   (the project's last used)
+ASK THE DEVELOPER which one THIS session should use, then record the answer:
+  - an existing one: `odoo_setup mode=instance instance=use name=<name>`
+  - a new one: `odoo_setup mode=instance instance=add name=<name> url=… db=… username=…`, …
+```
+
+继承项目最近使用的目标只在第一次方便，之后就很危险：另一个会话切换环境会静默地把正在
+工作的会话重定向，而它的工具回答仍然只是 `OK`。每个会话问一次即可消除这一点。
+`.sdd/instances/active.json` 仅作为问题中显示的*建议*保留。没有具名实例的项目
+（只有 `.sdd/.env`，单目标布局）永远不会被询问，而 `requireInstanceChoice: false`
+可为偏好者恢复旧的继承行为。
 
 授权是**按目标**的（`url`+`db`+`user`），因此同一台服务器上的两个实例是两个授权。
 **`authorize` 接受目标的名称**，这正是让切换可恢复的关键：授权会在 12 小时后过期，

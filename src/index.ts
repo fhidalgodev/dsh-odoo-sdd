@@ -217,6 +217,7 @@ export const Config = z.object({
 	requireSpecForChanges: markVolatile(z.boolean()),
 	adoptProjectPointerHint: markVolatile(z.boolean()),
 	odooApi: markVolatile(z.string()),
+	requireInstanceChoice: markVolatile(z.boolean()),
 	securityReviewRequired: markVolatile(z.boolean()),
 	securityInterviewRequired: markVolatile(z.boolean()),
 	auditAllTools: markVolatile(z.boolean()),
@@ -265,6 +266,12 @@ interface OdooSddConfig {
 	 * "json2" (pinned; a missing route is reported) or "jsonrpc" (classic).
 	 */
 	odooApi?: string;
+	/**
+	 * Ask a session that has no environment of its own which one to use, instead
+	 * of inheriting the project's last-used one. On by default: inheriting is how
+	 * two sessions end up writing to the same database by accident.
+	 */
+	requireInstanceChoice?: boolean;
 	/** Refuse mutating calls until a checkpoint exists (fail-closed). */
 	requireCheckpointBeforeMutation?: boolean;
 	/** Require a clean security review before DONE. */
@@ -448,7 +455,13 @@ function asApiPreference(value: string | undefined): "auto" | "json2" | "jsonrpc
 
 function clientFor(
 	projectRoot: string,
-	options: { api?: "auto" | "json2" | "jsonrpc"; sessionId?: string; instance?: string; adoptProjectHint?: boolean } = {},
+	options: {
+		api?: "auto" | "json2" | "jsonrpc";
+		sessionId?: string;
+		instance?: string;
+		adoptProjectHint?: boolean;
+		requireChoice?: boolean;
+	} = {},
 ): {
 	client: OdooClient | null;
 	report: string;
@@ -458,6 +471,7 @@ function clientFor(
 		...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
 		...(options.instance === undefined ? {} : { instance: options.instance }),
 		...(options.adoptProjectHint === undefined ? {} : { adoptProjectHint: options.adoptProjectHint }),
+		...(options.requireChoice === undefined ? {} : { requireChoice: options.requireChoice }),
 	});
 	if (!loaded.ok) {
 		return { client: null, report: `NOT CONFIGURED (${loaded.reason}): ${loaded.message}`, credentials: null };
@@ -740,6 +754,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		const loaded = loadCredentials(effectiveConfig(exec).projectRoot, {
 			sessionId: sessionIdOf(exec),
 			adoptProjectHint: effectiveConfig(exec).adoptProjectPointerHint,
+			requireChoice: effectiveConfig(exec).requireInstanceChoice,
 		});
 		const credentials: OdooCredentials | null = loaded.ok ? loaded.credentials : null;
 		return sanitizeForPersist(textValue, credentials);
@@ -788,6 +803,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		requireSpecForChanges: config.requireSpecForChanges ?? true,
 		adoptProjectPointerHint: config.adoptProjectPointerHint ?? true,
 		odooApi: config.odooApi ?? "auto",
+		requireInstanceChoice: config.requireInstanceChoice ?? true,
 		securityReviewRequired: config.securityReviewRequired ?? true,
 		securityInterviewRequired: config.securityInterviewRequired ?? true,
 		auditAllTools: config.auditAllTools ?? true,
@@ -1099,17 +1115,28 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							].filter(Boolean);
 							return `- ${entry.name}${flag}: ${where}${notes.length === 0 ? "" : ` — ${notes.join("; ")}`}`;
 						});
+					// The blocking condition is now "this session has not chosen", not
+					// "several and none active": the report has to name the real reason.
+					const mustChoose =
+					effectiveConfig(exec).requireInstanceChoice !== false &&
+					activeScope !== "session" &&
+					found.some((entry) => !entry.legacy);
 					return {
 						mode: "instance" as string,
-						status: ambiguous.length > 0 ? "needs-instance" : "ok",
+						status: mustChoose ? "needs-instance" : "ok",
 						activeInstance: activeNow ?? undefined,
 						instances: describe(),
 						detail:
 							`Instances of ${projectRoot} (${found.length}):\n${lines.join("\n")}` +
-							(ambiguous.length > 0
-								? `\nSeveral instances and none active (${ambiguous.join(", ")}): every connection tool refuses ` +
-									"until one is chosen with mode=instance instance=use name=<name>. Nothing is picked by order."
-								: "") +
+							(mustChoose
+								? `\nTHIS SESSION has not chosen an environment yet, so every connection tool refuses. ` +
+									"Ask the developer which one to use, then `odoo_setup mode=instance instance=use name=<name>` " +
+									"(or declare a new one with instance=add). Nothing is picked by order, and nothing is " +
+									"inherited from another session."
+								: ambiguous.length > 0
+									? `\nSeveral instances and none active (${ambiguous.join(", ")}): every connection tool refuses ` +
+										"until one is chosen with mode=instance instance=use name=<name>. Nothing is picked by order."
+									: "") +
 							(activeNow === null
 							? ""
 							: `\nActive for this session: ${activeNow} (${activeScope})` +
@@ -2496,6 +2523,13 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					".",
 			},
 			requireCheckpointBeforeMutation: { type: "boolean", description: "Refuse mutations until a checkpoint exists (fail-closed)." },
+			requireInstanceChoice: {
+				type: "boolean",
+				description:
+					"A session with no environment of its own is ASKED which instance to use, instead of " +
+					"inheriting the project's last-used one. Default true. Set false to restore the " +
+					"inheritance (a session then follows whatever another session chose last).",
+			},
 			odooApi: {
 				type: "string",
 				enum: ["auto", "json2", "jsonrpc"],
@@ -2549,6 +2583,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							requireSpecForChanges: { type: "boolean" },
 							adoptProjectPointerHint: { type: "boolean" },
 							odooApi: { type: "string" },
+							requireInstanceChoice: { type: "boolean" },
 							securityReviewRequired: { type: "boolean", required: true },
 							securityInterviewRequired: { type: "boolean", required: true },
 							auditAllTools: { type: "boolean", required: true },
@@ -2606,6 +2641,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			requireSpecForChanges?: boolean;
 			adoptProjectPointerHint?: boolean;
 			odooApi?: string;
+			requireInstanceChoice?: boolean;
 			securityReviewRequired?: boolean;
 			securityInterviewRequired?: boolean;
 			auditAllTools?: boolean;
@@ -2639,6 +2675,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						const v = asString(data["odooApi"], "auto");
 						return v === "json2" || v === "jsonrpc" ? v : "auto";
 					})(),
+					requireInstanceChoice:
+						typeof data["requireInstanceChoice"] === "boolean" ? data["requireInstanceChoice"] : true,
 					securityReviewRequired: typeof data["securityReviewRequired"] === "boolean" ? data["securityReviewRequired"] : true,
 					securityInterviewRequired: typeof data["securityInterviewRequired"] === "boolean" ? data["securityInterviewRequired"] : true,
 					auditAllTools: typeof data["auditAllTools"] === "boolean" ? data["auditAllTools"] : true,
@@ -2672,6 +2710,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				const resolvedEnv = loadCredentials(cfg.projectRoot, {
 					sessionId: sessionIdOf(exec),
 					adoptProjectHint: cfg.adoptProjectPointerHint,
+					requireChoice: cfg.requireInstanceChoice,
 				});
 				return {
 					projectRoot: cfg.projectRoot,
@@ -2761,6 +2800,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.requireSpecForChanges !== undefined) updates["requireSpecForChanges"] = args.requireSpecForChanges;
 			if (args.adoptProjectPointerHint !== undefined) updates["adoptProjectPointerHint"] = args.adoptProjectPointerHint;
 			if (args.odooApi !== undefined) updates["odooApi"] = args.odooApi;
+			if (args.requireInstanceChoice !== undefined) updates["requireInstanceChoice"] = args.requireInstanceChoice;
 			if (args.securityReviewRequired !== undefined) updates["securityReviewRequired"] = args.securityReviewRequired;
 			if (args.securityInterviewRequired !== undefined) updates["securityInterviewRequired"] = args.securityInterviewRequired;
 			if (args.auditAllTools !== undefined) updates["auditAllTools"] = args.auditAllTools;
@@ -2882,6 +2922,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				const v = asString(merged["odooApi"], config.odooApi ?? "auto");
 				return v === "json2" || v === "jsonrpc" ? v : "auto";
 			})(),
+			requireInstanceChoice: asBool(merged["requireInstanceChoice"], config.requireInstanceChoice ?? true),
 			securityReviewRequired: asBool(merged["securityReviewRequired"], config.securityReviewRequired ?? true),
 			securityInterviewRequired: asBool(merged["securityInterviewRequired"], config.securityInterviewRequired ?? true),
 			auditAllTools: asBool(merged["auditAllTools"], config.auditAllTools ?? true),
@@ -3865,6 +3906,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			api: asApiPreference(cfg.odooApi),
 			sessionId: sessionIdOf(exec),
 			adoptProjectHint: cfg.adoptProjectPointerHint,
+			requireChoice: cfg.requireInstanceChoice,
 			...extra,
 		});
 	};

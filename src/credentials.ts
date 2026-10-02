@@ -301,7 +301,7 @@ export function userConfigDir(): string {
 /** Ordered credential search paths; the first existing file wins. */
 export function credentialCandidates(
 	projectRoot: string,
-	options: { sessionId?: string; instance?: string; adoptProjectHint?: boolean } = {},
+	options: { sessionId?: string; instance?: string; adoptProjectHint?: boolean; requireChoice?: boolean } = {},
 ): CredentialLocation[] {
 	const candidates: CredentialLocation[] = [];
 	const override = process.env["ODOO_SDD_ENV_FILE"];
@@ -355,10 +355,57 @@ export function ambiguousInstances(projectRoot: string): string[] {
 	return named.length > 1 ? named.map((entry) => entry.name) : [];
 }
 
+/**
+ * The named instances a session must choose FROM, or none when it already chose.
+ *
+ * Unlike {@link ambiguousInstances}, this does not require several: the point is
+ * not that the choice is ambiguous, it is that a session which never chose must
+ * not inherit one silently. Working in the wrong database is the failure; being
+ * asked once is the price.
+ * @param projectRoot - workspace root.
+ * @param sessionId - the calling session.
+ * @returns the instance names to choose from (empty when there is nothing to ask).
+ */
+export function instancesToChoose(
+	projectRoot: string,
+	sessionId: string | undefined,
+): InstanceSummary[] {
+	if (readSessionInstance(projectRoot, sessionId) !== null) return [];
+	return listInstances(projectRoot).filter((entry) => !entry.legacy);
+}
+
+/**
+ * The question a session that has not chosen its environment is asked.
+ *
+ * It is written for the MODEL to relay to the developer, which is why it carries
+ * the non-secret identity of every option and both ways forward: pick one, or
+ * declare a new one. It never blocks a tool that does not touch Odoo.
+ * @param projectRoot - workspace root.
+ * @param choices - the instances available.
+ * @returns the asking message.
+ */
+export function describeInstanceChoice(projectRoot: string, choices: InstanceSummary[]): string {
+	const suggested = readActiveInstance(projectRoot);
+	const lines = choices.map((entry) => {
+		const where = entry.url === null ? "unreadable" : `${entry.url} db=${entry.db ?? "?"} user=${entry.username ?? "?"}`;
+		return `  - ${entry.name}${entry.name === suggested ? " (the project's last used)" : ""}: ${where}`;
+	});
+	return (
+		`This session has no environment chosen yet, and this project defines ${choices.length} ` +
+		`instance(s):\n${lines.join("\n")}\n` +
+		"ASK THE DEVELOPER which one THIS session should use, then record the answer:\n" +
+		"  - an existing one: `odoo_setup mode=instance instance=use name=<name>`\n" +
+		"  - a new one: `odoo_setup mode=instance instance=add name=<name> url=<url> db=<db> username=<user>`, " +
+		"fill its secret by hand, `mode=authorize name=<name>`, then `instance=use name=<name>`.\n" +
+		"Nothing was sent anywhere. A session never inherits another session's environment silently: " +
+		"doing so is how two sessions end up writing to the same database by accident."
+	);
+}
+
 /** Resolve the first existing credential source in the cascade, or null. */
 export function resolveCredentialSource(
 	projectRoot: string,
-	options: { sessionId?: string; instance?: string; adoptProjectHint?: boolean } = {},
+	options: { sessionId?: string; instance?: string; adoptProjectHint?: boolean; requireChoice?: boolean } = {},
 ): CredentialLocation | null {
 	for (const candidate of credentialCandidates(projectRoot, options)) {
 		if (existsSync(candidate.path)) return candidate;
@@ -795,12 +842,30 @@ function parseEnv(content: string): Record<string, string> {
  */
 export function loadCredentials(
 	projectRoot: string,
-	options: { sessionId?: string; instance?: string; adoptProjectHint?: boolean } = {},
+	options: { sessionId?: string; instance?: string; adoptProjectHint?: boolean; requireChoice?: boolean } = {},
 ): CredentialsResult {
 	// Several instances and none chosen: refuse BEFORE picking one. Choosing by
 	// order here would aim the pipeline at a target nobody selected, which is the
 	// most expensive kind of guess this plugin can make. A target named explicitly
 	// (or chosen by this session) is not ambiguous — it IS the choice.
+	// A session that has not chosen is ASKED, not given a default. Inheriting the
+	// project's last-used environment is convenient exactly once and dangerous
+	// afterwards: another session switching targets would silently redirect this
+	// one, and the tool answers would still just say "OK".
+	// `requireInstanceChoice=false` restores the inheritance for whoever prefers it.
+	const mustChoose = options.requireChoice !== false;
+	const choices = options.instance !== undefined ? [] : instancesToChoose(projectRoot, options.sessionId);
+	if (mustChoose && choices.length > 0) {
+		return {
+			ok: false,
+			reason: "needs_instance",
+			envFile: targetEnvPath("project", projectRoot, choices[0]!.name),
+			message: describeInstanceChoice(projectRoot, choices),
+		};
+	}
+	// With the choice waived, several instances and none active is still refused:
+	// that one IS ambiguous, and picking by order would aim the pipeline at a
+	// target nobody selected.
 	const ambiguous =
 		options.instance !== undefined || readSessionInstance(projectRoot, options.sessionId) !== null
 			? []

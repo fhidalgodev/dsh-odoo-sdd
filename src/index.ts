@@ -147,7 +147,7 @@ import {
 import { join, resolve, dirname, isAbsolute, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync, readdirSync } from "node:fs";
 
 /** Cordis plugin name. */
 export const name = "odoo-sdd";
@@ -217,6 +217,7 @@ export const Config = z.object({
 	autonomy: markVolatile(z.string()),
 	requireCheckpointBeforeMutation: markVolatile(z.boolean()),
 	requireSpecForChanges: markVolatile(z.boolean()),
+	specPolicyScope: markVolatile(z.string()),
 	adoptProjectPointerHint: markVolatile(z.boolean()),
 	odooApi: markVolatile(z.string()),
 	requireInstanceChoice: markVolatile(z.boolean()),
@@ -257,6 +258,16 @@ interface OdooSddConfig {
 	autonomy?: string;
 	/** No change — instance mutation or project file edit — without a spec that authorizes it, or a session waiver. */
 	requireSpecForChanges?: boolean;
+	/**
+	 * WHERE that policy is asked: "odoo" (default) arms the file-edit gate only in
+	 * a directory that shows signs of Odoo work, "everywhere" arms it in every
+	 * directory. `requireSpecForChanges` says WHETHER a spec is required; this says
+	 * where the question is worth asking. Without it, a plugin installed at profile
+	 * level blocked writes in directories that have nothing to do with Odoo —
+	 * because the only thing the gate ever checked was whether a path fell inside
+	 * the session's root.
+	 */
+	specPolicyScope?: string;
 	/**
 	 * Let a session with no pointer of its own adopt the project's last spec as a
 	 * hint. On by default for continuity; turn it off to require every session to
@@ -1985,8 +1996,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 			spec_id: {
 				type: "string",
-				required: true,
-				description: "Spec directory id, e.g. '001-sale-order-approval'.",
+				description:
+					"Spec directory id, e.g. '001-sale-order-approval'. Required by every operation EXCEPT " +
+					"`waive` (and `waive revoke=true`): a waiver is about the project and the session, and the " +
+					"moment you most need one is the moment there is no spec to name.",
 			},
 			mode: {
 				type: "string",
@@ -2054,7 +2067,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		},
 		async execute(args: {
 			operation: "init" | "clarify" | "status" | "mark_spec_loaded" | "advance" | "fail" | "succeed" | "rollback" | "diagnose" | "waive";
-			spec_id: string;
+			spec_id?: string;
 			mode?: PipelineMode;
 			licensed?: "community" | "enterprise";
 			translations?: string[];
@@ -2071,11 +2084,39 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const cfgPhase = effectiveConfig(exec);
 			const layout = { specsMode: cfgPhase.specsMode, specsRoot: cfgPhase.specsRoot };
 			const projectRoot = root.root;
+			// A WAIVER is per project and per session — never per spec. Requiring a
+			// spec id for it made the documented way out unreachable in the one
+			// situation it exists for: a directory with no specs at all, where you
+			// would have to create one to say you do not want one.
+			const waiverOperation = args.operation === "waive";
+			if (!waiverOperation && (args.spec_id === undefined || args.spec_id.trim() === "")) {
+				return {
+					operation: args.operation as string, phase: "UNKNOWN" as string, ok: false, requireDiagnosis: false,
+					summary: `spec_id is required for operation=${args.operation}.`,
+					detail:
+						`operation=${args.operation} needs a spec_id (the spec directory id, e.g. '001-sale-order-approval'). ` +
+						"Only `waive` works without one.",
+				};
+			}
+			const specId = args.spec_id ?? "";
 			// `create` only for the operation that actually creates the spec dir,
 			// so a read-only status/rollback never claims a central folder.
-			const specDir = specDirOf(projectRoot, cfgPhase.specsDir, args.spec_id, layout, {
-				create: args.operation === "init",
-			});
+			// A WAIVER may run with no spec at all — that is the case it exists for.
+			// Report it against the SESSION's spec when there is one; with none,
+			// against the specs BASE, never the `__invalid__` segment an empty id
+			// would produce (which reports a layout that does not exist).
+			const specIdForState = waiverOperation && specId === "" ? (activeFor(cfgPhase, exec).state.specId ?? "") : specId;
+			const specDir =
+				specIdForState === ""
+					? specsBaseFor({
+							projectRoot,
+							specsMode: cfgPhase.specsMode,
+							specsDir: cfgPhase.specsDir,
+							specsRoot: cfgPhase.specsRoot,
+						})
+					: specDirOf(projectRoot, cfgPhase.specsDir, specIdForState, layout, {
+							create: args.operation === "init",
+						});
 			// S2: agent-supplied details are scrubbed (known secret, generic
 			// credential shapes, home paths) BEFORE any KB/verdict persistence.
 			const note = sanitize(args.detail ?? "", exec);
@@ -2284,12 +2325,23 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					at: new Date().toISOString(),
 					...(active.specId === null ? {} : { specId: active.specId }),
 				});
-				kbAppend(state, "decision", `no spec for this session: ${reason.slice(0, 200)}`);
+				// With no spec there is no KB to append to: `state` then points at the
+				// specs BASE, and a decision written there would land in the folder
+				// that holds every spec. `.sdd/waiver.json` keeps the reason — which is
+				// what the guard reads back — so nothing is lost by not repeating it.
+				if (specIdForState !== "") {
+					kbAppend(state, "decision", `no spec for this session: ${reason.slice(0, 200)}`);
+				}
 				return {
 					operation: "waive" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
 					summary: summarize(state),
 					detail:
 						`Waiver recorded for session ${sessionId} (approved by the developer).\n` +
+						(specIdForState === ""
+							? "This project has NO spec, so the waiver is recorded against the project and this session " +
+								"only: every change is allowed until this chat ends, and the next one starts under the " +
+								"policy again.\n"
+							: "") +
 						"Nothing else changes: the change still has to be recorded as a KB decision with how it was " +
 						"verified, and this waiver does not survive into the next chat.",
 				};
@@ -2308,6 +2360,15 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						`KB nodes: ${kb.length}. Last: ${kb.length > 0 ? kb[kb.length - 1]!.summary : "none"}` +
 						`\nCheckpoint: ${active.checkpointId ?? "none (mutations are blocked while the policy requires one)"}` +
 						`\nSpec policy: ${cfgPhase.requireSpecForChanges ? "a spec in a writing phase (or a waiver) is required for every change" : "OFF — changes are not gated by the spec policy"}` +
+						// WHERE it is asked, and whether it is armed HERE: a refusal that
+						// does not explain its own scope costs an investigation, which is
+						// exactly what happened when it was asked of every directory.
+						(cfgPhase.requireSpecForChanges
+							? `\nPolicy scope: ${cfgPhase.specPolicyScope}` +
+								(cfgPhase.specPolicyScope === "everywhere"
+									? " (asked in every directory)"
+									: `; for THIS root it is ${adoptionSignalFor(cfgPhase.projectRoot) === null ? "NOT armed" : "armed"} — ${adoptionReason(adoptionSignalFor(cfgPhase.projectRoot), cfgPhase.projectRoot)}`)
+							: "") +
 						(state.phase === "DONE"
 							? "\nThis spec is DONE: a new request needs a NEW spec (mode=bug for a small change) or a waiver."
 							: "") +
@@ -2632,6 +2693,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							requireCheckpointBeforeMutation: { type: "boolean", required: true },
 							requireSpecForChanges: { type: "boolean" },
 							adoptProjectPointerHint: { type: "boolean" },
+							specPolicyScope: { type: "string", description: "\"odoo\" (default) arms the spec policy only where Odoo work is detected; \"everywhere\" arms it in every directory." },
 							odooApi: { type: "string" },
 							requireInstanceChoice: { type: "boolean" },
 							securityReviewRequired: { type: "boolean", required: true },
@@ -2661,6 +2723,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							specsBase: { type: "string", required: true },
 							specDir: { type: "string", required: true },
 							specDirReason: { type: "string", required: true },
+							specPolicyScope: { type: "string" },
+							specPolicyArmed: { type: "string" },
 							configFile: { type: "string", required: true },
 						},
 					},
@@ -2689,6 +2753,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			licensed?: string;
 			requireCheckpointBeforeMutation?: boolean;
 			requireSpecForChanges?: boolean;
+			specPolicyScope?: string;
 			adoptProjectPointerHint?: boolean;
 			odooApi?: string;
 			requireInstanceChoice?: boolean;
@@ -2720,6 +2785,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					...(typeof data["licensed"] === "string" ? { licensed: data["licensed"] } : {}),
 					requireCheckpointBeforeMutation: typeof data["requireCheckpointBeforeMutation"] === "boolean" ? data["requireCheckpointBeforeMutation"] : true,
 					requireSpecForChanges: typeof data["requireSpecForChanges"] === "boolean" ? data["requireSpecForChanges"] : true,
+					specPolicyScope: data["specPolicyScope"] === "everywhere" ? "everywhere" : "odoo",
 					adoptProjectPointerHint: typeof data["adoptProjectPointerHint"] === "boolean" ? data["adoptProjectPointerHint"] : true,
 					odooApi: ((): string => {
 						const v = asString(data["odooApi"], "auto");
@@ -2773,6 +2839,23 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					...(projectInstance === null ? {} : { instanceProjectDefault: projectInstance }),
 					...(cfg.sessionId === undefined ? {} : { sessionId: cfg.sessionId }),
 					specsBase: specsBaseFor(layout),
+					// "Is the spec policy even armed here, and why?" was answerable only
+					// by reading the source. A refusal that does not explain its own
+					// scope is what turned a non-Odoo folder into an investigation.
+					specPolicyScope: cfg.specPolicyScope,
+					specPolicyArmed: ((): string => {
+						if (!cfg.requireSpecForChanges) return "no (the policy is off)";
+						if (cfg.specPolicyScope === "everywhere") return "yes (asked in every directory)";
+						const signal = adoptionSignalFor(cfg.projectRoot);
+						// Saying "yes" here while the reason reads "nothing shows Odoo
+						// work" is the kind of contradiction that sends someone back to
+						// the source. With the scope on "odoo" and no signal, file edits
+						// are NOT gated, and the report has to say so — while still
+						// naming what remains gated, so nobody thinks it is off.
+						return signal !== null
+							? `yes (${adoptionReason(signal, cfg.projectRoot)})`
+							: `no for FILE EDITS — ${adoptionReason(null, cfg.projectRoot)}; instance mutations are still gated`;
+					})(),
 					specDir: specDirFor(layout, activeSpec),
 					specDirReason:
 						`${cfg.specsMode} layout; active spec = ${active.specId ?? "none"}` +
@@ -2848,6 +2931,15 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.autonomy !== undefined) updates["autonomy"] = args.autonomy;
 			if (args.requireCheckpointBeforeMutation !== undefined) updates["requireCheckpointBeforeMutation"] = args.requireCheckpointBeforeMutation;
 			if (args.requireSpecForChanges !== undefined) updates["requireSpecForChanges"] = args.requireSpecForChanges;
+			if (args.specPolicyScope !== undefined) {
+				if (args.specPolicyScope !== "odoo" && args.specPolicyScope !== "everywhere") {
+					return {
+						mode: "set" as string, ok: false, config: normalize(current), resolved: resolution(),
+						detail: `specPolicyScope must be "odoo" or "everywhere", not ${JSON.stringify(String(args.specPolicyScope))}. Nothing was written.`,
+					};
+				}
+				updates["specPolicyScope"] = args.specPolicyScope;
+			}
 			if (args.adoptProjectPointerHint !== undefined) updates["adoptProjectPointerHint"] = args.adoptProjectPointerHint;
 			if (args.odooApi !== undefined) updates["odooApi"] = args.odooApi;
 			if (args.requireInstanceChoice !== undefined) updates["requireInstanceChoice"] = args.requireInstanceChoice;
@@ -2967,6 +3059,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			autonomy: asString(merged["autonomy"], config.autonomy ?? "supervised"),
 			requireCheckpointBeforeMutation: asBool(merged["requireCheckpointBeforeMutation"], config.requireCheckpointBeforeMutation ?? true),
 			requireSpecForChanges: asBool(merged["requireSpecForChanges"], config.requireSpecForChanges ?? true),
+			specPolicyScope: ((): string => {
+				const v = asString(merged["specPolicyScope"], config.specPolicyScope ?? "odoo");
+				return v === "everywhere" ? "everywhere" : "odoo";
+			})(),
 			adoptProjectPointerHint: asBool(merged["adoptProjectPointerHint"], config.adoptProjectPointerHint ?? true),
 			odooApi: ((): string => {
 				const v = asString(merged["odooApi"], config.odooApi ?? "auto");
@@ -3782,6 +3878,86 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	};
 
 	/**
+	 * Why a directory counts as Odoo work. Each value is a signal a person can see
+	 * and argue with — never a guess about content.
+	 */
+	type AdoptionSignal = "odoo-tool-used" | "sdd-state" | "module-here" | "modules-inside";
+
+	/** Roots where an Odoo tool actually ran: doing Odoo work DEFINES the work as Odoo. */
+	const odooWorkRoots = new Set<string>();
+
+	/**
+	 * Memoized answer for the one expensive signal (`modules-inside`).
+	 *
+	 * Only that one is cached: the two `existsSync` signals are re-evaluated on
+	 * every call, so a `.sdd/` that appears mid-session arms the policy at once
+	 * instead of waiting for a restart. The scan of a root with thousands of
+	 * entries is what must not run on every tool call.
+	 */
+	const adoptionScan = new Map<string, AdoptionSignal | null>();
+
+	/**
+	 * Whether this directory shows signs of Odoo work, and which sign.
+	 *
+	 * The spec policy used to be asked of EVERY directory — the gate only ever
+	 * checked whether a path fell inside the session's root — so a plugin
+	 * installed at profile level blocked writes in folders that have nothing to do
+	 * with Odoo. This is the missing question, answered from markers that already
+	 * exist rather than by inspecting file contents.
+	 * @param root - the session's project root.
+	 * @returns the signal that makes it Odoo work, or null when nothing does.
+	 */
+	const adoptionSignalFor = (root: string): AdoptionSignal | null => {
+		if (odooWorkRoots.has(root)) return "odoo-tool-used";
+		try {
+			// `.sdd/audit.jsonl` is written by the audit listener for EVERY tool call,
+			// so its mere presence means "a tool ran here" — not "this is an Odoo
+			// project". Counting it would adopt every directory the first time
+			// anything ran in it, which is exactly the bug this scope exists to fix.
+			// Anything ELSE in `.sdd/` was put there deliberately: config, specs,
+			// checkpoints, an instance, a waiver, a session cookie.
+			const sddDir = join(root, ".sdd");
+			if (existsSync(sddDir) && readdirSync(sddDir).some((entry) => entry !== "audit.jsonl")) {
+				return "sdd-state";
+			}
+			if (existsSync(join(root, "__manifest__.py"))) return "module-here";
+		} catch {
+			// An unreadable root falls through to the scan below; the guard's
+			// fail-closed rule still governs the DECISION, this only scopes it.
+		}
+		const memo = adoptionScan.get(root);
+		if (memo !== undefined) return memo;
+		let inside: AdoptionSignal | null = null;
+		try {
+			inside = readdirSync(root, { withFileTypes: true }).some(
+				(entry) => entry.isDirectory() && existsSync(join(root, entry.name, "__manifest__.py")),
+			)
+				? "modules-inside"
+				: null;
+		} catch {
+			inside = null;
+		}
+		adoptionScan.set(root, inside);
+		return inside;
+	};
+
+	/** Human wording for a signal, so a refusal explains itself. */
+	const adoptionReason = (signal: AdoptionSignal | null, root: string): string => {
+		switch (signal) {
+			case "odoo-tool-used":
+				return `an Odoo tool has already run against ${displayPath(root)} in this session`;
+			case "sdd-state":
+				return `${displayPath(join(root, ".sdd"))} holds plugin state, so this project is already under the plugin`;
+			case "module-here":
+				return `${displayPath(join(root, "__manifest__.py"))} exists, so this directory IS a module`;
+			case "modules-inside":
+				return `${displayPath(root)} contains module directories`;
+			default:
+				return `nothing in ${displayPath(root)} shows Odoo work`;
+		}
+	};
+
+	/**
 	 * Whether a call EDITS a file of the project.
 	 *
 	 * The host's own editors are the normal way a change lands on disk, and
@@ -3849,6 +4025,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		cfg: ReturnType<typeof effectiveConfig>,
 		active: ReturnType<typeof readActiveState>,
 		waived: boolean,
+		/** The signal that made this directory Odoo work; null for an instance mutation. */
+		signal: AdoptionSignal | null = null,
 	): string | undefined => {
 		if (!cfg.requireSpecForChanges || waived) return undefined;
 		const authorizedPhases = ["WRITE_CODE", "VERIFY", "FIX_LOOP", "APPLY_CONFIG"];
@@ -3866,7 +4044,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					? `the active spec ${active.specId} has no readable state.json`
 					: `the active spec ${active.specId} is in ${phase}`;
 		return (
-			`Change blocked by policy: ${where}, so nothing authorizes it. Three ways out: ` +
+			`Change blocked by policy: ${where}, so nothing authorizes it ` +
+			`(the policy applies here because ${adoptionReason(signal, cfg.projectRoot)}). Three ways out: ` +
 			"(1) open a small spec for THIS change (sdd_phase operation=init spec_id=<NNN-slug>, then clarify mode=bug) " +
 			"and advance it to WRITE_CODE, (2) if the change is one of the active spec's acceptance criteria, continue " +
 			"that spec, or (3) ask the developer to let this session work without a spec (sdd_phase operation=waive " +
@@ -4061,10 +4240,22 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					// THIS session. Instance mutations and file edits are the same
 					// question asked of two different surfaces.
 					const waived = waiverCovers(cfg.projectRoot, sessionIdOf(execution)) !== null;
+					const mutating = isMutatingCall(name, args);
 					const editsSource = isSourceEdit(name, args, cfg);
-					if (isMutatingCall(name, args) || editsSource) {
-						const gate = changeGate(cfg, active, waived);
-						if (gate !== undefined) return denyWithAudit(name, args, gate, execution);
+					if (mutating || editsSource) {
+						// `specPolicyScope` decides WHERE the question is worth asking.
+						// An INSTANCE mutation always is: it is an odoo_* call, which is
+						// itself the evidence that this is Odoo work. A FILE edit is only
+						// a policy question in a directory that shows Odoo work — the gate
+						// used to ask it of every directory, so a profile-level install
+						// blocked writes in folders unrelated to Odoo. The waiver is
+						// checked first because it is the developer's own answer.
+						const signal = mutating ? null : adoptionSignalFor(cfg.projectRoot);
+						const inScope = mutating || cfg.specPolicyScope === "everywhere" || signal !== null;
+						if (inScope) {
+							const gate = changeGate(cfg, active, waived, signal);
+							if (gate !== undefined) return denyWithAudit(name, args, gate, execution);
+						}
 					}
 
 					// 4) Mutation policy (checkpoint + phase). A checkpoint covers
@@ -4146,6 +4337,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				try {
 					const execution = (eventArgs[0] ?? {}) as { name?: unknown; arguments?: unknown; callId?: unknown };
 					const cfg = effectiveConfig(execution);
+					// An Odoo tool that RAN is the strongest adoption signal there is:
+					// the directory is doing Odoo work by definition. Recorded before
+					// the audit early-return, because it is a policy input, not a log.
+					const ranName = String(execution.name ?? "");
+					if (ranName.startsWith("odoo_")) odooWorkRoots.add(cfg.projectRoot);
 					if (!cfg.auditAllTools) return;
 					const result = (eventArgs[1] ?? {}) as { isError?: unknown; error?: unknown };
 					const active = activeFor(cfg, execution).state;

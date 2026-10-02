@@ -3075,6 +3075,10 @@ console.log("== change policy (spec, waiver, escape hatches) ==");
 	};
 	const projChange = join(dir, "projChange");
 	mkdirSync(join(projChange, "mod"), { recursive: true });
+	// This root must look like Odoo work, or `specPolicyScope: "odoo"` (the
+	// default) leaves its file edits alone — which is the behaviour the block
+	// after this one pins. A workspace holding modules is the honest signal.
+	writeFileSync(join(projChange, "mod", "__manifest__.py"), "{'name': 'Some Module'}\n");
 	plugin.apply(fakeCtx, { projectRoot: projChange });
 	const guardC = capturedGuards[capturedGuards.length - 1];
 	const phaseC = registered.get("sdd_phase");
@@ -4672,6 +4676,202 @@ msgstr ""
 	check("omitting translations is accepted (not every job is translated)", noLang.ok === true);
 	const stateNo = JSON.parse(readFileSync(join(i18nProj, "specs", "002-notrans", "state.json"), "utf8"));
 	check("...and leaves the spec without languages", stateNo.translations === undefined, JSON.stringify(stateNo.translations));
+}
+
+// == where the spec policy is asked (specPolicyScope) =======================
+// The gate used to be asked of EVERY directory: all it ever checked was whether a
+// path fell inside the session's root. A plugin installed at profile level then
+// blocked writes in folders that have nothing to do with Odoo.
+console.log("== the spec policy is armed by Odoo work, not by any directory ==");
+{
+	const scopeRoot = join(dir, "scope");
+	mkdirSync(scopeRoot, { recursive: true });
+	const plain = join(scopeRoot, "plain");
+	mkdirSync(join(plain, "notes"), { recursive: true });
+	const adopted = join(scopeRoot, "adopted");
+	mkdirSync(join(adopted, "mod"), { recursive: true });
+	writeFileSync(join(adopted, "mod", "__manifest__.py"), "{'name': 'M'}\n");
+	const stateRoot = join(scopeRoot, "withstate");
+	mkdirSync(join(stateRoot, ".sdd"), { recursive: true });
+	// REAL plugin state, not just the audit log: `odoo_config` writes this file.
+	writeFileSync(join(stateRoot, ".sdd", "config.json"), "{}\n");
+	const everywhere = join(scopeRoot, "everywhere");
+	mkdirSync(everywhere, { recursive: true });
+
+	const scopeListeners = new Map();
+	const scopeTools = () => ({
+		tools: { register: (tool) => registered.set(tool.name, tool), guard: (g) => { capturedGuards.push(g); return () => {}; } },
+		on: (ev, fn) => {
+			if (!scopeListeners.has(ev)) scopeListeners.set(ev, []);
+			scopeListeners.get(ev).push(fn);
+			return () => {};
+		},
+		approval: { request: async () => "allowed-once" },
+	});
+	const guardFor = (root, cfg) => {
+		registered.clear();
+		capturedGuards.length = 0;
+		scopeListeners.clear();
+		plugin.apply(scopeTools(), { projectRoot: root, ...(cfg ?? {}) });
+		return capturedGuards[capturedGuards.length - 1];
+	};
+	const execScope = { agent: { id: "session-scope" }, callId: "c-scope" };
+	const writeIn = (root, rel) => ({ name: "write", arguments: { file_path: join(root, rel), content: "x\n" }, ...execScope });
+
+	// 1) A directory with nothing Odoo about it: writes are NOT this policy's business.
+	const gPlain = guardFor(plain);
+	check(
+		"a directory that shows no Odoo work is not gated",
+		gPlain(writeIn(plain, "notes/a.md")) === undefined,
+		String(gPlain(writeIn(plain, "notes/a.md"))).slice(0, 100),
+	);
+	check("...and a nested path in it is not either", gPlain(writeIn(plain, "notes/deep/b.md")) === undefined);
+
+	// 2) The three adoption signals each arm it.
+	const gManifest = guardFor(adopted);
+	check("a root holding module directories IS gated", typeof gManifest(writeIn(adopted, "mod/a.py")) === "string");
+	const gState = guardFor(stateRoot);
+	const dState = gState(writeIn(stateRoot, "x.py"));
+	check("a root with real plugin state in .sdd/ IS gated", typeof dState === "string");
+	check("...and the refusal names the signal that armed it", /\.sdd/.test(String(dState)), String(dState).slice(0, 130));
+	// THE BUG A TEST FOUND: the audit listener writes `.sdd/audit.jsonl` for EVERY
+	// tool call, so an empty `.sdd/` is not adoption — it is evidence that anything
+	// at all ran there. Counting it would adopt every directory on first contact,
+	// which is precisely the behaviour this scope exists to remove.
+	{
+		const auditOnly = join(scopeRoot, "auditonly");
+		mkdirSync(join(auditOnly, ".sdd"), { recursive: true });
+		writeFileSync(join(auditOnly, ".sdd", "audit.jsonl"), '{"tool":"bash"}\n');
+		const gAudit = guardFor(auditOnly);
+		check(
+			"a .sdd/ holding ONLY the audit log does not adopt the directory",
+			gAudit(writeIn(auditOnly, "a.md")) === undefined,
+			String(gAudit(writeIn(auditOnly, "a.md"))).slice(0, 120),
+		);
+	}
+
+	const gModuleHere = guardFor(join(adopted, "mod"));
+	check("a root that IS a module is gated", typeof gModuleHere(writeIn(join(adopted, "mod"), "a.py")) === "string");
+
+	// 3) An Odoo tool that RAN is the strongest signal: doing Odoo work defines it.
+	const gRan = guardFor(plain);
+	check("before any Odoo tool, the plain root is open", gRan(writeIn(plain, "notes/c.md")) === undefined);
+	// The SAME root, after an Odoo tool reported a result there. The listener is
+	// what records it, so the signal is exercised through its real path.
+	const resultFns = scopeListeners.get("tools/result") ?? [];
+	check("the plugin subscribes to tools/result for this root", resultFns.length >= 1);
+	for (const fn of resultFns) fn({ name: "odoo_connect", arguments: {}, ...execScope }, {});
+	const gAfter = capturedGuards[capturedGuards.length - 1];
+	check(
+		"after an Odoo tool runs there, the SAME root is gated",
+		typeof gAfter(writeIn(plain, "notes/d.md")) === "string",
+	);
+	// ...and a foreign tool does NOT arm it, or every directory would be armed by
+	// the first `bash` someone runs.
+	const foreign = join(scopeRoot, "foreign");
+	mkdirSync(foreign, { recursive: true });
+	const gForeign = guardFor(foreign);
+	check("a foreign root starts open", gForeign(writeIn(foreign, "a.md")) === undefined);
+	for (const fn of scopeListeners.get("tools/result") ?? []) fn({ name: "bash", arguments: {}, ...execScope }, {});
+	{
+		const verdict = (capturedGuards[capturedGuards.length - 1])(writeIn(foreign, "b.md"));
+		const contents = (() => { try { return readdirSync(join(foreign, ".sdd")).join(","); } catch { return "(sin .sdd)"; } })();
+		check("...and a NON-Odoo tool does not arm the policy", verdict === undefined, `contenido de .sdd: ${contents}`);
+	}
+
+	// 4) The old blanket behaviour is still available, and it is a choice.
+	const gEverywhere = guardFor(everywhere, { specPolicyScope: "everywhere" });
+	check(
+		'specPolicyScope: "everywhere" arms it in a directory with no Odoo signal',
+		typeof gEverywhere(writeIn(everywhere, "a.md")) === "string",
+	);
+
+	// 5) An INSTANCE mutation is always a policy question: the odoo_* call is
+	// itself the evidence, so scoping the file-edit gate must not open this one.
+	const gMut = guardFor(everywhere);
+	check(
+		"an instance mutation is gated even where file edits are not",
+		typeof gMut({ name: "odoo_execute", arguments: { model: "res.partner", method: "create" }, ...execScope }) === "string",
+	);
+
+	// 6) stop.md is an emergency stop, not a scope question.
+	writeFileSync(join(plain, ".sdd", "stop.md"), "halt\n", { recursive: true });
+	const gStop = guardFor(plain);
+	check("stop.md still halts a root with no Odoo signal", typeof gStop(writeIn(plain, "notes/e.md")) === "string");
+	rmSync(join(plain, ".sdd"), { recursive: true, force: true });
+
+	// 7) The invalid value is refused instead of silently stored.
+	const cfgTool = registered.get("odoo_config");
+	if (cfgTool !== undefined) {
+		registered.clear();
+		capturedGuards.length = 0;
+		plugin.apply(scopeTools(), { projectRoot: everywhere });
+		const bad = await registered.get("odoo_config").execute({ mode: "set", specPolicyScope: "sometimes" }, execScope);
+		check("specPolicyScope refuses an unknown value", bad.ok === false && /must be "odoo" or "everywhere"/.test(String(bad.detail)));
+	}
+}
+
+// == waive without a spec ===================================================
+// The documented way out of the policy was unreachable in the one situation it
+// exists for: a waiver is per project and per session, but `spec_id` was required,
+// so a directory with no specs had to create one to say it did not want one.
+console.log("== waive works when there is no spec to waive ==");
+{
+	const waiveRoot = join(dir, "waiveRoot");
+	mkdirSync(join(waiveRoot, "notes"), { recursive: true });
+	registered.clear();
+	capturedGuards.length = 0;
+	plugin.apply(fakeCtx, { projectRoot: waiveRoot });
+	const phaseW = registered.get("sdd_phase");
+	const guardW = capturedGuards[capturedGuards.length - 1];
+	const execW = { agent: { id: "session-waive" }, callId: "c-waive" };
+	const writeW = { name: "write", arguments: { file_path: join(waiveRoot, "notes", "a.md"), content: "x\n" }, ...execW };
+
+	// The root shows no Odoo work, so with the default scope it is not gated at
+	// all. The waiver is exercised on an ADOPTED root, which is where it matters.
+	writeFileSync(join(waiveRoot, "__manifest__.py"), "{'name': 'W'}\n");
+	const guardW2 = capturedGuards[capturedGuards.length - 1];
+	check("the waive root is gated to begin with", typeof guardW2(writeW) === "string");
+
+	// 1) No spec_id at all: the whole point.
+	approvalOutcome = "allowed-once";
+	const waived = await phaseW.execute({ operation: "waive", detail: "the developer said it is fine" }, execW);
+	check(
+		"waive is accepted with NO spec_id when the project has no spec",
+		waived.ok === true,
+		String(waived.detail).slice(0, 140),
+	);
+	check("...and it says the project has no spec", /NO spec/.test(String(waived.detail)), String(waived.detail).slice(0, 140));
+	check("...and the edit now passes", guardW2(writeW) === undefined, String(guardW2(writeW)).slice(0, 120));
+	check(
+		"...and nothing was written into the specs folder",
+		!existsSync(join(waiveRoot, "specs", "kb.jsonl")),
+	);
+
+	// 2) It still needs the developer's approval: a policy the model can exempt
+	// itself from is not a policy.
+	await phaseW.execute({ operation: "waive", revoke: true }, execW);
+	check("revoke puts the session back under the policy", typeof guardW2(writeW) === "string");
+	approvalOutcome = "rejected";
+	const refused = await phaseW.execute({ operation: "waive", detail: "let me" }, execW);
+	check("a REJECTED waiver does not unlock anything", refused.ok === false && typeof guardW2(writeW) === "string");
+	approvalOutcome = "allowed-once";
+
+	// 3) The other operations still demand the id: optional in the schema is not
+	// optional everywhere, and the compiler narrowing that is what keeps it honest.
+	for (const operation of ["status", "advance", "succeed", "fail", "diagnose", "mark_spec_loaded"]) {
+		const missing = await phaseW.execute({ operation }, execW);
+		check(
+			`operation=${operation} still refuses to run without a spec_id`,
+			missing.ok === false && /needs a spec_id/.test(String(missing.detail)),
+			String(missing.detail).slice(0, 100),
+		);
+	}
+
+	// 4) A waiver WITH a spec still works exactly as before.
+	await phaseW.execute({ operation: "init", spec_id: "001-w" }, execW);
+	const withSpec = await phaseW.execute({ operation: "waive", spec_id: "001-w", detail: "same thing" }, execW);
+	check("a waiver naming a spec is unaffected", withSpec.ok === true);
 }
 
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);

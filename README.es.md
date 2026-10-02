@@ -164,12 +164,12 @@ bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
 
 - **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
 - Acepta cualquier spec de pnpm, así que podés fijar una versión:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.11.3`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.12.0`.
 
 ¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.11.3, publicada con attestation de provenance
+npm install dsh-odoo-sdd        # 0.12.0, publicada con attestation de provenance
 ```
 
 > [!IMPORTANT]
@@ -585,6 +585,35 @@ camino de mutación tiene vuelta atrás y forma de probar qué pasó.
   guard ve las llamadas a las tools del host, así que un cambio hecho a través de
   `bash` (un heredoc, `sed -i`) no queda gateado — el pipeline es el camino, no
   una cárcel.
+
+  **Dónde se pregunta** (`specPolicyScope`, por defecto `"odoo"`). Exigir una spec
+  solo tiene sentido donde hay trabajo Odoo, y el guard comprobaba una sola cosa:
+  si la ruta caía dentro de la raíz de la sesión. Por eso un plugin instalado a
+  nivel de perfil bloqueaba escrituras en carpetas que no tienen nada que ver con
+  Odoo. Con `"odoo"`, una **edición de archivo** solo se gatea donde el directorio
+  muestra alguna señal de trabajo Odoo:
+
+  - `.sdd/` con estado real del plugin (config, specs, checkpoints, un waiver) —
+    **no** un `.sdd/` que solo tenga `audit.jsonl`, que el listener de auditoría
+    escribe en *toda* llamada y que por tanto significa "aquí corrió algo", no
+    "esto es un proyecto Odoo";
+  - `__manifest__.py` en la raíz — el directorio ES un módulo;
+  - `__manifest__.py` un nivel abajo — el directorio contiene módulos;
+  - una tool `odoo_*` ya usada contra esa raíz en esta sesión.
+
+  Una **mutación de instancia siempre se gatea**: es una llamada `odoo_*`, que es
+  la evidencia por sí misma. `stop.md` sigue deteniendo todo, adoptado o no,
+  porque es una parada de emergencia y no una cuestión de alcance. `"everywhere"`
+  restaura el comportamiento anterior, y el rechazo ahora **nombra la señal** que
+  armó la política en vez de dejarte adivinando.
+
+  **Tres salidas, y las tres funcionan.** (1) una spec pequeña para este cambio,
+  (2) continuar la spec que ya lo cubre, (3) pedirle al desarrollador el waiver —
+  `sdd_phase operation=waive detail="..."`. La tercera exigía un `spec_id`, lo que
+  la hacía inalcanzable justo en el caso para el que existe: un directorio sin
+  specs, donde había que crear una para decir que no querías una. El waiver es por
+  proyecto y por sesión, y `spec_id` ahora es opcional para él (y para
+  `waive revoke=true`) mientras que toda otra operación lo sigue exigiendo.
 - **Checkpoint antes de mutar.** Con `requireCheckpointBeforeMutation` activo
   (default), las mutaciones de `odoo_execute` se deniegan hasta que
   `sdd_checkpoint create` haya hecho snapshot de la spec activa — y se deniegan
@@ -774,6 +803,7 @@ presets para copiar y pegar donde los necesites.
         licensed: community     # community | enterprise (OCA se busca siempre)
         requireCheckpointBeforeMutation: true
         requireSpecForChanges: true     # todo cambio necesita una spec en una fase de escritura (o un waiver)
+        specPolicyScope: odoo           # odoo (solo donde se detecta trabajo Odoo) | everywhere
         securityReviewRequired: true
         securityInterviewRequired: true
         auditAllTools: true

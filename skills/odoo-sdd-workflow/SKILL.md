@@ -160,6 +160,25 @@ which one you took:
 4. **The policy is off** (`requireSpecForChanges: false`, set by the developer):
    only then change things with neither spec nor waiver.
 
+**Where the policy applies.** A file edit is gated only in a directory that shows
+Odoo work: a `.sdd/` holding real plugin state (config, specs, checkpoints, a
+waiver) — NOT one containing only `audit.jsonl`, which every tool call writes —, a
+`__manifest__.py` in the root or one level down, or an `odoo_*` tool already used
+against that root in this session. An INSTANCE mutation is always gated, because
+an `odoo_*` call is the evidence itself. So a session doing something else
+entirely — a notes folder, another pipeline — is not in the plugin's way, and its
+refusals do not appear there. `odoo_config mode=read` reports `specPolicyArmed`
+with the reason when you need to know which case you are in, and
+`specPolicyScope: everywhere` restores the blanket behaviour if the developer
+wants it.
+
+**A waiver needs no spec.** `sdd_phase operation=waive detail="…"` works in a
+directory with no specs at all — that is the case it exists for — and `spec_id` is
+optional for it and for `waive revoke=true`. Every OTHER operation still requires
+one. A waiver covers the SESSION that asked: a subagent is a different session and
+stays under the policy, so for work that spans subagents ask the developer for
+`requireSpecForChanges: false` in that project instead.
+
 Never route around a refusal — no writing files through `bash`, no flipping the
 policy yourself, no editing `.sdd/active.json`. The refusal names the three ways
 out; take one, or ask. Whatever the intake: a checkpoint before mutating the

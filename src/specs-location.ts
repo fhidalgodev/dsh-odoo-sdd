@@ -158,14 +158,20 @@ export function centralProjectDir(
  * @returns the absolute folder containing one subdirectory per spec.
  */
 export function specsBaseFor(layout: SpecsLayout, opts?: { create?: boolean }): string {
+	// A layout assembled by a caller can arrive without these fields — a field
+	// report of `layout.specsDir.trim is not a function` came from exactly that,
+	// and a crash here takes down every tool that touches specs. A missing value
+	// means "the default", which is what the schema would have produced.
+	const specsRoot = typeof layout.specsRoot === "string" ? layout.specsRoot : "";
 	if (layout.specsMode === "central") {
-		const root = layout.specsRoot.trim() === "" ? defaultSpecsRoot() : resolve(layout.specsRoot);
+		const root = specsRoot.trim() === "" ? defaultSpecsRoot() : resolve(specsRoot);
 		return centralProjectDir(root, layout.projectRoot, opts);
 	}
 	// An absolute specsDir must not be concatenated under the root: `join(root,
 	// '/abs')` yields `<root>/abs`, which is how specs once ended up in a bogus
 	// /tmp/home/... tree.
-	const dir = layout.specsDir.trim() === "" ? "specs" : layout.specsDir;
+	const rawDir = typeof layout.specsDir === "string" ? layout.specsDir : "";
+	const dir = rawDir.trim() === "" ? "specs" : rawDir;
 	return isAbsolute(dir) ? resolve(dir) : join(layout.projectRoot, dir);
 }
 
@@ -196,7 +202,7 @@ export function describeSpecsLocation(layout: SpecsLayout, specId?: string): str
 	const base = specsBaseFor(layout);
 	const mode =
 		layout.specsMode === "central"
-			? `central (${layout.specsRoot.trim() === "" ? `${defaultSpecsRoot()} [default]` : layout.specsRoot.trim()})`
+			? `central (${(typeof layout.specsRoot === "string" ? layout.specsRoot : "").trim() === "" ? `${defaultSpecsRoot()} [default]` : (layout.specsRoot as string).trim()})`
 			: "project";
 	return specId === undefined ? `${base} [${mode}]` : `${join(base, specId)} [${mode}]`;
 }

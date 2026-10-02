@@ -352,9 +352,13 @@ for (const doc of docs) {
 		/translations=\s*\[/.test(raw),
 	);
 	// Config keys the code declares must appear in the documented example.
-	for (const key of ["communityRepoPath", "enterpriseRepoPath", "odooApi", "requireInstanceChoice"]) {
+	for (const key of ["communityRepoPath", "enterpriseRepoPath", "odooApi", "requireInstanceChoice", "specPolicyScope"]) {
 		check(`${doc.file}: documents the ${key} config key`, raw.includes(key));
 	}
+	// The scope of the spec policy, and the fact that a waiver needs no spec: both
+	// are behaviour a reader has to know to get out of a refusal.
+	check(`${doc.file}: documents where the spec policy applies`, /specPolicyScope/.test(raw) && /odoo/i.test(raw));
+	check(`${doc.file}: says a waiver needs no spec_id`, /waive/.test(raw) && /spec_id/.test(raw));
 }
 
 console.log("ALL README CHECKS PASSED");

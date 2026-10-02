@@ -154,12 +154,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.11.3`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.12.0`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.11.3，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.12.0，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]
@@ -530,6 +530,28 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
   作为决策记入 KB。`requireSpecForChanges: false` 是人的关闭开关。
   **诚实的漏洞：** 守卫看到的是宿主工具调用，所以通过 `bash` 做的变更
   （heredoc、`sed -i`）不受门禁 —— 流水线是路径，不是监狱。
+
+  **在哪里询问**（`specPolicyScope`，默认 `"odoo"`）。要求 spec 只在有 Odoo 工作的
+  地方才有意义，而守卫过去只检查一件事：路径是否落在会话根目录内。因此按配置文件级别
+  安装的插件会封锁与 Odoo 毫无关系的文件夹里的写入。使用 `"odoo"` 时，**文件编辑**只在
+  目录显示 Odoo 工作迹象时才受门禁：
+
+  - `.sdd/` 中有真正的插件状态（config、specs、checkpoints、waiver）—— **不是**只含
+    `audit.jsonl` 的 `.sdd/`，审计监听器会为*每一次*工具调用写入它，因此它只意味着
+    "这里跑过东西"，而不是"这是 Odoo 项目"；
+  - 根目录有 `__manifest__.py` —— 该目录就是一个模块；
+  - 下一层有 `__manifest__.py` —— 该目录包含模块；
+  - 本会话中已对该根目录使用过 `odoo_*` 工具。
+
+  **实例变更始终受门禁**：它本身就是 `odoo_*` 调用，也就是证据本身。`stop.md` 仍然
+  停止一切，无论是否已采用，因为它是紧急停止而非范围问题。`"everywhere"` 恢复旧的
+  全面行为，而拒绝信息现在会**指出触发策略的信号**，不再让你猜测。
+
+  **三条出路，三条都可用。**（1）为本次变更开一个小的 spec，（2）继续已覆盖它的
+  spec，（3）请开发者豁免 —— `sdd_phase operation=waive detail="..."`。第三条过去要求
+  `spec_id`，这使它在唯一需要它的场景中不可用：没有 spec 的目录，你必须先创建一个
+  spec 才能说你不想要 spec。豁免是按项目和会话的，现在 `spec_id` 对它（以及
+  `waive revoke=true`）是可选的，而其他所有操作仍然要求它。
 - **变更前先 checkpoint。** 在 `requireCheckpointBeforeMutation` 开启时（默认），
   `odoo_execute` 的变更会被拒绝，直到 `sdd_checkpoint create` 已对活动 spec 做过
   快照 —— 并且在 `WRITE_CODE` 之前直接被拒绝。快照会跳过符号链接（`lstat`），
@@ -693,6 +715,7 @@ spec*：没有自己指针的会话，在它足够新（< 12 小时）且该 spe
         licensed: community     # community | enterprise（OCA 总会被搜索）
         requireCheckpointBeforeMutation: true
         requireSpecForChanges: true     # 每一项变更都需要处于写作阶段的 spec（或 waiver）
+        specPolicyScope: odoo           # odoo（仅在检测到 Odoo 工作时）| everywhere
         securityReviewRequired: true
         securityInterviewRequired: true
         auditAllTools: true

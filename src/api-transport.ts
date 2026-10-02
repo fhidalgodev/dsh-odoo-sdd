@@ -94,13 +94,15 @@ export function isJson2Method(method: string): boolean {
  *
  * @param method - the model method name.
  * @param args - the positional arguments the plugin would have sent to `execute_kw`.
- * @param kwargs - the keyword arguments the plugin would have sent to `execute_kw`.
+ * @param kwargs - the keyword arguments the plugin would have sent to `execute_kw`;
+ *   optional, because plenty of calls carry none and an exported function should
+ *   not make `undefined` a crash.
  * @returns the named body, or null to fall back to the classic transport.
  */
 export function planJson2Body(
 	method: string,
 	args: unknown[],
-	kwargs: Record<string, unknown>,
+	kwargs: Record<string, unknown> = {},
 ): Record<string, unknown> | null {
 	switch (method) {
 		case "search":

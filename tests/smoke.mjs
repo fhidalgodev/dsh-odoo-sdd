@@ -4088,6 +4088,8 @@ console.log("== JSON-2 transport (Odoo 19+) ==");
 	check("an unknown method is NOT translated", plan("some_custom_thing", []) === null);
 	check("a shape the table does not expect falls back instead of guessing", plan("write", [[7]]) === null && plan("create", ["not-a-dict"]) === null);
 	check("isJson2Method covers exactly the classified set", apiMod.isJson2Method("unlink") === true && apiMod.isJson2Method("action_post") === false);
+	// The function is exported: omitting `kwargs` must not be a crash.
+	check("an omitted kwargs argument is treated as empty, not as undefined", JSON.stringify(plan("read", [[1]])) === JSON.stringify({ ids: [1] }) && JSON.stringify(plan("create", [{ a: 1 }])) === JSON.stringify({ vals_list: { a: 1 } }));
 
 	// ---- the wire: URL, header, body, and what must NOT be there ---------
 	const realFetchJ2 = globalThis.fetch;

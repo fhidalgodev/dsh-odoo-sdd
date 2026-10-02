@@ -115,7 +115,7 @@ import {
 	readGrants,
 } from "./grants.js";
 import { scanModule } from "./security-scan.js";
-import { OdooClient } from "./odoo-client.js";
+import { OdooClient, JSON2_MIN_MAJOR } from "./odoo-client.js";
 import {
 	loadState,
 	saveState,
@@ -896,16 +896,25 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			// the version plus a live attempt, so a key that works over JSON-RPC but
 			// not over JSON-2 (or a route a proxy swallows) surfaces HERE, where the
 			// developer is looking, instead of in the middle of a batch.
-			let apiNote = "";
-			const transport = client.transport;
-			if (transport.api === "json2") {
+			// PROBE BEFORE REPORTING. The transport is decided on first use, so asking
+			// the client what it uses before exercising it only ever answers "not
+			// exercised yet" — and reporting that as "classic JSON-RPC" on an Odoo 19
+			// server would be a plain lie. The probe is one cheap read.
+			const wanted = asApiPreference(effectiveConfig(exec).odooApi);
+			const couldBeJson2 = wanted !== "jsonrpc" && (client.serverMajor === null || client.serverMajor >= JSON2_MIN_MAJOR);
+			let apiNote: string;
+			if (couldBeJson2) {
 				const probe = await client.executeKw<unknown>("res.users", "search_count", [[]], { limit: 1 });
-				apiNote = probe.ok
-					? ` Transport: JSON-2 (POST /json/2, Bearer API key) — verified with a live call.`
-					: ` Transport: JSON-2 was reported available but a live call FAILED (${probe.error.slice(0, 200)}); ` +
-						"the classic transport still works. Check that the API key is valid and not expired.";
+				const used = client.transport;
+				if (used.api === "json2") {
+					apiNote = ` Transport: ${used.api.toUpperCase()} — the modern API (POST /json/2, Bearer API key), verified with a live call.`;
+				} else if (wanted === "json2") {
+					apiNote = ` Transport: NONE — odooApi=json2 is pinned but the route is unavailable (${probe.ok ? "unexpected" : probe.error.slice(0, 200)}).`;
+				} else {
+					apiNote = ` Transport: classic JSON-RPC (execute_kw) — ${used.reason}.`;
+				}
 			} else {
-				apiNote = ` Transport: classic JSON-RPC (execute_kw) — ${transport.reason}.`;
+				apiNote = ` Transport: classic JSON-RPC (execute_kw) — ${client.transport.reason}.`;
 			}
 			const kindNote =
 				credentials?.secretKind === "api_key"

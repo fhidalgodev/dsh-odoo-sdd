@@ -4192,6 +4192,10 @@ console.log("== JSON-2 transport (Odoo 19+) ==");
 		await oldServer.version();
 		await oldServer.executeKw("res.partner", "search_read", [[]], {});
 		check("a server whose version predates /json/2 is never sent a JSON-2 request", oldTouched === 0 && oldServer.serverMajor === 18, `touched=${oldTouched}`);
+		// The reason is user-facing (odoo_connect prints it), so it must name the
+		// version instead of saying "not exercised yet", which is what a report that
+		// asks before probing would say on a server that has the route.
+		check("...and the reported reason names the version, not 'not exercised yet'", /18/.test(oldServer.transport.reason) && !/not exercised/.test(oldServer.transport.reason), oldServer.transport.reason);
 	} finally {
 		globalThis.fetch = realFetchJ2;
 	}

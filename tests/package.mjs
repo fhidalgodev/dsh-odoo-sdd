@@ -407,7 +407,20 @@ check("the publish simulation kept the roles and skills", staged.has("resources/
 	// and the reference it sends the model to — not one file alone.
 	const guide = registered.find((s) => s.name === "odoo-sdd-workflow");
 	const functionalGuide = registered.find((s) => s.name === "odoo-functional-sdd");
-	const bodyBytes = (skill) => Buffer.byteLength(String(skill?.content ?? ""), "utf8");
+	// A budget measures how much TEXT the model loads. `\r\n` is an artifact of the
+	// checkout, not content: Windows checks this repository out with CRLF, which
+	// adds one byte per line, and that pushed the technical guide over a budget the
+	// SAME document passed on Linux — the verdict depended on the platform. Line
+	// endings are normalized before measuring, so the number means the document.
+	const measured = (text) => Buffer.byteLength(text.replace(/\r\n/g, "\n"), "utf8");
+	const bodyBytes = (skill) => measured(String(skill?.content ?? ""));
+	// The regression for the bug above: the same document must measure the same on
+	// every platform, or CI goes green on Linux and red on Windows for one commit.
+	check(
+		"the byte budgets ignore the checkout's line endings",
+		measured("a\r\nb\r\n") === measured("a\nb\n") && measured("a\nb\n") === 4,
+		`crlf=${measured("a\r\nb\r\n")} lf=${measured("a\nb\n")}`,
+	);
 	const BUDGET = { guide: 16_000, total: 30_000, roles: 40_000 };
 	check(
 		`the technical guide body stays under ${BUDGET.guide} bytes (it was 32,495)`,
@@ -421,7 +434,7 @@ check("the publish simulation kept the roles and skills", staged.has("resources/
 	);
 	const rolesBytes = readdirSync(join(root, "resources", "roles"))
 		.filter((f) => f.endsWith(".md"))
-		.reduce((sum, f) => sum + Buffer.byteLength(readFileSync(join(root, "resources", "roles", f), "utf8"), "utf8"), 0);
+		.reduce((sum, f) => sum + measured(readFileSync(join(root, "resources", "roles", f), "utf8")), 0);
 	check(
 		`the role files together stay under ${BUDGET.roles} bytes (they absorbed the moved detail)`,
 		rolesBytes > 0 && rolesBytes < BUDGET.roles,

@@ -163,12 +163,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.11.1`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.11.2`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.11.1, published with a provenance attestation
+npm install dsh-odoo-sdd        # 0.11.2, published with a provenance attestation
 ```
 
 > [!IMPORTANT]
@@ -304,8 +304,12 @@ those two; everything else works with the key.
 On 19+ the plugin uses the modern JSON-2 API: no `uid` round-trip, named
 parameters validated by Odoo itself, read-replica routing for `@api.readonly`
 methods, and errors that arrive as an HTTP status with a structured body. It falls
-back to classic JSON-RPC automatically — if the route is missing, or the server
-predates it — and **never** re-sends a refused call over the other transport. Pin
+back to classic JSON-RPC automatically in three cases: the route is missing, the server
+predates it, or **the credential cannot be used there at all**. That last one matters:
+JSON-2 authenticates with `Authorization: Bearer` only, so a target configured with an
+account PASSWORD answers `401` on every call — and a `401` means the request never ran, so
+serving it over the other transport cannot double-apply anything. A call the server actually
+PROCESSED and refused (`403`, `422`, a domain error) is **never** re-sent. Pin
 the choice with `odooApi: auto | json2 | jsonrpc` in the panel or with
 `odoo_config`; `json2` reports a missing route instead of degrading quietly.
 
@@ -346,12 +350,33 @@ the `functional` spec mode described below.
 
 | Phase | What happens | Gate to leave it |
 |---|---|---|
-| **CLARIFY** | Intent recorded (`mode` create/bug, `licensed`) and the security interview answered: groups, ACLs, record rules, `sudo()` justification, public routes | `sdd_phase clarify` |
+| **CLARIFY** | Intent recorded (`mode` create/bug, `licensed`, and optionally `translations` — see below) and the security interview answered: groups, ACLs, record rules, `sudo()` justification, public routes | `sdd_phase clarify` |
 | **READ_SPEC** | `spec.md` is assimilated: business context, numbered acceptance criteria, constraints, target Odoo version. **Writing code here is forbidden.** | `APPROVED` + `mark_spec_loaded` |
 | **ARCHITECTURE** | Models, views (including extra view types and a search view where they matter), reports, security matrix and `test-plan.md` | `APPROVED` |
 | **WRITE_CODE** | The module is implemented with version-pinned Odoo patterns and its OCA documentation | static gates green |
 | **VERIFY** | Ascending pyramid: static → install/upgrade → RPC/data → UI (Playwright) only for critical flows | persisted `PASSED` verdict |
 | **FIX_LOOP** | Root-cause fixes. 3 consecutive failures force a consultant diagnosis; 5 iterations force `BLOCKED` | honest verdict |
+
+### Are the strings translated? (`translations`)
+
+CLARIFY asks it, next to the licensing question, and the answer is recorded **on the
+spec** — not as a global setting, exactly like the edition. One workspace can hold a
+client project in Venezuela and an internal fix that ships no languages at all.
+
+```
+sdd_phase operation=clarify spec_id=<id> mode=… licensed=… translations=["es_VE","es_PA"]
+```
+
+- **Omitting `translations` means the work is not translated.** That is a normal
+  answer, so unlike `mode` and `licensed` it is NOT a fail-closed gate.
+- The codes are **gettext** (`ll` or `ll_CC`: `es_VE`, `es_PA`, `pt_BR`, `fr`). A
+  malformed one is refused while it can still be corrected, instead of becoming a
+  file the server would never load.
+- Declaring languages makes `odoo_i18n` part of the plan and puts the matching
+  acceptance criterion in `test-plan.md`: *"`i18n/<lang>.po` exists and no exported
+  term is left with an empty `msgstr`"* — which `odoo_i18n operation=check` verifies.
+- `sdd_phase status` reports them, so "did we translate this?" is answerable without
+  opening `state.json`.
 
 In ARCHITECTURE the agent also **asks** about the things that are cheap to decide
 early and expensive to discover late: **extra view types** beyond form/tree
@@ -747,6 +772,9 @@ few copy-paste presets where you need them.
                                 # the ad-hoc RPC needs no list: any public method + confirm_destructive
         communityRepoUrl: https://github.com/odoo/odoo
         enterpriseRepoUrl: https://github.com/odoo/enterprise
+        communityRepoPath: ''   # local OS path; when set it OVERRIDES communityRepoUrl
+        enterpriseRepoPath: ''  # same for enterprise
+        odooApi: auto           # auto | json2 | jsonrpc (auto falls back on a 401)
         autonomy: supervised    # supervised | autonomous
         licensed: community     # community | enterprise (OCA is always searched)
         requireCheckpointBeforeMutation: true

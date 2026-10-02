@@ -154,12 +154,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.11.1`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.11.2`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.11.1，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.11.2，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]
@@ -280,8 +280,10 @@ API 密钥：Odoo 在通过 RPC 接受密码的任何地方都接受它（设置
 
 在 19+ 上插件使用现代的 JSON-2 API：没有 `uid` 往返，具名参数由 Odoo 自身校验，
 `@api.readonly` 方法路由到只读副本，错误以 HTTP 状态加结构化响应体返回。当路由缺失
-或服务器版本更旧时，会自动回退到经典 JSON-RPC，并且**绝不**把被拒绝的调用改用另一
-种传输重发。可用面板或 `odoo_config` 的 `odooApi: auto | json2 | jsonrpc` 固定选择；
+在三种情况下会自动回退到经典 JSON-RPC：路由缺失、服务器版本更旧，或者**该凭据在那里根本
+不可用**。最后一种很重要：JSON-2 只接受 `Authorization: Bearer`，因此用**密码**配置的目标每次调用都会
+返回 `401` —— 而 `401` 意味着请求从未执行，所以改用另一传输方式不会造成重复副作用。服务器**确实处理过**
+并拒绝的调用（`403`、`422`、领域错误）**绝不**重发。
 `json2` 会报告路由缺失，而不是静默降级。
 
 业务动作（`action_*`、`button_*`、`do_*`）始终使用 `execute_kw`：JSON-2 没有位置
@@ -318,12 +320,30 @@ agent 会从会话的 skill 目录里取出 `odoo-sdd-workflow` 并遵循协议�
 
 | 阶段 | 会发生什么 | 离开它的门禁 |
 |---|---|---|
-| **CLARIFY** | 记录意图（`mode` create/bug、`licensed`）并回答安全访谈：组、ACL、记录规则、`sudo()` 的理由、公共路由 | `sdd_phase clarify` |
+| **CLARIFY** | 记录意图（`mode` create/bug、`licensed`，以及可选的 `translations` —— 见下文）并回答安全访谈：组、ACL、记录规则、`sudo()` 的理由、公共路由 | `sdd_phase clarify` |
 | **READ_SPEC** | 吸收 `spec.md`：业务背景、编号的验收标准、约束、目标 Odoo 版本。**在此阶段写代码是被禁止的。** | `APPROVED` + `mark_spec_loaded` |
 | **ARCHITECTURE** | 模型、视图（在重要之处包含额外的视图类型和 search 视图）、报表、安全矩阵和 `test-plan.md` | `APPROVED` |
 | **WRITE_CODE** | 用按版本固定的 Odoo 模式实现模块及其 OCA 文档 | 静态门禁全绿 |
 | **VERIFY** | 递增金字塔：静态 → 安装/升级 → RPC/数据 → 仅对关键流程做 UI（Playwright） | 持久化的 `PASSED` 结论 |
 | **FIX_LOOP** | 根因修复。连续 3 次失败强制顾问诊断；5 次迭代强制 `BLOCKED` | 诚实的结论 |
+
+### 字符串要翻译吗？（`translations`）
+
+CLARIFY 会连同授权问题一起询问，答案记录**在 spec 上** —— 不是全局设置，与版本选择完全一致。
+同一个工作区可以既有委内瑞拉的客户项目，也有完全不交付语言的内部修复。
+
+```
+sdd_phase operation=clarify spec_id=<id> mode=… licensed=… translations=["es_VE","es_PA"]
+```
+
+- **省略 `translations` 意味着该工作不翻译。** 这是一个正常答案，因此与 `mode` 和 `licensed`
+  不同，它**不是** fail-closed 关卡。
+- 代码是 **gettext** 形式（`ll` 或 `ll_CC`：`es_VE`、`es_PA`、`pt_BR`、`fr`）。格式错误的代码会
+  在还能纠正时被拒绝，而不是变成一个服务器永远不会加载的文件。
+- 声明语言会让 `odoo_i18n` 进入计划，并在 `test-plan.md` 中加入对应的验收标准：
+  *"存在 `i18n/<lang>.po` 且没有导出的条目留有空 `msgstr`"* —— 由
+  `odoo_i18n operation=check` 验证。
+- `sdd_phase status` 会报告它们，因此"我们翻译了吗？"无需打开 `state.json` 即可回答。
 
 在 ARCHITECTURE 阶段，agent 还会**主动询问**那些"早决定很便宜、晚发现很昂贵"的
 事情：form/tree 之外的**额外视图类型**（包括用于描述模型如何被搜索的
@@ -666,6 +686,9 @@ spec*：没有自己指针的会话，在它足够新（< 12 小时）且该 spe
                                 # 即席 RPC 不需要列表：任意公共方法 + confirm_destructive
         communityRepoUrl: https://github.com/odoo/odoo
         enterpriseRepoUrl: https://github.com/odoo/enterprise
+        communityRepoPath: ''   # 本地 OS 路径；设置后会**覆盖** communityRepoUrl
+        enterpriseRepoPath: ''  # 企业版同理
+        odooApi: auto           # auto | json2 | jsonrpc（auto 在 401 时回退）
         autonomy: supervised    # supervised | autonomous
         licensed: community     # community | enterprise（OCA 总会被搜索）
         requireCheckpointBeforeMutation: true

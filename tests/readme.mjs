@@ -333,9 +333,34 @@ for (const doc of docs) {
 	check(`${doc.file}: the switcher links to every other language`, missing.length === 0, `missing: ${missing.join(", ")}`);
 }
 
+// ---- documentation that drifted, guarded -------------------------------------
+// Each of these was a REAL drift, not a hypothetical: the tool table was updated and
+// these were not, so the README described behaviour the code no longer had.
+for (const doc of docs) {
+	const raw = doc.raw;
+	// The 401 fallback: JSON-2 only takes an API key, so a PASSWORD target answers
+	// 401 and the client falls through. The README used to promise it "never"
+	// re-sends, which was true of the buggy version and false after the fix.
+	check(
+		`${doc.file}: the transport section explains the credential fallback`,
+		/401|Bearer/.test(raw) && /PASSWORD|password|contraseña|密码/.test(raw),
+	);
+	// The per-spec translations decision: the tool row alone documents HALF the
+	// feature, because the languages are chosen in CLARIFY and recorded on the spec.
+	check(
+		`${doc.file}: documents the per-spec translations decision`,
+		/translations=\s*\[/.test(raw),
+	);
+	// Config keys the code declares must appear in the documented example.
+	for (const key of ["communityRepoPath", "enterpriseRepoPath", "odooApi", "requireInstanceChoice"]) {
+		check(`${doc.file}: documents the ${key} config key`, raw.includes(key));
+	}
+}
+
+console.log("ALL README CHECKS PASSED");
+
 console.log(`\n${checks - failures}/${checks} checks passed.`);
 if (failures > 0) {
 	console.error(`${failures} CHECK(S) FAILED`);
 	process.exit(1);
 }
-console.log("ALL README CHECKS PASSED");

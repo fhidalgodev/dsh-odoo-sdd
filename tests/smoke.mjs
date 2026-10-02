@@ -4356,6 +4356,45 @@ console.log("== JSON-2 transport (Odoo 19+) ==");
 		await fallbackClient.executeKw("res.partner", "search_read", [[]], {});
 		check("...so the next call does not try the route again", routed === 1, `attempts=${routed}`);
 
+		// A 401 is NOT a refusal: nothing ran, so the classic transport is still a
+		// valid way to serve the call. Found by running against a real Odoo 19 whose
+		// credential is a PASSWORD — JSON-2 only takes an API key, so without this
+		// fallback EVERY model call failed on the default `auto`.
+		{
+			let authAttempts = 0;
+			let classicCalls = 0;
+			globalThis.fetch = async (url, init) => {
+				if (String(url).includes("/json/2/")) {
+					authAttempts += 1;
+					return new Response(
+						JSON.stringify({ name: "werkzeug.exceptions.Unauthorized", message: "Invalid apikey" }),
+						{ status: 401, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				const body = JSON.parse(init.body);
+				if (body?.params?.method === "authenticate") return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: 7 }), { status: 200 });
+				classicCalls += 1;
+				return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: [{ id: 1 }] }), { status: 200 });
+			};
+			const passwordClient = new clientMod.OdooClient(j2Creds, { api: "auto" });
+			const served = await passwordClient.executeKw("res.partner", "search_read", [[]], {});
+			check(
+				"a 401 makes the client fall back: a password cannot use JSON-2 but the classic transport still serves it",
+				served.ok === true && classicCalls === 1,
+				served.ok ? `classic=${classicCalls}` : String(served.error).slice(0, 90),
+			);
+			check("...and the fallback is remembered, not retried per call", passwordClient.transport.api === "jsonrpc" && authAttempts === 1, `auth=${authAttempts}`);
+			check("...and the reported reason names the cause instead of shrugging", /Invalid apikey/.test(passwordClient.transport.reason), passwordClient.transport.reason.slice(0, 90));
+			if (served.ok) {
+				await passwordClient.executeKw("res.partner", "search_read", [[]], {});
+				check("...so the next call goes straight to the classic transport", authAttempts === 1, `auth=${authAttempts}`);
+			}
+			// Pinned json2 still reports it: the operator asked for that transport.
+			globalThis.fetch = async () => new Response(JSON.stringify({ name: "werkzeug.exceptions.Unauthorized", message: "Invalid apikey" }), { status: 401, headers: { "Content-Type": "application/json" } });
+			const pinnedAuth = await new clientMod.OdooClient(j2Creds, { api: "json2" }).executeKw("res.partner", "search_read", [[]], {});
+			check("a pinned json2 reports the 401 instead of silently changing transport", pinnedAuth.ok === false, JSON.stringify(pinnedAuth).slice(0, 90));
+		}
+
 		// A REFUSAL must never be re-sent over the other transport.
 		let reSent = 0;
 		globalThis.fetch = async (url) => {
@@ -4478,6 +4517,17 @@ msgstr ""
 	check("...and it is reported as preserved", merged.preserved.includes("Hello"));
 	check("a new term is added and reported", merged.added.includes("New term"));
 	check("a term the module no longer has is kept as obsolete, not deleted", merged.obsoleted.includes("Old term") && merged.file.entries.find((e) => e.msgid === "Old term")?.obsolete === true);
+	// Odoo's export emits `Plural-Forms: ` with NOTHING after it; checking only for
+	// `undefined` left every generated file without its plural rule.
+	const emptyPlural = poMod.mergePo(null, poMod.parsePo(String.raw`msgid ""
+msgstr ""
+"Plural-Forms: \n"
+`), "es_VE");
+	check(
+		"an EMPTY Plural-Forms is completed, not left blank",
+		emptyPlural.file.header["Plural-Forms"] === "nplurals=2; plural=(n != 1);",
+		JSON.stringify(emptyPlural.file.header["Plural-Forms"]),
+	);
 	check(
 		"the header is completed for the file to be usable",
 		merged.file.header["Language"] === "es_VE" && merged.file.header["Content-Type"] === "text/plain; charset=UTF-8" && merged.file.header["Plural-Forms"] !== undefined && merged.file.header["X-Generator"] === "dsh-odoo-sdd",

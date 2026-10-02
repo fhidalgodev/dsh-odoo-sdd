@@ -118,6 +118,8 @@ export class OdooClient {
 	 * server that does not have the route costs ONE wasted request, once.
 	 */
 	#json2: "unknown" | "available" | "unavailable" = "unknown";
+	/** Why JSON-2 was dropped, so the report explains instead of shrugging. */
+	#json2Why: string | null = null;
 	/**
 	 * Major version of the server, once something asked for it (`version()` is
 	 * called by `odoo_connect`). Left null otherwise: this class never spends a
@@ -168,7 +170,7 @@ export class OdooClient {
 			return { api: "json2", preference: this.#api, reason: "the server answered POST /json/2" };
 		}
 		if (this.#json2 === "unavailable") {
-			return { api: "jsonrpc", preference: this.#api, reason: "no /json/2 route on this server" };
+			return { api: "jsonrpc", preference: this.#api, reason: this.#json2Why ?? "no /json/2 route on this server" };
 		}
 		return {
 			api: "jsonrpc",
@@ -401,12 +403,18 @@ export class OdooClient {
 					sanitized.slice(0, 4000);
 				const who = typeof named?.name === "string" ? `${named.name}: ` : "";
 				if (response.status === 401) {
+					// 401 is NOT a refusal: it means the request never ran. JSON-2 only
+					// accepts an API key, so a target configured with an account PASSWORD
+					// fails here on EVERY call — while the classic transport would work
+					// with that same credential. Falling back is therefore both safe (no
+					// handler executed, so no mutation to double-apply) and necessary.
 					return {
 						ok: false,
 						error:
 							`${who}${detail} — the JSON-2 API authenticates with an API key sent as ` +
-							"`Authorization: Bearer` (Settings > Users > API Keys). A password does not work here.",
+							"`Authorization: Bearer` (Settings > Users > API Keys), so a password cannot be used on it",
 						errorKind: "server",
+						fallback: true,
 					};
 				}
 				return { ok: false, error: `HTTP ${response.status}: ${who}${detail}`, errorKind: "server" };
@@ -457,6 +465,7 @@ export class OdooClient {
 				return { ok: false, error: json2.error, errorKind: json2.errorKind };
 			}
 			this.#json2 = "unavailable";
+			this.#json2Why = json2.error;
 			if (this.#api === "json2") {
 				// Pinned by the operator: a silent downgrade would hide exactly what
 				// they asked to be told.

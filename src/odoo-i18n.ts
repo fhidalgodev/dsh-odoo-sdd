@@ -47,6 +47,16 @@ import {
  */
 export const I18N_MODERN_MAJOR = 16;
 
+/**
+ * Timeout for the export calls, in milliseconds.
+ *
+ * `act_getfile` walks the registry, the views and the field definitions to collect
+ * the terms, and a measured run against a real Odoo 19 took ~27 s — right at the
+ * client's 30 s default, so a slightly loaded server aborted the call. A heavy
+ * operation gets its own budget instead of inheriting one sized for a query.
+ */
+const EXPORT_TIMEOUT_MS = 300_000;
+
 /** The narrow client surface this tool needs. */
 interface I18nClient {
 	executeKw<T>(
@@ -214,12 +224,20 @@ async function exportPo(
 	if (!created.ok) return { ok: false, reason: `could not create base.language.export: ${created.error}` };
 	// `act_getfile` writes the payload onto the record and returns an action; the
 	// file is read back from the record, never from the action.
-	const generated = await client.executeKw<unknown>("base.language.export", "act_getfile", [[created.value]]);
+	const generated = await client.executeKw<unknown>(
+		"base.language.export",
+		"act_getfile",
+		[[created.value]],
+		{},
+		EXPORT_TIMEOUT_MS,
+	);
 	if (!generated.ok) return { ok: false, reason: `export failed: ${generated.error}` };
 	const row = await client.executeKw<Array<{ data: string | false; name: string }>>(
 		"base.language.export",
 		"read",
 		[[created.value], ["data", "name"]],
+		{},
+		EXPORT_TIMEOUT_MS,
 	);
 	if (!row.ok) return { ok: false, reason: `could not read the exported file: ${row.error}` };
 	const record = row.value[0];

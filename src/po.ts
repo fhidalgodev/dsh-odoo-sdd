@@ -340,7 +340,10 @@ export function mergePo(existing: PoFile | null, exported: PoFile, lang: string)
 	for (const [key, make] of REQUIRED_HEADER) {
 		if (header[key] === undefined || header[key] === "") header[key] = make(lang);
 	}
-	if (header["Plural-Forms"] === undefined) {
+	// An EMPTY value counts as missing: Odoo's export emits `Plural-Forms: ` with
+	// nothing after it, and checking only for `undefined` left every generated file
+	// without the plural rule it needs to render a plural string correctly.
+	if (header["Plural-Forms"] === undefined || header["Plural-Forms"].trim() === "") {
 		const base = lang.split("_")[0]!.toLowerCase();
 		const forms = PLURAL_FORMS[base];
 		if (forms !== undefined) header["Plural-Forms"] = forms;

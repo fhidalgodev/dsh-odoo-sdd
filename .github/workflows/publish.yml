@@ -38,7 +38,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Node 24 on purpose: npm's OIDC trusted publishing needs npm >= 11.5.1,
       # which ships with the Node 24 line. The test matrix still covers 20/22.
@@ -50,7 +50,7 @@ jobs:
       # falls back to the OIDC trusted-publisher flow — even though
       # `--provenance` already signs through OIDC.
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: ''

@@ -19,12 +19,15 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        node: [20, 22]
+        # 20 is EOL and receives no security patches, but the plugin still
+        # DECLARES node >=20 in engines: the floor you claim is the floor you
+        # must test, or the claim is unverified. 24 is what the publish job uses.
+        node: [20, 22, 24]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node ${{ matrix.node }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           # No npm cache: the plugin intentionally has no package-lock.json
@@ -65,10 +68,10 @@ jobs:
   host-contract:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: ''

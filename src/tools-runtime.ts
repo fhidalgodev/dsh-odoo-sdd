@@ -12,6 +12,7 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 import { existsSync, readFileSync, readdirSync, lstatSync } from "node:fs";
 import { basename, join } from "node:path";
 import { resolveModuleDir } from "./paths.js";
+import { coverageReport } from "./coverage.js";
 import type { RpcErrorKind } from "./odoo-client.js";
 
 /** Live dependencies provided by the registrant. */
@@ -572,6 +573,13 @@ export function registerRuntimeTools(
 			"module (or be base.* groups). Returns file:line findings (ERROR/WARN). NO server required.",
 		parameters: {
 			module_dir: { type: "string", required: true, description: "Absolute path to the module directory (must contain __manifest__.py)." },
+			spec_dir: {
+				type: "string",
+				description:
+					"Optional spec directory (specs/<id>): adds the requirement-coverage sub-check — REQ-<AREA>-NN annotations in " +
+					"code comments/docstrings are matched against the spec in BOTH directions (requirements without implementation " +
+					"and orphaned annotations), with must/shall at a 1.0 blocking floor and should at 0.8 reported.",
+			},
 		},
 		output: {
 			schema: {
@@ -590,7 +598,7 @@ export function registerRuntimeTools(
 				return [{ type: "text", text: v.detail }];
 			},
 		},
-		async execute(args: { module_dir: string }, exec?: unknown) {
+		async execute(args: { module_dir: string; spec_dir?: string }, exec?: unknown) {
 			// Absolute (POSIX or Windows) as given; relative against the project
 			// root OF THE CALLING SESSION, never against the process cwd.
 			const projectRoot = deps.projectRoot(exec);
@@ -868,11 +876,40 @@ export function registerRuntimeTools(
 				}
 			}
 
+			// ---- requirement coverage (optional, needs a spec dir) -----------
+			let coverageLines: string[] = [];
+			if (args.spec_dir !== undefined && args.spec_dir.trim() !== "") {
+				const specDir = resolveModuleDir(args.spec_dir, projectRoot);
+				if (!existsSync(join(specDir, "spec.md"))) {
+					findings.push({ severity: "WARN", file: basename(specDir), message: `spec_dir has no spec.md — requirement coverage was skipped.` });
+				} else {
+					const report = coverageReport(moduleDir, specDir);
+					for (const row of report.rows) {
+						if (row.status === "covered") continue;
+						const blocking = row.modality === "must" || row.modality === "shall";
+						findings.push({
+							severity: blocking ? "ERROR" : "WARN",
+							file: row.annotatedFiles[0] ?? "spec.md",
+							message: `${row.reqId} (${row.modality ?? "unspecified"}) is ${row.status}${blocking ? " — must/shall floor is 1.0" : ""}.`,
+						});
+					}
+					for (const orphan of report.orphans) {
+						findings.push({
+							severity: "ERROR",
+							file: "spec.md",
+							message: `ORPHANED annotation ${orphan}: the code references a requirement id the spec does not declare (typo, or the spec is stale).`,
+						});
+					}
+					coverageLines = ["", ...report.summary];
+				}
+			}
+
 			const errors = findings.filter((f) => f.severity === "ERROR").length;
 			const resolved = `Resolved module_dir: ${deps.display(moduleDir)} (project root: ${deps.display(projectRoot)})`;
 			const detail = (findings.length === 0
 				? `Module structure and security model OK (${newModels.length} new model(s), ACL present=${aclExists}).`
 				: `${errors} ERROR(s), ${findings.length - errors} WARNING(s) — ${newModels.length} new model(s). Review findings.`) +
+				coverageLines.join("\n") +
 				`\n${resolved}`;
 			return { valid: errors === 0, findings, detail, moduleDir, projectRoot };
 		},

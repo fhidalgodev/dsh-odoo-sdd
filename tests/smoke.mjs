@@ -1327,6 +1327,45 @@ writeFileSync(join(modValid, "security", "ir.model.access.csv"), "id,name\\n", {
 let v = await validateD.execute({ module_dir: modValid });
 check("odoo_validate accepts a valid module", v.valid === true);
 
+// --- odoo_validate + spec_dir: requirement coverage through the tool -------
+// The spec declares a shall requirement, the module annotates it in a comment
+// and the test plan passes AC1: covered, no orphans, so `valid` stays true.
+const covSpecDir = join(projD, "specs", "030-cov");
+mkdirSync(join(covSpecDir), { recursive: true });
+writeFileSync(
+	join(covSpecDir, "spec.md"),
+	"# Spec\n\n## Security\n\n- The module shall reject unauthenticated calls. (AC1)\n",
+	{ mode: 0o600 },
+);
+writeFileSync(
+	join(covSpecDir, "test-plan.md"),
+	"| AC | Scenario | Layer | Status |\n|---|---|---|---|\n| AC1 | rejects | rpc | pass |\n",
+	{ mode: 0o600 },
+);
+const modCov = join(dir, "mod_cov");
+mkdirSync(join(modCov, "models"), { recursive: true });
+writeFileSync(join(modCov, "__manifest__.py"), "{'name':'cov','depends':['base'],'data':[]}", { mode: 0o600 });
+writeFileSync(join(modCov, "models", "m.py"), "# REQ-SECURITY-01: enforced\n", { mode: 0o600 });
+const covOk = await validateD.execute({ module_dir: modCov, spec_dir: join("specs", "030-cov") });
+check(
+	"odoo_validate skips coverage findings when every declared requirement is covered",
+	covOk.valid === true && !covOk.findings.some((f) => /REQ-SECURITY-01/.test(f.message)),
+	covOk.detail,
+);
+// Now break BOTH directions: the requirement loses its annotation (mandatory
+// floor 1.0) and the code annotates an id the spec never declared (orphan).
+writeFileSync(join(modCov, "models", "m.py"), "# REQ-SECURITY-99: ghost\n", { mode: 0o600 });
+const covBad = await validateD.execute({ module_dir: modCov, spec_dir: join("specs", "030-cov") });
+check(
+	"odoo_validate blocks an uncovered must/shall requirement",
+	covBad.valid === false && covBad.findings.some((f) => f.severity === "ERROR" && /REQ-SECURITY-01/.test(f.message) && /test-only/.test(f.message)),
+	JSON.stringify(covBad.findings.filter((f) => /REQ-/.test(f.message))),
+);
+check(
+	"odoo_validate blocks an orphaned annotation",
+	covBad.valid === false && covBad.findings.some((f) => f.severity === "ERROR" && /ORPHANED annotation REQ-SECURITY-99/.test(f.message)),
+);
+
 const modBroken = join(dir, "mod_broken");
 mkdirSync(modBroken, { recursive: true });
 writeFileSync(join(modBroken, "__manifest__.py"), "{'data':['views/gone.xml']}", { mode: 0o600 });

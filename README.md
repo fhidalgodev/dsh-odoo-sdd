@@ -118,6 +118,21 @@ autonomous mode.
 
 - 🎯 **Spec before code, always.** `spec.md` carries numbered acceptance criteria;
   `DONE` is unreachable without a persisted `PASSED` verdict on disk.
+- 🧬 **Stable requirement identity.** Every requirement block gets a stable
+  `REQ-<AREA>-NN` id (section slug + ordinal) plus a fingerprint committed to
+  `req-baseline.json`. Rewording a requirement under an existing id is **DRIFT**:
+  the advance is refused until you either revert it or accept it explicitly
+  (`sdd_phase operation=baseline`), so a plan or a test never silently refers to
+  a requirement that no longer says what it said.
+- 🔗 **Bidirectional coverage.** Annotate code and tests with `# REQ-<AREA>-NN`
+  and `odoo_validate module_dir=… spec_dir=…` checks both directions —
+  requirements with no implementation, and orphaned annotations whose id the
+  spec no longer declares. Floors: `must`/`shall` block at 1.0, `should` is
+  reported at 0.8, `may` is informational. Each requirement lands on the ladder
+  `covered / untested / test-only / unimplemented`.
+- 🔍 **Ambiguity lint (advisory).** `mark_spec_loaded` reports unquantified
+  adjectives, vague quantifiers, `TBD` placeholders, passives with no actor and
+  and/or compounds, each with a concrete rewrite — advice, never a gate.
 - 🔁 **A real feedback loop.** `odoo_module install` returns the server's own
   output or traceback; `odoo_errors` reads `ir.logging`; failures become a
   persisted FAILED verdict instead of a hopeful summary.
@@ -163,12 +178,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.12.1`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.13.0`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.12.1, published with a provenance attestation
+npm install dsh-odoo-sdd        # 0.13.0, published with a provenance attestation
 ```
 
 > [!IMPORTANT]
@@ -910,6 +925,9 @@ settings section.
 | `src/odoo-client.ts` | JSON-RPC client: `common.version`, `authenticate`, `execute_kw`, `button_immediate_*`, `ir.logging`, `/web/session/authenticate` |
 | `src/tools-runtime.ts` | Odoo-facing tool bodies: `odoo_execute` (allowlist + pre-image capture), `odoo_validate`, `odoo_module`, `odoo_errors` |
 | `src/sdd-state.ts` | Phase machine, gates, append-only KB, verdicts, security content gate, `stop.md` |
+| `src/spec-reqs.ts` | Stable `REQ-<AREA>-NN` ids, per-requirement fingerprints, `req-baseline.json` and DRIFT detection |
+| `src/coverage.ts` | Bidirectional coverage between spec and module: code annotations vs declared requirements, orphan detection, modality floors, status ladder |
+| `src/ambiguity-lint.ts` | Advisory wording lint for `spec.md` (unquantified adjectives, placeholders, passives, compounds) |
 | `src/checkpoints.ts` | Checkpoint store: manifest, file snapshot/restore, data journal, purge budget |
 | `src/security-scan.ts` | Instance-free static security rules (`scanModule`) with `file:line` findings |
 | `src/audit.ts` | Sanitized append-only audit log (`.sdd/audit.jsonl`) and the `withAudit` wrapper |

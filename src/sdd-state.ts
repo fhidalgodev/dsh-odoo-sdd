@@ -1395,6 +1395,16 @@ export function initSpecDir(specDir: string, mode: PipelineMode | null = null): 
 		[
 			"spec.md",
 			"# Specification\n\n## Context\n\n<!-- Business context: what problem, who uses it. -->\n\n" +
+				"<!-- Precision by consumer — tune the wording to WHO reads this spec:\n" +
+				"     own engineer ........ moderate precision (shared context)\n" +
+				"     another team ........ high precision (no shared context)\n" +
+				"     implementing model .. very high: NO adjective without a number\n" +
+				"                         (\"fast\" -> p95 < 200ms), because a model cannot\n" +
+				"                         ask back mid-implementation\n" +
+				"     auditor ............ full traceability (source per requirement).\n" +
+				"     Every top-level list item under a section gets a stable REQ-<AREA>-NN id\n" +
+				"     (AREA = section slug); annotate code and tests with `# REQ-<AREA>-NN`\n" +
+				"     so odoo_validate can check coverage in both directions. -->\n\n" +
 				"## Acceptance Criteria\n\n- [ ] AC1: ...\n\n## Constraints\n\n<!-- Non-negotiables (version, security, performance). -->\n\n" +
 				"## Target Odoo Version\n\n- [ ] V: <V.0>\n",
 		],
@@ -1429,6 +1439,14 @@ export function initSpecDir(specDir: string, mode: PipelineMode | null = null): 
 		[
 			"spec.md",
 			"# Functional specification\n\n## Context\n\n<!-- Current situation and why a change is needed. -->\n\n" +
+				"<!-- Precision by consumer — tune the wording to WHO reads this spec:\n" +
+				"     own engineer ........ moderate precision (shared context)\n" +
+				"     another team ........ high precision (no shared context)\n" +
+				"     implementing model .. very high: NO adjective without a number\n" +
+				"                         (\"fast\" -> p95 < 200ms), because a model cannot\n" +
+				"                         ask back mid-implementation\n" +
+				"     auditor ............ full traceability (source per requirement,\n" +
+				"                         recorded under Sources and Decisions). -->\n\n" +
 				"## Sources and Decisions\n\n<!-- For every business fact: the SOURCE it came from (page, file,\n" +
 				"     document, human), the HYPOTHESES still open, and the CONFIRMED decisions with who\n" +
 				"     confirmed them. Never present a deduction as a confirmation. -->\n\n" +

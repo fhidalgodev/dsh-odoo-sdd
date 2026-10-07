@@ -144,6 +144,8 @@ import {
 	PHASES,
 	PIPELINE_MODES,
 } from "./sdd-state.js";
+import { driftGate, refreshBaseline, driftReport } from "./spec-reqs.js";
+import { lintSpecDir } from "./ambiguity-lint.js";
 import { join, resolve, dirname, isAbsolute, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -1986,12 +1988,13 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			"(record a failed verification; 3 consecutive failures force deep diagnosis), succeed " +
 			"(record a passed verification with honest verdict; refused unless every AC row in " +
 			"test-plan.md reads an explicit `pass`), rollback (restore the active checkpoint), diagnose " +
-			"(record the root-cause analysis the ladder demands). stop.md in the spec dir halts everything.",
+			"(record the root-cause analysis the ladder demands), baseline (accept the current spec.md wording as " +
+			"the new requirement baseline — the decision a DRIFT block asks for). stop.md in the spec dir halts everything.",
 		parameters: {
 			operation: {
 				type: "string",
 				required: true,
-				enum: ["init", "clarify", "status", "mark_spec_loaded", "advance", "fail", "succeed", "rollback", "diagnose", "waive"],
+				enum: ["init", "clarify", "status", "mark_spec_loaded", "advance", "fail", "succeed", "rollback", "diagnose", "baseline", "waive"],
 				description: "State-machine operation to perform.",
 			},
 			spec_id: {
@@ -2066,7 +2069,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 		},
 		async execute(args: {
-			operation: "init" | "clarify" | "status" | "mark_spec_loaded" | "advance" | "fail" | "succeed" | "rollback" | "diagnose" | "waive";
+			operation: "init" | "clarify" | "status" | "mark_spec_loaded" | "advance" | "fail" | "succeed" | "rollback" | "diagnose" | "baseline" | "waive";
 			spec_id?: string;
 			mode?: PipelineMode;
 			licensed?: "community" | "enterprise";
@@ -2384,10 +2387,19 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.operation === "mark_spec_loaded") {
 				state.specLoaded = true;
 				saveState(state);
+				// Ambiguity is advice, never a gate: the lint names the lines whose
+				// wording cannot be verified as written, so the spec can be tightened
+				// while the interview is still open.
+				const lint = lintSpecDir(specDir);
+				const lintBlock = lint.length === 0
+					? "Ambiguity lint: no findings."
+					: `Ambiguity lint (${lint.length} finding(s), WARN only — advisory, not a gate):\n` +
+						lint.slice(0, 10).map((f) => `  L${f.line} [${f.rule}] ${f.message}`).join("\n") +
+						(lint.length > 10 ? `\n  … ${lint.length - 10} more` : "");
 				return {
 					operation: "mark_spec_loaded" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
 					summary: summarize(state),
-					detail: "Spec marked as loaded. Advance with approval_marker='APPROVED' once the acceptance criteria are understood.",
+					detail: `Spec marked as loaded. Advance with approval_marker='APPROVED' once the acceptance criteria are understood.\n${lintBlock}`,
 				};
 			}
 			if (args.operation === "advance") {
@@ -2395,6 +2407,20 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					return {
 						operation: "advance" as string, phase: state.phase as string, ok: false, requireDiagnosis: false,
 						summary: summarize(state), detail: "next_phase is required for advance.",
+					};
+				}
+				// Requirement-identity gate: advancing must not smuggle a rewritten
+				// requirement under an id the plan/tests already reference. A missing
+				// baseline is created lazily here — the migration path for old specs.
+				const driftReason = driftGate(specDir);
+				if (driftReason !== null) {
+					return {
+						operation: "advance" as string, phase: state.phase as string, ok: false, requireDiagnosis: false,
+						summary: summarize(state),
+						detail:
+							`Phase ${state.phase} -> ${args.next_phase} blocked by the requirement baseline. ${driftReason} ` +
+							"To accept the new wording on purpose, run sdd_phase operation=baseline (it refreshes " +
+							"req-baseline.json and records the decision in the KB).",
 					};
 				}
 				// A GATED phase is gated on a HUMAN, not on a word the caller writes.
@@ -2474,6 +2500,23 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					detail: result.ok ? result.note : result.reason,
 				};
 			}
+			if (args.operation === "baseline") {
+				// The explicit decision a DRIFT block demands: accept what spec.md
+				// says NOW as the requirement identity going forward.
+				const before = driftReport(specDir);
+				const refreshed = refreshBaseline(specDir);
+				kbAppend(state, "decision", `Requirement baseline refreshed (${Object.keys(refreshed.entries).length} ids). ${note}`.trim());
+				saveState(state);
+				return {
+					operation: "baseline" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
+					summary: summarize(state),
+					detail:
+						`req-baseline.json refreshed: ${Object.keys(refreshed.entries).length} requirement id(s) recorded ` +
+						`(was drifting: ${before.drifted.length ? before.drifted.join(", ") : "none"}; ` +
+						`removed: ${before.removed.length ? before.removed.join(", ") : "none"}). ` +
+						"Update the tests/plan that referenced the old wording — the decision is in the KB.",
+				};
+			}
 			if (args.operation === "fail") {
 				recordFailedVerdict(state, note || "verification failed (no detail)");
 				const { requireDiagnosis, state: updated } = recordFailure(state, note);
@@ -2512,7 +2555,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			return {
 				operation: "succeed" as string, phase: outcome.state.phase as string, ok: true, requireDiagnosis: false,
 				summary: summarize(outcome.state),
-				detail: "PASSED verdict persisted to verify-verdict.txt. The pipeline may now advance to DONE.",
+				detail:
+					"PASSED verdict persisted to verify-verdict.txt. The pipeline may now advance to DONE.\n" +
+					"Requirement-coverage ladder (covered/untested/test-only/unimplemented per REQ id): run " +
+					"odoo_validate with the module_dir AND spec_dir of this spec to check BOTH directions " +
+					"(requirements without code annotations and orphaned annotations) before DONE.",
 			};
 		},
 	}));

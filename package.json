@@ -1,6 +1,6 @@
 {
   "name": "dsh-odoo-sdd",
-  "version": "0.12.1",
+  "version": "0.13.0",
   "description": "Spec-Driven Development pipeline for Odoo as a DeepSeek Harness plugin: connects to an existing Odoo instance (JSON-RPC), orchestrates the 5-phase SDD workflow, and enforces fail-closed safety gates.",
   "author": "Franyer Hidalgo <fhidalgo.dev@gmail.com> (https://github.com/fhidalgodev)",
   "license": "MIT",
@@ -58,11 +58,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepare": "node scripts/prepare.mjs",
     "prepack": "node scripts/prepare.mjs --force",
-    "test": "node tests/smoke.mjs && node tests/client.mjs && node tests/readme.mjs && node tests/functional.mjs && node tests/import.mjs",
+    "test": "node tests/smoke.mjs && node tests/spec-reqs.mjs && node tests/client.mjs && node tests/readme.mjs && node tests/functional.mjs && node tests/import.mjs",
     "host:deps": "npm install --no-save --no-audit --no-fund @deepseek-ai/dsh@^0.1.2-rc.1",
     "test:package": "node tests/package.mjs",
     "test:client": "node tests/client.mjs",
     "test:readme": "node tests/readme.mjs",
+    "test:spec-reqs": "node tests/spec-reqs.mjs",
     "test:functional": "node tests/functional.mjs",
     "test:import": "node tests/import.mjs"
   },

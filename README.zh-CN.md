@@ -154,12 +154,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.13.0`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.14.0`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.13.0，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.14.0，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]
@@ -445,7 +445,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 
 ---
 
-## 🧰 16 个工具
+## 🧰 17 个工具
 
 | 工具 | 用途 |
 |---|---|
@@ -460,6 +460,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | `sdd_checkpoint` | 回滚面：`create`（对工作区做快照，成为活动 checkpoint）、`list`、`restore`（恢复文件，并在 `restore_data=true` 和 `confirm_destructive=true` 时恢复已记录的数据变更：撤销会在该变更用过的公司上下文中运行，把读取形态转换成写入值，标记每个操作以免重试时重复补偿它，拒绝来自其他目标的日志，并报告每一个它无法恢复的字段；它**总是报告** checkpoint 之后创建的文件，且只有 `remove_created=true` 才会删除它们）、`drop`、`journal`。 |
 | `odoo_docs` | 模块文档，可**独立使用**（不需要 spec、阶段、checkpoint 或实例），因此一个已有模块也能直接被文档化：`check`（把 OCA 片段映射到 Diátaxis、版本方案、changelog、`index.html`、docstring、xpath 注释、OWL 指令 → 带 `file:line` 的 ERROR/WARN）、`plan`、`scaffold`（只创建、绝不覆盖的骨架）和 `report`（持久化 `docs-report.md`；只有当不存在仍是骨架的片段时才是 APPROVED）。对已发布模块的任何改动都必须写 changelog 条目。 |
 | `odoo_security_scan` | 本地静态安全审查（不需要实例）：拼接式原生 SQL、`eval`/`exec`/`pickle`、硬编码密钥、没有理由的 `sudo()`、`auth="none"`、被关闭的 CSRF、QWeb `t-raw`。发现项带有 `file:line` + 修复提示；任何 ERROR 都会阻止 `DONE`。 |
+| `odoo_tests` | 管道的测试一侧，可**独立使用**（不需要 spec、阶段、checkpoint 或实例）：`check` 扫描 Python 测试中安装日志看不到的问题 —— `tests/__init__.py` 从未导入的 `tests/*.py`（Odoo 只加载被导入的模块，因此该测试从不运行）、不是 Odoo 测试用例的类、没有任何断言或断言恒真的 `test_*`、被吞掉的异常、`time.sleep`、显式 skip、测试内的 `cr.commit()`（破坏每个测试的回滚）、17+ 上的 `SavepointCase`、没有 `start_tour` 的 `HttpCase`，并以断言密度作为参考指标。`plan` 把 spec 的每个验收标准映射到提到它的测试（按 AC id 或按其需求的 `REQ-<AREA>-NN`），并列出没有任何测试的标准。`scaffold` 为每个未覆盖的标准写一个 **RED stub**（函数体抛出 `NotImplementedError`，绝不是空洞的通过），只创建且幂等，并追加 import 让文件真正被加载。 |
 | `sdd_handoff` | 在运行收尾时写入 `specs/<id>/handoff.md`（最终阶段、结论、决策、blockers、checkpoint、**完整的**按 spec 的数据日志、生效配置、下一步）。 |
 | `odoo_config` | 读取或更新持久化配置，并回答**"我现在在哪个项目里？"**：解析出的根目录、它的来源（会话 cwd / 已配置 / 进程 cwd）、specs 基础目录、生效的 spec 目录和正在使用的配置文件。 |
 | `odoo_i18n` | 使用 **Odoo 自身的模型** 处理翻译：`base.language.export` 提供可翻译术语，`base.language.install` 激活语言。`export` 写入 `<模块>/i18n/<lang>.po`（缺失时创建 `i18n/` 目录）并与已有文件**合并** —— 已写好的译文绝不会被导出的内容替换，新术语会被追加，模块已删除的术语保留为 `#~` 而不是删除。`status` 报告每种语言的覆盖率，`check` 在仍有条目缺少文本时失败。它不翻译：导出给出消息 ID，文本由人来写。感知版本（Odoo 16 是分界，也正是移除 `ir.translation` 的版本）。 |
@@ -805,7 +806,7 @@ JS ModuleLoader bundle，它贡献 **Odoo SDD** 设置区块。
 
 | 文件 | 作用 |
 |---|---|
-| `src/index.ts` | 插件入口：注册 16 个工具、解析配置和策略守卫 |
+| `src/index.ts` | 插件入口：注册 17 个工具、解析配置和策略守卫 |
 | `src/types.ts` | 公开的 payload 类型（绝不包含密钥材料） |
 | `src/credentials.ts` | 凭据级联、`.env` 加载/校验、权限验证、`redact()`、fail-closed |
 | `src/odoo-client.ts` | JSON-RPC 客户端：`common.version`、`authenticate`、`execute_kw`、`button_immediate_*`、`ir.logging`、`/web/session/authenticate` |

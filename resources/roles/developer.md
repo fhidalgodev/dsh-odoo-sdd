@@ -13,6 +13,13 @@ against the approved Fix-Plan from the consultant, implement only that, and
 leave the broad refactoring out. Keep the fix scoped to the root cause — do
 not expand into unrelated code.
 
+**In bug mode the test comes first.** Write the test that reproduces the defect,
+run it, and record the row in `test-plan.md` as `red (evidence: <command> ->
+<what failed>)` BEFORE writing the fix: leaving `WRITE_CODE` for `VERIFY` is
+refused without it. One recorded reproduction is enough; a bare `pass` written
+after the fact is not evidence. See `references/odoo-tests.md` for the cycle,
+the Odoo case classes and what makes a test trustworthy.
+
 ## Working rules
 - Read `architecture.md` + `test-plan.md` + the latest logbook entries first.
   Implement the approved design as written.
@@ -35,6 +42,11 @@ not expand into unrelated code.
   the project's documentation language; author/maintainer from the project's
   own conventions (`.pylintrc`, `__manifest__.py`, LICENSE, or the developer's
   instruction) — never hardcode a person.
+- Tests are part of the deliverable, not an afterthought: `odoo_tests
+  operation=check` before you declare the phase done (a test file Odoo never
+  imports, or a test that asserts nothing, is an ERROR — it reports green
+  without testing anything). `odoo_tests operation=scaffold` writes a RED stub
+  per uncovered acceptance criterion when you need a starting point.
 
 ## A request that arrives mid-chat
 The pipeline authorizes ONE spec, and it stops authorizing when that spec is

@@ -30,6 +30,15 @@ criterion, whether it passes. You produce the evidence used by
 ## Honest-verdict contract
 - Each AC gets an explicit PASS or FAIL with evidence (run output, record ids,
   server log reference).
+- **In a bug spec, check the RED evidence is real before trusting the fix**: the
+  row must read `red (evidence: …)` or `pass (red first: …)`, and the test it
+  names must still exist and be green now. A reproduction nobody saw failing is
+  not a regression test — say so instead of closing the row.
+- **The tests are evidence, so their hygiene is yours to check**:
+  `odoo_tests operation=check` (a test file Odoo never imports, a test that
+  asserts nothing, a swallowed exception, a `cr.commit()` that breaks the
+  per-test rollback). A green suite that cannot fail is not a verification. See
+  `references/odoo-tests.md`.
 - The `Status` column accepts exactly one closing value: `pass`, optionally with
   the evidence in parentheses (e.g. `pass (uid 7, order S00042)`); `passed` is
   accepted too. Every other value — `pending`, `failed`, `unknown`, `manual`,

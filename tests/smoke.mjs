@@ -1082,7 +1082,7 @@ check("odoo_setup registered", setup !== undefined);
 const expectedTools = [
 	"odoo_connect", "odoo_setup", "odoo_module", "odoo_execute", "odoo_validate",
 	"odoo_errors", "odoo_session", "odoo_config", "sdd_phase", "sdd_checkpoint",
-	"odoo_security_scan", "sdd_handoff", "odoo_docs", "odoo_functional", "odoo_import",
+	"odoo_security_scan", "sdd_handoff", "odoo_docs", "odoo_tests", "odoo_functional", "odoo_import",
 	"odoo_i18n",
 ];
 check(`registers exactly the ${expectedTools.length} documented tools`, registered.size === expectedTools.length);
@@ -3893,7 +3893,7 @@ console.log("== real cordis host: optional services ==");
 		// is awaited (or the fiber is otherwise activated).
 		await ctx.plugin({ name: plugin.name, inject: plugin.inject, apply: (c, cfg) => plugin.apply(c, cfg) }, { projectRoot: hostRoot });
 
-		check("the plugin mounts on a real cordis host", tools.size === 16, `${tools.size} tool(s)`);
+		check("the plugin mounts on a real cordis host", tools.size === 17, `${tools.size} tool(s)`);
 
 		// The premise: inside a plugin that did NOT inject the service, the
 		// property read throws (this is what silently disabled the session root).
@@ -4911,6 +4911,102 @@ console.log("== waive works when there is no spec to waive ==");
 	await phaseW.execute({ operation: "init", spec_id: "001-w" }, execW);
 	const withSpec = await phaseW.execute({ operation: "waive", spec_id: "001-w", detail: "same thing" }, execW);
 	check("a waiver naming a spec is unaffected", withSpec.ok === true);
+}
+
+// == RED-first evidence for mode=bug =======================================
+// A bug fix is only trustworthy if a test reproduced the defect first. The
+// gate is narrow (one transition of one mode) because that is the half of
+// "test-first" a machine can actually check.
+console.log("== RED-first evidence for bug specs ==");
+{
+	const redProj = join(dir, "redSpec");
+	mkdirSync(redProj, { recursive: true });
+	const redCtx = { tools: new Map(), guard: null };
+	plugin.apply(
+		{ tools: { register: (tool) => redCtx.tools.set(tool.name, tool), guard: (g) => { redCtx.guard = g; return () => {}; } }, on: () => () => {}, approval: { request: async () => "allowed-once" } },
+		{ projectRoot: redProj },
+	);
+	const phaseR = redCtx.tools.get("sdd_phase");
+	check("sdd_phase is mounted for the bug spec", phaseR !== undefined);
+
+	/** The ARCHITECTURE content gates need real decisions, not the template. */
+	const architecture = (what) =>
+		`# Architecture\n\n## Models\n${what}\n\n## Views\nForm + tree only (no extra view types).\n\n` +
+		"## Security\nGroups: base.group_user. Access via security/ir.model.access.csv with read/create/write/unlink. No record rules needed.\n\n" +
+		"## Manifest\nStandard module layout.\n\n" +
+		"## Documentation\nLanguage: en. Fragments: DESCRIPTION.md (Reference); no extra fragments. index.html: not needed.\n";
+	const walkToWriteCode = async (specId, specBody, what) => {
+		await phaseR.execute({ operation: "advance", spec_id: specId, next_phase: "READ_SPEC" });
+		writeFileSync(join(redProj, "specs", specId, "spec.md"), specBody, { mode: 0o600 });
+		await phaseR.execute({ operation: "mark_spec_loaded", spec_id: specId });
+		await phaseR.execute({ operation: "advance", spec_id: specId, next_phase: "ARCHITECTURE", approval_marker: "APPROVED", approval_source: "human" });
+		writeFileSync(join(redProj, "specs", specId, "architecture.md"), architecture(what), { mode: 0o600 });
+		const toCode = await phaseR.execute({ operation: "advance", spec_id: specId, next_phase: "WRITE_CODE", approval_marker: "APPROVED", approval_source: "human" });
+		return toCode;
+	};
+
+	await phaseR.execute({ operation: "init", spec_id: "001-bug", mode: "bug" });
+	await phaseR.execute({ operation: "clarify", spec_id: "001-bug", mode: "bug", licensed: "community" });
+	// Walk to WRITE_CODE with the sections the gates require.
+	const bugToCode = await walkToWriteCode(
+		"001-bug",
+		"# Spec\n\n## Context\n\nThe invoice total is wrong when a discount exists.\n\n" +
+			"## Acceptance Criteria\n\n- [ ] AC1: The total applies the discount once.\n\n" +
+			"## Constraints\n\n- Odoo 17.\n\n## Target Odoo Version\n\n- [ ] V: 17.0\n",
+		"account.move inherits the discount computation.",
+	);
+	check("a bug spec reaches WRITE_CODE", bugToCode.ok === true, String(bugToCode.detail).slice(0, 160));
+
+	// The plan exists and passes, but nothing recorded that it ever failed.
+	writeFileSync(
+		join(redProj, "specs", "001-bug", "test-plan.md"),
+		"| AC | Scenario | Layer | Status |\n|---|---|---|---|\n| AC1 | discount applied once | server | pass (unit test) |\n",
+		{ mode: 0o600 },
+	);
+	const blockedRed = await phaseR.execute({ operation: "advance", spec_id: "001-bug", next_phase: "VERIFY" });
+	check(
+		"WRITE_CODE -> VERIFY is refused without RED evidence",
+		blockedRed.ok === false && /RED evidence/.test(blockedRed.detail) && /never failed proves nothing/.test(blockedRed.detail),
+		String(blockedRed.detail).slice(0, 160),
+	);
+	// The reproduction is recorded as the row that failed first.
+	writeFileSync(
+		join(redProj, "specs", "001-bug", "test-plan.md"),
+		"| AC | Scenario | Layer | Status |\n|---|---|---|---|\n| AC1 | discount applied once | server | red (test_total_discount -> AssertionError: 90 != 100) |\n",
+		{ mode: 0o600 },
+	);
+	const statusRed = await phaseR.execute({ operation: "status", spec_id: "001-bug" });
+	check("status reports the RED evidence", /RED evidence: recorded/.test(String(statusRed.detail)), String(statusRed.detail).slice(0, 160));
+	const advancedRed = await phaseR.execute({ operation: "advance", spec_id: "001-bug", next_phase: "VERIFY" });
+	check("...and the transition is allowed with it", advancedRed.ok === true, String(advancedRed.detail).slice(0, 160));
+	// A red row still cannot close a criterion: only the fix turning it green does.
+	const premature = await phaseR.execute({ operation: "succeed", spec_id: "001-bug", detail: "looks fine" });
+	check("a `red` row cannot produce a PASSED verdict", premature.ok === false && /red/.test(String(premature.detail)));
+	// The green-with-evidence form also counts (the row records it failed first).
+	writeFileSync(
+		join(redProj, "specs", "001-bug", "test-plan.md"),
+		"| AC | Scenario | Layer | Status |\n|---|---|---|---|\n| AC1 | discount applied once | server | pass (red first: 90 != 100) |\n",
+		{ mode: 0o600 },
+	);
+	const greenEvidence = await phaseR.execute({ operation: "status", spec_id: "001-bug" });
+	check("`pass (red first: …)` counts as RED evidence", /RED evidence: recorded/.test(String(greenEvidence.detail)));
+
+	// mode=create is untouched: no defect, no reproduction to demand.
+	await phaseR.execute({ operation: "init", spec_id: "002-create", mode: "create" });
+	await phaseR.execute({ operation: "clarify", spec_id: "002-create", mode: "create", licensed: "community" });
+	const createToCode = await walkToWriteCode(
+		"002-create",
+		"# Spec\n\n## Context\n\nA new report.\n\n## Acceptance Criteria\n\n- [ ] AC1: It prints.\n\n## Constraints\n\n- Odoo 17.\n\n## Target Odoo Version\n\n- [ ] V: 17.0\n",
+		"report.abstract model plus a QWeb template.",
+	);
+	check("a create spec reaches WRITE_CODE", createToCode.ok === true, String(createToCode.detail).slice(0, 160));
+	writeFileSync(
+		join(redProj, "specs", "002-create", "test-plan.md"),
+		"| AC | Scenario | Layer | Status |\n|---|---|---|---|\n| AC1 | prints | server | pass |\n",
+		{ mode: 0o600 },
+	);
+	const createAdvance = await phaseR.execute({ operation: "advance", spec_id: "002-create", next_phase: "VERIFY" });
+	check("mode=create is not asked for RED evidence", createAdvance.ok === true, String(createAdvance.detail).slice(0, 160));
 }
 
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);

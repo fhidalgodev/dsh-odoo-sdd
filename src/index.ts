@@ -74,6 +74,7 @@ import { withAudit } from "./audit.js";
 import { registerRuntimeTools } from "./tools-runtime.js";
 import { isReadMethod, isCallableMethodName } from "./method-classification.js";
 import { registerDocsTool } from "./docs-tool.js";
+import { registerTestsTool } from "./tests-tool.js";
 import { registerI18nTools } from "./odoo-i18n.js";
 import { isLanguageCode } from "./po.js";
 import { registerFunctionalTool, activeFunctionalRun, functionalDir, readPlan, readRun, countOps } from "./functional.js";
@@ -138,6 +139,7 @@ import {
 	isPipelineMode,
 	verdictStaleness,
 	declaredAcIds,
+	redEvidenceGaps,
 	GATED_PHASES,
 	type Phase,
 	type PipelineMode,
@@ -2351,6 +2353,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			}
 			if (args.operation === "status") {
 				const kb = kbRead(specDir);
+				// A bug spec's RED gate is invisible until it blocks: showing the state
+				// here makes the requirement discoverable while the failing test can
+				// still be written.
+				const redGapsForStatus = state.mode === "bug" ? redEvidenceGaps(specDir) : [];
+				const redLine = redGapsForStatus.length === 0 ? "recorded (the reproduction failed first)." : `NOT recorded — ${redGapsForStatus[0]}`;
 				const resolved = activeFor(cfgPhase, exec);
 				const active = resolved.state;
 				const waiver = readWaiver(projectRoot);
@@ -2375,6 +2382,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						(state.phase === "DONE"
 							? "\nThis spec is DONE: a new request needs a NEW spec (mode=bug for a small change) or a waiver."
 							: "") +
+						// A bug spec's gate is invisible until it blocks: showing the RED
+						// state here makes the requirement discoverable while there is
+						// still time to write the failing test.
+						(state.mode === "bug" ? `\nRED evidence: ${redLine}` : "") +
 						(waiver === null
 							? ""
 							: `\nWaiver: granted ${waiver.at} for session ${waiver.sessionId}` +
@@ -4444,6 +4455,18 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	registerI18nTools(ctx, {
 		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
 		client: (exec) => clientForExec(exec),
+	});
+
+	registerTestsTool(ctx, {
+		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
+		specDir: (specId, exec) => {
+			const cfg = effectiveConfig(exec);
+			return specDirOf(cfg.projectRoot, cfg.specsDir, specId, {
+				specsMode: cfg.specsMode,
+				specsRoot: cfg.specsRoot,
+			});
+		},
+		display: (v) => displayPath(v),
 	});
 
 	registerDocsTool(ctx, {

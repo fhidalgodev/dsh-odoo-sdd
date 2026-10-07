@@ -120,6 +120,17 @@ console.log("== coverage: both directions, modality floors ==");
 	);
 	const breached = cov.coverageReport(moduleDir, specDir);
 	check("uncovered must/shall breaches the floor", breached.ok === false && breached.mandatoryRatio < 1, JSON.stringify(breached.summary));
+	// An annotation written ONLY in tests/ is not "missing implementation": the
+	// behaviour is exercised, so the ladder reports test-only — and says why.
+	mkdirSync(join(moduleDir, "tests"), { recursive: true });
+	writeFileSync(join(moduleDir, "models", "thing.py"), "\n");
+	writeFileSync(join(moduleDir, "tests", "test_thing.py"), "# REQ-SECURITY-01 exercised here\n");
+	const testOnly = cov.coverageReport(moduleDir, specDir);
+	const byId2 = Object.fromEntries(testOnly.rows.map((r) => [r.reqId, r]));
+	check("annotation only in tests/ -> test-only", byId2["REQ-SECURITY-01"]?.status === "test-only", JSON.stringify(byId2["REQ-SECURITY-01"]));
+	check("the summary explains the test-only annotation", testOnly.summary.some((l) => /ONLY in tests\//.test(l)), JSON.stringify(testOnly.summary));
+	check("a test annotation is not an orphan", !testOnly.orphans.includes("REQ-SECURITY-01"));
+
 	// Orphan direction: annotation for an id the spec never declared.
 	writeFileSync(join(moduleDir, "models", "thing.py"), "# REQ-SECURITY-99: ghost\n");
 	const ghost = cov.coverageReport(moduleDir, specDir);

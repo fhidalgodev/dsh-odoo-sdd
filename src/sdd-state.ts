@@ -546,6 +546,16 @@ export function transition(
 				state,
 			};
 		}
+		// RED-first evidence: a bug fix is verified against the test that
+		// reproduced the defect, and "it failed before the fix" is only a fact if
+		// it was recorded while it was failing. Narrow by design: `create` has no
+		// defect to reproduce and `functional` never reaches WRITE_CODE.
+		if (next === "VERIFY" && state.phase === "WRITE_CODE" && state.mode === "bug") {
+			const redGaps = redEvidenceGaps(state.specDir);
+			if (redGaps.length > 0) {
+				return { ok: false, reason: redGaps.join(" "), state };
+			}
+		}
 		// An "iteration" is ONE ATTEMPT AT VERIFYING, which is what
 		// `maxIterations` announces ("N verify/fix iterations"). Counting the entry
 		// into FIX_LOOP as a second attempt too spent two of the budget per cycle:
@@ -984,6 +994,98 @@ function normalizeAcStatus(cell: string): string {
 }
 
 /**
+ * One row of the `test-plan.md` table, with both the raw and the normalized
+ * AC/Status cells. Every reader of that table goes through here: two parsers of
+ * one format are two answers to "what does this plan say", and the gate that
+ * closes a criterion would then disagree with the one that opens it.
+ */
+interface PlanRow {
+	/** AC cell exactly as written (used in messages, so the author can find it). */
+	rawAc: string;
+	/** Normalized AC id (comparable with spec.md). */
+	ac: string;
+	/** Status cell exactly as written. */
+	rawStatus: string;
+	/** Normalized status token (`pass`, `red`, …). */
+	status: string;
+}
+
+/**
+ * Parse the acceptance-criterion rows of `test-plan.md`.
+ * @param specDir - spec directory holding test-plan.md.
+ * @returns the rows in file order (empty when the file is missing).
+ */
+function planRows(specDir: string): PlanRow[] {
+	const path = join(specDir, "test-plan.md");
+	if (!existsSync(path)) return [];
+	const out: PlanRow[] = [];
+	for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
+		if (!line.trim().startsWith("|")) continue;
+		// Drop the empty fields produced by the outer pipes.
+		const cols = line.split("|").slice(1, -1).map((c) => c.trim());
+		if (cols.length < 4) continue;
+		if (/^[-: ]+$/.test(cols[0])) continue; // markdown separator row
+		if (/^ac$/i.test(cols[0])) continue; // header row
+		out.push({ rawAc: cols[0], ac: normalizeAcId(cols[0]), rawStatus: cols[3], status: normalizeAcStatus(cols[3]) });
+	}
+	return out;
+}
+
+/**
+ * RED evidence: a Status cell that proves a test was written and seen to FAIL
+ * before the fix.
+ *
+ * Two accepted forms carry the same fact: the row still says `red (evidence: …)`,
+ * or it was already turned green and the parenthetical records that it failed
+ * first (`pass (red first: …)`, `pass (failed before the fix: …)`). Anything else
+ * is not evidence — a bare `pass` is indistinguishable from a test written after
+ * the fact.
+ */
+const RED_STATUS_PATTERN = /^red(\s*\(.*\))?$/;
+const GREEN_RED_EVIDENCE_PATTERN = /^(pass|passed)\s*\([^)]*\b(red|fail(ed|s)?\s+(before|first)|failed without)\b[^)]*\)$/i;
+
+/**
+ * Evidence gate for `mode=bug` before the fix is verified: a defect fix is only
+ * trustworthy if a test reproduced the defect FIRST.
+ *
+ * Deliberately narrow: it applies to the single transition `WRITE_CODE -> VERIFY`
+ * of a bug spec, because "test-first" as a blanket rule cannot be checked
+ * mechanically, while "the regression test was seen to fail" can — it is one
+ * recorded row.
+ * @param specDir - spec directory holding spec.md and test-plan.md.
+ * @returns the list of gaps (empty when the RED evidence is recorded).
+ */
+export function redEvidenceGaps(specDir: string): string[] {
+	if (!existsSync(join(specDir, "test-plan.md"))) {
+		return ["test-plan.md is missing: a bug fix needs the failing test that reproduces the defect."];
+	}
+	const rows = planRows(specDir);
+	if (rows.length === 0) {
+		return ["test-plan.md has no rows: a bug fix needs the failing test that reproduces the defect."];
+	}
+	const red = rows.filter(
+		(row) => RED_STATUS_PATTERN.test(row.status) || GREEN_RED_EVIDENCE_PATTERN.test(row.rawStatus.replace(/[`*]/g, "").trim()),
+	);
+	if (red.length === 0) {
+		return [
+			"no RED evidence: this is a bug fix, and a regression test that never failed proves nothing. Write the test " +
+				"that reproduces the defect FIRST, run it, and record its row as `red (evidence: <command> -> <what failed>)`; " +
+				"the same row becomes `pass (…)` once the fix is in. If the defect is fixed by configuration or data rather " +
+				"than code, run that work as mode=functional instead.",
+		];
+	}
+	const declared = new Set(declaredAcIds(specDir));
+	const foreign = red.filter((row) => declared.size > 0 && !declared.has(row.ac));
+	if (foreign.length > 0) {
+		return [
+			`RED evidence is recorded for ${foreign.map((row) => `"${row.rawAc}"`).join(", ")}, which spec.md does not ` +
+				"declare: the reproduction must belong to a criterion of THIS spec.",
+		];
+	}
+	return [];
+}
+
+/**
  * Evidence gate behind a PASSED verdict: every acceptance criterion in
  * `test-plan.md` must carry an explicit PASS. Returns one entry per gap so the
  * caller can name exactly what is untested.
@@ -995,41 +1097,29 @@ function normalizeAcStatus(cell: string): string {
  * @returns the list of unmet evidence requirements (empty when complete).
  */
 export function evidenceGaps(specDir: string): string[] {
-	const path = join(specDir, "test-plan.md");
-	if (!existsSync(path)) {
+	if (!existsSync(join(specDir, "test-plan.md"))) {
 		return ["test-plan.md is missing: a PASSED verdict needs per-AC evidence."];
 	}
-	const text = readFileSync(path, "utf8");
 	const gaps: string[] = [];
-	let rows = 0;
 	/** Every identifier the test plan claims to cover, in file order. */
 	const planned: string[] = [];
 	const seen = new Set<string>();
-	for (const line of text.split(/\r?\n/)) {
-		if (!line.trim().startsWith("|")) continue;
-		const cells = line.split("|");
-		// Drop the empty fields produced by the outer pipes.
-		const cols = cells.slice(1, cells.length - 1).map((c) => c.trim());
-		if (cols.length < 4) continue;
-		if (/^[-: ]+$/.test(cols[0])) continue; // markdown separator row
-		if (/^ac$/i.test(cols[0])) continue; // header row
-		rows += 1;
-		const id = normalizeAcId(cols[0]);
-		if (seen.has(id)) {
-			gaps.push(`AC "${cols[0]}" appears more than once in test-plan.md: two rows for one criterion is two stories, not two proofs.`);
+	const rows = planRows(specDir);
+	for (const row of rows) {
+		if (seen.has(row.ac)) {
+			gaps.push(`AC "${row.rawAc}" appears more than once in test-plan.md: two rows for one criterion is two stories, not two proofs.`);
 		}
-		seen.add(id);
-		planned.push(id);
-		const status = normalizeAcStatus(cols[3]);
-		if (!AC_PASS_PATTERN.test(status)) {
+		seen.add(row.ac);
+		planned.push(row.ac);
+		if (!AC_PASS_PATTERN.test(row.status)) {
 			gaps.push(
-				`AC "${cols[0]}" reads "${cols[3]}" in test-plan.md: only an explicit ` +
+				`AC "${row.rawAc}" reads "${row.rawStatus}" in test-plan.md: only an explicit ` +
 					'`pass` (optionally `pass (evidence…)`) closes an acceptance criterion — ' +
 					"record the real result, and a manual criterion needs the human confirmation first.",
 			);
 		}
 	}
-	if (rows === 0) {
+	if (rows.length === 0) {
 		gaps.push("test-plan.md has no AC rows: a PASSED verdict needs per-AC evidence.");
 	}
 
@@ -1389,7 +1479,11 @@ export function initSpecDir(specDir: string, mode: PipelineMode | null = null): 
 			"| AC1 | ... | static | pending |\n\n" +
 			"<!-- Status must become an explicit `pass` (optionally `pass (evidence: …)`) for\n" +
 			"     every row: `sdd_phase succeed` refuses `pending`, `failed`, `unknown`,\n" +
-			"     `manual` and anything it cannot read as a pass. -->\n",
+			"     `manual` and anything it cannot read as a pass. -->\n" +
+			"<!-- mode=bug: the FIX comes after the test. Record the reproduction that failed\n" +
+			"     FIRST as `red (evidence: <command> -> <what failed>)` — `advance\n" +
+			"     next_phase=VERIFY` refuses to leave WRITE_CODE without it. The same row\n" +
+			"     becomes `pass (evidence: …)` once the fix is in. -->\n",
 	];
 	const development: Array<[string, string]> = [
 		[

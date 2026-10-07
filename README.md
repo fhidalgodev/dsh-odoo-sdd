@@ -133,6 +133,16 @@ autonomous mode.
 - 🔍 **Ambiguity lint (advisory).** `mark_spec_loaded` reports unquantified
   adjectives, vague quantifiers, `TBD` placeholders, passives with no actor and
   and/or compounds, each with a concrete rewrite — advice, never a gate.
+- 🧪 **Tests that can actually fail.** `odoo_tests` checks the suite an install
+  log cannot see: a test file Odoo never imports (nothing loads it), a test that
+  asserts nothing, a swallowed exception, `cr.commit()` breaking the per-test
+  rollback, `time.sleep`, skips — and maps every acceptance criterion to the test
+  that mentions it. `scaffold` writes RED stubs (they raise until implemented)
+  instead of vacuous passes.
+- 🔴 **RED before GREEN on a bug fix.** In `mode=bug` the pipeline refuses to
+  leave `WRITE_CODE` until `test-plan.md` records the reproduction that FAILED
+  first (`red (evidence: …)`, or `pass (red first: …)` once fixed) — a regression
+  test that never failed proves nothing.
 - 🔁 **A real feedback loop.** `odoo_module install` returns the server's own
   output or traceback; `odoo_errors` reads `ir.logging`; failures become a
   persisted FAILED verdict instead of a hopeful summary.
@@ -178,12 +188,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.13.0`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.14.0`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.13.0, published with a provenance attestation
+npm install dsh-odoo-sdd        # 0.14.0, published with a provenance attestation
 ```
 
 > [!IMPORTANT]
@@ -368,7 +378,7 @@ the `functional` spec mode described below.
 | **CLARIFY** | Intent recorded (`mode` create/bug, `licensed`, and optionally `translations` — see below) and the security interview answered: groups, ACLs, record rules, `sudo()` justification, public routes | `sdd_phase clarify` |
 | **READ_SPEC** | `spec.md` is assimilated: business context, numbered acceptance criteria, constraints, target Odoo version. **Writing code here is forbidden.** | `APPROVED` + `mark_spec_loaded` |
 | **ARCHITECTURE** | Models, views (including extra view types and a search view where they matter), reports, security matrix and `test-plan.md` | `APPROVED` |
-| **WRITE_CODE** | The module is implemented with version-pinned Odoo patterns and its OCA documentation | static gates green |
+| **WRITE_CODE** | The module is implemented with version-pinned Odoo patterns and its OCA documentation. In `mode=bug` the failing reproduction comes FIRST and is recorded in `test-plan.md` as `red (evidence: …)` | static gates green |
 | **VERIFY** | Ascending pyramid: static → install/upgrade → RPC/data → UI (Playwright) only for critical flows | persisted `PASSED` verdict |
 | **FIX_LOOP** | Root-cause fixes. 3 consecutive failures force a consultant diagnosis; 5 iterations force `BLOCKED` | honest verdict |
 
@@ -405,7 +415,9 @@ only", "no reports needed", "no tours needed", "no demo data". Those are
 `## Demo data` and surfaced as warnings in `sdd_phase status`, non-blocking by
 design — the security model is the only fail-closed content gate. The
 version-by-version tour API, the `HttpCase` that executes a tour and the demo
-traps live in `resources/references/tours-and-demo.md`.
+traps live in `resources/references/tours-and-demo.md`; the test cycle, the case
+classes per version and what makes a test trustworthy live in
+`resources/references/odoo-tests.md`.
 
 Per-spec artifacts (all on disk, resumable):
 
@@ -503,7 +515,7 @@ every tool result.
 
 ---
 
-## 🧰 The 16 tools
+## 🧰 The 17 tools
 
 | Tool | Purpose |
 |---|---|
@@ -518,6 +530,7 @@ every tool result.
 | `sdd_checkpoint` | The rollback surface: `create` (snapshots the workspace, becomes the active checkpoint), `list`, `restore` (files, plus — with `restore_data=true` and `confirm_destructive=true` — the journaled data mutations: the undo runs under the company context the mutation used, turns read shapes into write values, marks each op so a retry never compensates it twice, refuses a journal from another destination, and reports every field it could not restore; it always REPORTS files created after the checkpoint and deletes them only with `remove_created=true`), `drop`, `journal`. |
 | `odoo_docs` | Documentation for a module, usable **on its own** (no spec, phase, checkpoint or instance), so an existing module can simply be documented: `check` (OCA fragments mapped to Diátaxis, version scheme, changelog, `index.html`, docstrings, xpath comments, OWL directives → ERROR/WARN with `file:line`), `plan`, `scaffold` (create-only skeletons, never overwrites) and `report` (persists `docs-report.md`; APPROVED only when nothing is still a scaffold). The changelog entry is mandatory for any change to a released module. |
 | `odoo_security_scan` | Local static security review (no instance needed): raw SQL by concatenation, `eval`/`exec`/`pickle`, hardcoded secrets, unjustified `sudo()`, `auth="none"`, disabled CSRF, QWeb `t-raw`. Findings carry `file:line` + a fix hint; any ERROR blocks `DONE`. |
+| `odoo_tests` | The testing half of the pipeline, usable **on its own** (no spec, phase, checkpoint or instance): `check` scans the Python tests for what an install log cannot show — a `tests/*.py` that `tests/__init__.py` never imports (Odoo only loads what is imported, so the test never runs), a class that is not an Odoo test case, a `test_*` that asserts nothing or asserts something trivially true, a swallowed exception, `time.sleep`, explicit skips, `cr.commit()` inside a test (it breaks the per-test rollback), `SavepointCase` on 17+, an `HttpCase` without `start_tour` — with assertion density as an informational metric. `plan` maps every acceptance criterion of the spec to the test that mentions it (by AC id or by the `REQ-<AREA>-NN` id of its requirement) and lists the criteria with no test. `scaffold` writes one **RED stub per uncovered criterion** (body raises `NotImplementedError`, never a vacuous pass), create-only and idempotent, adding the import so the file actually loads. |
 | `sdd_handoff` | Writes `specs/<id>/handoff.md` (final phase, verdict, decisions, blockers, checkpoints, the COMPLETE per-spec data journal, effective config, next steps) when the run closes. |
 | `odoo_config` | Reads or updates the persistent configuration and answers **"which project am I in?"**: the resolved root, its provenance (session cwd / configured / process cwd), the specs base, the effective spec directory and the config file in use. |
 | `odoo_i18n` | Translations through **Odoo's own models**: `base.language.export` supplies the translatable terms and `base.language.install` activates the language. `export` writes `<module>/i18n/<lang>.po` (creating the `i18n/` folder when missing) and MERGES with the file already there — a written translation is never replaced by what the export says, new terms are added, and terms the module dropped are kept as `#~` instead of deleted. `status` reports what each language covers, `check` fails while an entry still awaits its text. It does not translate: the export gives the message IDs and a person writes the text. Version-aware (Odoo 16 is the boundary, the same one that removed `ir.translation`). |
@@ -843,7 +856,7 @@ few copy-paste presets where you need them.
 
 ## 🤖 Model experience
 
-The agent sees 16 tools with self-contained descriptions. Typical flow:
+The agent sees 17 tools with self-contained descriptions. Typical flow:
 `sdd_phase init` → security interview + `odoo_connect` → gated phases with
 `APPROVED` → `sdd_checkpoint create` → code → `odoo_security_scan` →
 `odoo_module install` → on traceback, `odoo_errors` + `sdd_phase fail` (which may
@@ -919,10 +932,12 @@ settings section.
 
 | File | Role |
 |---|---|
-| `src/index.ts` | Plugin entry: registration of the 16 tools, config resolution and the policy guard |
+| `src/index.ts` | Plugin entry: registration of the 17 tools, config resolution and the policy guard |
 | `src/types.ts` | Public payload types (never contain secret material) |
 | `src/credentials.ts` | Credential cascade, `.env` load/validation, permission verification, `redact()`, fail-closed |
 | `src/odoo-client.ts` | JSON-RPC client: `common.version`, `authenticate`, `execute_kw`, `button_immediate_*`, `ir.logging`, `/web/session/authenticate` |
+| `src/test-scan.ts` | Static rules for the module's Python tests (unimported test module, case class, assertion density, swallowed errors, `cr.commit`, sleeps, skips, `SavepointCase` by version) |
+| `src/tests-tool.ts` | The `odoo_tests` tool (`check`/`plan`/`scaffold`), usable without the pipeline |
 | `src/tools-runtime.ts` | Odoo-facing tool bodies: `odoo_execute` (allowlist + pre-image capture), `odoo_validate`, `odoo_module`, `odoo_errors` |
 | `src/sdd-state.ts` | Phase machine, gates, append-only KB, verdicts, security content gate, `stop.md` |
 | `src/spec-reqs.ts` | Stable `REQ-<AREA>-NN` ids, per-requirement fingerprints, `req-baseline.json` and DRIFT detection |

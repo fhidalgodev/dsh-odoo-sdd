@@ -84,27 +84,18 @@ guiado por especificación (SDD). Dos ideas lo sostienen:
 ## 🔭 Cómo funciona
 
 ```mermaid
-graph TD
-    A(["Idea o pedido"]) --> C1
-
-    subgraph P [Protocolo SDD - compuertas fail-closed]
-        C1["1 CLARIFY<br/>entrevista y preguntas de seguridad"] --> R2["2 READ_SPEC<br/>spec.md inmutable"]
-        R2 -->|APPROVED| A3["3 ARCHITECTURE<br/>modelos, vistas, seguridad, plan de pruebas"]
-        A3 -->|APPROVED| W4["4 WRITE_CODE<br/>código del módulo y docs OCA"]
-        W4 --> V5["5 VERIFY<br/>estático, instalación, RPC, UI"]
-        V5 -->|PASSED| D9(["handoff.md - DONE"])
-        V5 -->|FAILED| F6["FIX_LOOP<br/>causa raíz, máximo 5 iteraciones"]
-        F6 --> V5
-    end
-
-    subgraph L [Bucle cerrado contra una instancia real]
-        W4 -.-> M7["odoo_module install o upgrade"]
-        M7 -.->|traceback| E8["odoo_errors"]
-        E8 -.-> F6
-    end
-
-    style P fill:#1e1e2e,stroke:#89b4fa,stroke-width:2px,color:#cdd6f4
-    style L fill:#181825,stroke:#a6e3a1,stroke-width:2px,color:#cdd6f4
+flowchart TD
+    A(["Idea o pedido"]) --> C1["1 CLARIFY<br/>entrevista y preguntas de seguridad"]
+    C1 --> R2["2 READ_SPEC<br/>spec.md inmutable"]
+    R2 -->|APPROVED| A3["3 ARCHITECTURE<br/>modelos, vistas, seguridad, plan de pruebas"]
+    A3 -->|APPROVED| W4["4 WRITE_CODE<br/>código del módulo y docs OCA"]
+    W4 --> V5["5 VERIFY<br/>estático, instalación, RPC, UI"]
+    V5 -->|PASSED| D9(["handoff.md - DONE"])
+    V5 -->|FAILED| F6["FIX_LOOP<br/>causa raíz, máximo 5 iteraciones"]
+    F6 --> V5
+    W4 -.-> M7["odoo_module install o upgrade"]
+    M7 -.->|traceback| E8["odoo_errors"]
+    E8 -.-> F6
 ```
 
 La especificación es la única fuente de verdad y es **inmutable**: el código se
@@ -272,8 +263,8 @@ con los destinos disponibles y su identidad sin secretos:
 
 ```
 This session has no environment chosen yet, and this project defines 2 instance(s):
-  - argelia: https://… db=argelia user=admin
-  - farmago: https://… db=farmago user=admin   (the project's last used)
+  - acme: https://… db=acme user=admin
+  - globex: https://… db=globex user=admin   (the project's last used)
 ASK THE DEVELOPER which one THIS session should use, then record the answer:
   - an existing one: `odoo_setup mode=instance instance=use name=<name>`
   - a new one: `odoo_setup mode=instance instance=add name=<name> url=… db=… username=…`, …
@@ -385,7 +376,7 @@ modo de spec `functional` que sigue abajo.
 
 CLARIFY lo pregunta, junto a la de licencias, y la respuesta se graba **en la spec**
 —no como ajuste global, igual que la edición—. Un mismo workspace puede tener un
-proyecto de cliente en Venezuela y un arreglo interno que no entrega idiomas.
+proyecto de cliente que se entrega en español y un arreglo interno que no entrega idiomas.
 
 ```
 sdd_phase operation=clarify spec_id=<id> mode=… licensed=… translations=["es_VE","es_PA"]

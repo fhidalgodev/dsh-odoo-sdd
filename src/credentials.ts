@@ -442,7 +442,7 @@ function activeInstanceFile(projectRoot: string): string {
  *
  * The project file alone was the bug: it is rewritten by every session, so two
  * chats on one project could not use two environments — the last `use` decided
- * for everyone, and a session that had chosen `farmago` was silently pointed at
+ * for everyone, and a session that had chosen `globex` was silently pointed at
  * whatever another session picked. The spec pointer was scoped per session for
  * exactly this reason; this one was left behind.
  */

@@ -80,27 +80,18 @@
 ## 🔭 工作原理
 
 ```mermaid
-graph TD
-    A(["想法或需求"]) --> C1
-
-    subgraph P [SDD 协议 - fail-closed 门禁]
-        C1["1 CLARIFY<br/>访谈与安全问题"] --> R2["2 READ_SPEC<br/>不可变的 spec.md"]
-        R2 -->|APPROVED| A3["3 ARCHITECTURE<br/>模型、视图、安全、测试计划"]
-        A3 -->|APPROVED| W4["4 WRITE_CODE<br/>模块源码与 OCA 文档"]
-        W4 --> V5["5 VERIFY<br/>静态、安装、RPC、UI"]
-        V5 -->|PASSED| D9(["handoff.md - DONE"])
-        V5 -->|FAILED| F6["FIX_LOOP<br/>根因，最多 5 次迭代"]
-        F6 --> V5
-    end
-
-    subgraph L [针对真实实例的闭环]
-        W4 -.-> M7["odoo_module install 或 upgrade"]
-        M7 -.->|traceback| E8["odoo_errors"]
-        E8 -.-> F6
-    end
-
-    style P fill:#1e1e2e,stroke:#89b4fa,stroke-width:2px,color:#cdd6f4
-    style L fill:#181825,stroke:#a6e3a1,stroke-width:2px,color:#cdd6f4
+flowchart TD
+    A(["想法或需求"]) --> C1["1 CLARIFY<br/>访谈与安全问题"]
+    C1 --> R2["2 READ_SPEC<br/>不可变的 spec.md"]
+    R2 -->|APPROVED| A3["3 ARCHITECTURE<br/>模型、视图、安全、测试计划"]
+    A3 -->|APPROVED| W4["4 WRITE_CODE<br/>模块源码与 OCA 文档"]
+    W4 --> V5["5 VERIFY<br/>静态、安装、RPC、UI"]
+    V5 -->|PASSED| D9(["handoff.md - DONE"])
+    V5 -->|FAILED| F6["FIX_LOOP<br/>根因，最多 5 次迭代"]
+    F6 --> V5
+    W4 -.-> M7["odoo_module install 或 upgrade"]
+    M7 -.->|traceback| E8["odoo_errors"]
+    E8 -.-> F6
 ```
 
 规范是唯一的真相来源，而且它**不可变**：代码去适应 spec，绝不反过来。门禁默认由
@@ -231,8 +222,8 @@ odoo_setup mode=revoke name=staging                           # 只撤销该目�
 
 ```
 This session has no environment chosen yet, and this project defines 2 instance(s):
-  - argelia: https://… db=argelia user=admin
-  - farmago: https://… db=farmago user=admin   (the project's last used)
+  - acme: https://… db=acme user=admin
+  - globex: https://… db=globex user=admin   (the project's last used)
 ASK THE DEVELOPER which one THIS session should use, then record the answer:
   - an existing one: `odoo_setup mode=instance instance=use name=<name>`
   - a new one: `odoo_setup mode=instance instance=add name=<name> url=… db=… username=…`, …

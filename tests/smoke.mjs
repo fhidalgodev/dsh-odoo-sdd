@@ -723,7 +723,7 @@ check("S1: http to a real 127.0.0.1 loopback allowed", realLoop.ok === true);
 	// ---- the ACTIVE INSTANCE belongs to the session, not the project -------
 	// The defect this exists for: one `.sdd/instances/active.json` per project
 	// meant the last `use` decided for every session, so a session that had chosen
-	// `farmago` was silently pointed at whatever another session picked. The spec
+	// `globex` was silently pointed at whatever another session picked. The spec
 	// pointer was scoped per session for the same reason; this one was left behind.
 	{
 		const twoRoot = join(dir, "two-sessions-instances");
@@ -734,16 +734,16 @@ check("S1: http to a real 127.0.0.1 loopback allowed", realLoop.ok === true);
 				`ODOO_URL=http://localhost:8069\nODOO_DB=${db}\nODOO_USERNAME=admin\nODOO_PASSWORD=pw-${name}\n`,
 				{ mode: 0o600 },
 			);
-		mkInst("farmago", "farmago_db");
+		mkInst("globex", "globex_db");
 		mkInst("main", "main_db");
 
-		check("session A activates one environment", creds.writeSessionInstance(twoRoot, "session-A", "farmago") === true);
+		check("session A activates one environment", creds.writeSessionInstance(twoRoot, "session-A", "globex") === true);
 		check("session B activates ANOTHER one", creds.writeSessionInstance(twoRoot, "session-B", "main") === true);
 		const loadA = creds.loadCredentials(twoRoot, { sessionId: "session-A" });
 		const loadB = creds.loadCredentials(twoRoot, { sessionId: "session-B" });
 		check(
 			"each session resolves ITS OWN environment",
-			loadA.ok === true && loadA.credentials.instance === "farmago" && loadA.credentials.db === "farmago_db" &&
+			loadA.ok === true && loadA.credentials.instance === "globex" && loadA.credentials.db === "globex_db" &&
 				loadB.ok === true && loadB.credentials.instance === "main" && loadB.credentials.db === "main_db",
 			`A=${loadA.ok ? loadA.credentials.instance : loadA.reason} B=${loadB.ok ? loadB.credentials.instance : loadB.reason}`,
 		);
@@ -754,13 +754,13 @@ check("S1: http to a real 127.0.0.1 loopback allowed", realLoop.ok === true);
 			creds.loadCredentials(twoRoot, { sessionId: "session-B" }).credentials.instance === "main" &&
 				creds.readSessionInstance(twoRoot, "session-B") === "main",
 		);
-		creds.writeSessionInstance(twoRoot, "session-A", "farmago");
+		creds.writeSessionInstance(twoRoot, "session-A", "globex");
 
 		// A session with no pointer of its own inherits the project's last choice...
 		const inherited = creds.loadCredentials(twoRoot, { sessionId: "session-new", requireChoice: false });
 		check(
 			"a session without a pointer inherits the project's last choice",
-			inherited.ok === true && inherited.credentials.instance === "farmago" && inherited.credentials.source === "instance-inherited",
+			inherited.ok === true && inherited.credentials.instance === "globex" && inherited.credentials.source === "instance-inherited",
 			inherited.ok ? inherited.credentials.source : inherited.reason,
 		);
 		check("...and is TOLD it inherited, so 'why another one?' has an answer", typeof inherited.sourceNote === "string" && /INHERITED/.test(inherited.sourceNote));
@@ -786,7 +786,7 @@ check("S1: http to a real 127.0.0.1 loopback allowed", realLoop.ok === true);
 			);
 			// Two sessions chose, so the project default follows the last one to act.
 			creds.writeSessionInstance(twoRoot, "session-B", "main");
-			creds.writeSessionInstance(twoRoot, "session-A", "farmago");
+			creds.writeSessionInstance(twoRoot, "session-A", "globex");
 			const listed = await listCtx.tools.get("odoo_setup").execute(
 				{ mode: "instance", instance: "list" },
 				{ agent: { session: { id: "session-B" } } },
@@ -798,7 +798,7 @@ check("S1: http to a real 127.0.0.1 loopback allowed", realLoop.ok === true);
 			);
 			check(
 				"...and names the project default separately",
-				/^- farmago \(project default\)/m.test(listed.detail) && /Project default/.test(listed.detail),
+				/^- globex \(project default\)/m.test(listed.detail) && /Project default/.test(listed.detail),
 			);
 			// A payload that violates its own `additionalProperties: false` schema is a
 			// defect, not cosmetics: the harness reports a schema error on every
@@ -826,7 +826,7 @@ check("S1: http to a real 127.0.0.1 loopback allowed", realLoop.ok === true);
 				"the structured payload carries both flags",
 				Array.isArray(listed.instances) &&
 					listed.instances.find((i) => i.name === "main")?.active === true &&
-					listed.instances.find((i) => i.name === "farmago")?.projectDefault === true,
+					listed.instances.find((i) => i.name === "globex")?.projectDefault === true,
 			);
 		}
 

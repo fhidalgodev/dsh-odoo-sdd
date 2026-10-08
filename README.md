@@ -84,27 +84,18 @@ Odoo development pipeline. Two ideas hold it together:
 ## 🔭 How it works
 
 ```mermaid
-graph TD
-    A(["Idea or request"]) --> C1
-
-    subgraph P [SDD protocol - fail-closed gates]
-        C1["1 CLARIFY<br/>interview and security questions"] --> R2["2 READ_SPEC<br/>immutable spec.md"]
-        R2 -->|APPROVED| A3["3 ARCHITECTURE<br/>models, views, security, test plan"]
-        A3 -->|APPROVED| W4["4 WRITE_CODE<br/>module source and OCA docs"]
-        W4 --> V5["5 VERIFY<br/>static, install, RPC, UI"]
-        V5 -->|PASSED| D9(["handoff.md - DONE"])
-        V5 -->|FAILED| F6["FIX_LOOP<br/>root cause, max 5 iterations"]
-        F6 --> V5
-    end
-
-    subgraph L [Closed loop against a real instance]
-        W4 -.-> M7["odoo_module install or upgrade"]
-        M7 -.->|traceback| E8["odoo_errors"]
-        E8 -.-> F6
-    end
-
-    style P fill:#1e1e2e,stroke:#89b4fa,stroke-width:2px,color:#cdd6f4
-    style L fill:#181825,stroke:#a6e3a1,stroke-width:2px,color:#cdd6f4
+flowchart TD
+    A(["Idea or request"]) --> C1["1 CLARIFY<br/>interview and security questions"]
+    C1 --> R2["2 READ_SPEC<br/>immutable spec.md"]
+    R2 -->|APPROVED| A3["3 ARCHITECTURE<br/>models, views, security, test plan"]
+    A3 -->|APPROVED| W4["4 WRITE_CODE<br/>module source and OCA docs"]
+    W4 --> V5["5 VERIFY<br/>static, install, RPC, UI"]
+    V5 -->|PASSED| D9(["handoff.md - DONE"])
+    V5 -->|FAILED| F6["FIX_LOOP<br/>root cause, max 5 iterations"]
+    F6 --> V5
+    W4 -.-> M7["odoo_module install or upgrade"]
+    M7 -.->|traceback| E8["odoo_errors"]
+    E8 -.-> F6
 ```
 
 The specification is the single source of truth and it is **immutable**: the code
@@ -271,8 +262,8 @@ targets and their non-secret identity:
 
 ```
 This session has no environment chosen yet, and this project defines 2 instance(s):
-  - argelia: https://… db=argelia user=admin
-  - farmago: https://… db=farmago user=admin   (the project's last used)
+  - acme: https://… db=acme user=admin
+  - globex: https://… db=globex user=admin   (the project's last used)
 ASK THE DEVELOPER which one THIS session should use, then record the answer:
   - an existing one: `odoo_setup mode=instance instance=use name=<name>`
   - a new one: `odoo_setup mode=instance instance=add name=<name> url=… db=… username=…`, …
@@ -386,7 +377,7 @@ the `functional` spec mode described below.
 
 CLARIFY asks it, next to the licensing question, and the answer is recorded **on the
 spec** — not as a global setting, exactly like the edition. One workspace can hold a
-client project in Venezuela and an internal fix that ships no languages at all.
+client project that ships in Spanish and an internal fix that ships no languages at all.
 
 ```
 sdd_phase operation=clarify spec_id=<id> mode=… licensed=… translations=["es_VE","es_PA"]

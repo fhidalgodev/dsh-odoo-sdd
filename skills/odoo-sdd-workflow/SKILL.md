@@ -131,10 +131,10 @@ Ask it in the interview like `licensed`, and record the answer with the intent:
 
 > `sdd_phase operation=clarify spec_id=<id> mode=… licensed=… translations=["es_VE","es_PA"]`
 
-- **If CLARIFY recorded `translations`, the spec must say WHY those languages** (a client in Venezuela, a country rollout), and the `i18n/` files are part of the deliverable, not a bonus.
+- **If CLARIFY recorded `translations`, the spec must say WHY those languages** (a client who needs that language, a country rollout), and the `i18n/` files are part of the deliverable, not a bonus.
 - **Omit `translations` when the work is not translated.** That is a normal answer (an internal fix), not a missing one: unlike `mode` and `licensed`, this is NOT a fail-closed gate.
 - The languages are **gettext codes** (`ll` or `ll_CC`: `es_VE`, `es_PA`, `pt_BR`, `fr`). A malformed code is refused while it can still be corrected.
-- They are recorded **per spec**, like the edition: one workspace can hold a Spanish-for-Venezuela client project and an untranslated internal one.
+- They are recorded **per spec**, like the edition: one workspace can hold a client project in Spanish and an untranslated internal one.
 - When languages are declared, `test-plan.md` needs the matching acceptance criterion: *"`i18n/<lang>.po` exists and no exported term is left with an empty `msgstr`"* — `odoo_i18n operation=check` is what verifies it.
 - Generating and updating those files is `odoo_i18n operation=export`: the terms come from Odoo's OWN export models, so the list stays correct as the module changes. It never overwrites a translation a person wrote.
 

@@ -8,6 +8,7 @@ import z from "@deepseek-ai/schemastery";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, chmodSync, statSync, mkdirSync, rmSync, symlinkSync, readdirSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 const libDir = new URL("../lib/", import.meta.url);
 const sdd = await import(new URL("sdd-state.js", libDir).href);
@@ -1108,7 +1109,17 @@ check("interactive rejects URL-embedded credentials (no echo)", rs.detail.includ
 
 rs = await setup.execute({ mode: "interactive", url: "http://localhost:9", db: "dev", username: "admin", scope: "project" });
 const scaffoldPath = join(projA, ".sdd", ".env");
-check("scaffold written at project .sdd/.env", rs.status === "needs-secret" && existsSync(scaffoldPath));
+// Fail-closed: an uncovered tree must NOT receive a credential file. This is the
+// shape of the leak that reached a remote branch once, so the refusal is the
+// behaviour under test, not an obstacle to it.
+check(
+	"a project without .gitignore coverage is refused (fail-closed)",
+	rs.status === "needs-gitignore" && !existsSync(scaffoldPath) && rs.detail.includes(".sdd/"),
+);
+// Closing the gap is what unblocks the scaffold — the guard must not be a wall.
+writeFileSync(join(projA, ".gitignore"), ".sdd/\n.env\n");
+rs = await setup.execute({ mode: "interactive", url: "http://localhost:9", db: "dev", username: "admin", scope: "project" });
+check("scaffold written at project .sdd/.env once the gap is closed", rs.status === "needs-secret" && existsSync(scaffoldPath));
 const content = readFileSync(scaffoldPath, "utf8");
 check("scaffold has empty password, no secret inside", content.includes("ODOO_PASSWORD=\n") && !content.includes("s3cret"));
 if (POSIX_MODES) {
@@ -1137,6 +1148,62 @@ check("revoking blocks the connection again", rs.detail.includes("NOT AUTHORIZED
 // Re-authorize so the rest of the flow keeps a live grant.
 rs = await setup.execute({ mode: "authorize" });
 check("re-authorize restores the grant", rs.status === "authorized");
+
+// ---- a tracked credential file is refused, not trusted to .gitignore ------
+console.log("== a tracked credential file is refused, not ignored ==");
+{
+	const gitAvailable = (() => {
+		try {
+			return spawnSync("git", ["--version"], { encoding: "utf8" }).status === 0;
+		} catch {
+			return false;
+		}
+	})();
+	if (!gitAvailable) {
+		check("git is unavailable: the tracked-file refusal cannot be exercised here", true);
+	} else {
+		const projTracked = join(dir, "projTracked");
+		mkdirSync(join(projTracked, ".sdd"), { recursive: true });
+		const git = (...argv) =>
+			spawnSync("git", argv, { cwd: projTracked, encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] });
+		git("init", "-q");
+		// The ignore rules are PERFECT and still useless: the file is in the index.
+		writeFileSync(join(projTracked, ".gitignore"), ".sdd/\n.env\n");
+		writeFileSync(join(projTracked, ".sdd", ".env"), "ODOO_PASSWORD=already-committed\n");
+		git("add", "-f", ".sdd/.env");
+
+		const trackedSetup = new Map();
+		plugin.apply(
+			{
+				tools: { register: (t) => trackedSetup.set(t.name, t), guard: () => () => {} },
+				on: () => () => {},
+				approval: { request: async () => "allowed-once" },
+			},
+			{ projectRoot: projTracked },
+		);
+		// instance=add is the path that scaffolds a credential file under .sdd/;
+		// interactive would stop earlier on the file that already exists.
+		const rsTracked = await trackedSetup.get("odoo_setup").execute({
+			mode: "instance",
+			instance: "add",
+			name: "tracked-case",
+			url: "http://localhost:8069",
+			db: "dev",
+			username: "admin",
+		});
+		check(
+			"a file already in the index is reported as tracked, not as covered",
+			rsTracked.status === "needs-gitignore" &&
+				rsTracked.gitignoreCovered === false &&
+				rsTracked.detail.includes("ALREADY TRACKED"),
+		);
+		check("the refusal names the only fix (git rm --cached)", rsTracked.detail.includes("git rm --cached"));
+		check(
+			"...and no credential scaffold was written",
+			!existsSync(join(projTracked, ".sdd", "instances", "tracked-case.env")),
+		);
+	}
+}
 
 // ---- lifecycle: purge removes ONLY the plugin's own state (lote 5) -------
 console.log("== lifecycle purge (ownership boundaries) ==");

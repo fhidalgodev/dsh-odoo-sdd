@@ -718,6 +718,16 @@ has a way back and a way to prove what happened.
   being shown to the model or persisted to the KB.
 - **Session cookies never reach the model.** `odoo_session` writes the cookie to
   `.sdd/session.json` (chmod 600) and returns only the path.
+- **A credential file is not written while git can still see it (fail-closed).**
+  Before scaffolding a `.env`, the plugin asks git itself — `git check-ignore`
+  for the ignore rules and `git ls-files` for the index — and refuses with
+  `status: needs-gitignore` when a protected path is missing from `.gitignore`
+  **or is already tracked**, in which case the only fix it names is
+  `git rm --cached`. An ignore rule never protects a file that is in the index,
+  and that gap is exactly how a `.sdd/.env` with a live password reached a
+  remote branch once. Where git is absent, the fallback reads the `.gitignore`
+  text and says so instead of claiming proof. Opt out per project with
+  `requireGitignoreBeforeCredentials: false`.
 - **No install scripts beyond the build.** The only lifecycle scripts are
   `prepare`/`prepack`, which compile `src/` into the shipped `lib/` and do
   nothing else — no network, no `postinstall`, no shell. The two have opposite
@@ -826,6 +836,7 @@ few copy-paste presets where you need them.
         autonomy: supervised    # supervised | autonomous
         licensed: community     # community | enterprise (OCA is always searched)
         requireCheckpointBeforeMutation: true
+        requireGitignoreBeforeCredentials: true   # refuse a .env while git would still see it
         requireSpecForChanges: true     # every change needs a spec in a writing phase (or a waiver)
         specPolicyScope: odoo           # odoo (only where Odoo work is detected) | everywhere
         securityReviewRequired: true

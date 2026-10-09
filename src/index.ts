@@ -152,6 +152,7 @@ import { join, resolve, dirname, isAbsolute, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync, readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 /** Cordis plugin name. */
 export const name = "odoo-sdd";
@@ -220,6 +221,7 @@ export const Config = z.object({
 	enterpriseRepoPath: markVolatile(z.string()),
 	autonomy: markVolatile(z.string()),
 	requireCheckpointBeforeMutation: markVolatile(z.boolean()),
+	requireGitignoreBeforeCredentials: markVolatile(z.boolean()),
 	requireSpecForChanges: markVolatile(z.boolean()),
 	specPolicyScope: markVolatile(z.string()),
 	adoptProjectPointerHint: markVolatile(z.boolean()),
@@ -291,6 +293,12 @@ interface OdooSddConfig {
 	requireInstanceChoice?: boolean;
 	/** Refuse mutating calls until a checkpoint exists (fail-closed). */
 	requireCheckpointBeforeMutation?: boolean;
+	/**
+	 * Refuse to write a credential file while git would still see it: either the
+	 * plugin-owned paths are not ignored, or one of them is already tracked. On by
+	 * default, because an ignore rule never protects a file that is in the index.
+	 */
+	requireGitignoreBeforeCredentials?: boolean;
 	/** Require a clean security review before DONE. */
 	securityReviewRequired?: boolean;
 	/** Require the security interview (groups/ACL/rules) in CLARIFY. */
@@ -594,24 +602,199 @@ function setupStatusFor(projectRoot: string): { status: EffectiveSetupStatus; de
 	return { status: "needs-setup", detail: `NEEDS_SETUP (${loaded.reason}): ${loaded.message}` };
 }
 
-/** Check .gitignore coverage for the plugin-owned paths in the project. */
-function gitignoreCoverage(projectRoot: string): { covered: boolean; missing: string[] } {
-	const file = join(projectRoot, ".gitignore");
+/** Budget for a git probe: a status question must never stall a tool call. */
+const GIT_PROBE_TIMEOUT_MS = 5_000;
+
+/** The plugin-owned paths that must never be versioned, and how to name them. */
+const PROTECTED_PATHS: Array<[string, string]> = [
+	[".sdd/.env", ".sdd/"],
+	[".env", ".env"],
+];
+
+/** True when `projectRoot` lives inside a git work tree. */
+function isGitWorkTree(projectRoot: string): boolean {
+	// A root that does not exist yet is not a work tree. Skipping the probe on
+	// purpose: spawning git with a missing cwd yields ENOENT, which is
+	// indistinguishable from "git is not installed" downstream, and that
+	// confusion silently reported full coverage for an empty directory.
+	if (!existsSync(projectRoot)) return false;
+	const probe = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], {
+		cwd: projectRoot,
+		encoding: "utf8",
+		timeout: GIT_PROBE_TIMEOUT_MS,
+	});
+	return probe.status === 0 && (probe.stdout ?? "").trim() === "true";
+}
+
+/** Top level of the repository, so paths resolve the way git resolves them. */
+function gitTopLevel(projectRoot: string): string | null {
+	const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+		cwd: projectRoot,
+		encoding: "utf8",
+		timeout: GIT_PROBE_TIMEOUT_MS,
+	});
+	const top = (probe.stdout ?? "").trim();
+	return probe.status === 0 && top !== "" ? top : null;
+}
+
+/** True when a git binary can be spawned at all (it is absent in some sandboxes). */
+function gitIsAvailable(): boolean {
+	const probe = spawnSync("git", ["--version"], { encoding: "utf8", timeout: GIT_PROBE_TIMEOUT_MS });
+	return probe.status === 0;
+}
+
+/**
+ * Last resort when git is missing: read the .gitignore text.
+ *
+ * Deliberately shallow — it cannot see symlinks, globs, negation, nested
+ * .gitignore files or `core.excludesFile` — so callers must present it as
+ * unverified rather than as an answer.
+ */
+function literalMissingEntries(repoTop: string): string[] {
+	const file = join(repoTop, ".gitignore");
 	const entries = existsSync(file)
 		? readFileSync(file, "utf8")
 				.split(/\r?\n/)
 				.map((l) => l.trim().replace(/^\//, "").replace(/\/$/, ""))
 				.filter((l) => l !== "" && !l.startsWith("#"))
 		: [];
-	const required: Array<[string, string]> = [
-		[".sdd", ".sdd/"],
-		[".env", ".env"],
-	];
 	const missing: string[] = [];
-	for (const [key, display] of required) {
+	for (const [key, display] of PROTECTED_PATHS) {
 		if (!entries.includes(key)) missing.push(display);
 	}
-	return { covered: missing.length === 0, missing };
+	// A `.gitignore` covers the DIRECTORY `.sdd/`: a plugin that only knows the
+	// file `.sdd/.env` cannot see that rule, and would call a covered project
+	// uncovered. Asking whether the directory is ignored is the honest question.
+	if (missing.includes(".sdd/") && entries.includes(".sdd")) {
+		missing.splice(missing.indexOf(".sdd/"), 1);
+	}
+	return missing;
+}
+
+/** True when git itself would ignore the path (symlinks, globs and negation included). */
+function isIgnoredByGit(repoTop: string, relPath: string): boolean {
+	const probe = spawnSync("git", ["check-ignore", "--no-index", "-q", "--", relPath], {
+		cwd: repoTop,
+		encoding: "utf8",
+		timeout: GIT_PROBE_TIMEOUT_MS,
+	});
+	// 0 = ignored. Anything else (1 = not ignored, 128 = no work tree/git
+	// missing) keeps the old reading and lets the caller warn instead of fail.
+	return probe.status === 0;
+}
+
+/** True when the path is already in the index: ignore rules do NOT apply to it. */
+function isTrackedByGit(repoTop: string, relPath: string): boolean {
+	const probe = spawnSync("git", ["ls-files", "--error-unmatch", "--", relPath], {
+		cwd: repoTop,
+		encoding: "utf8",
+		timeout: GIT_PROBE_TIMEOUT_MS,
+	});
+	return probe.status === 0;
+}
+
+interface GitignoreCoverage {
+	/** Every protected path is both untracked and ignored. */
+	covered: boolean;
+	/** Paths missing an ignore rule. */
+	missingPaths: string[];
+	/** Paths ALREADY tracked: `git rm --cached` is the only fix. */
+	trackedPaths: string[];
+	/** False outside a git work tree, where there is nothing to commit. */
+	inGitRepo: boolean;
+	/**
+	 * "git" when git answered the ignore question, "literal" when git was missing
+	 * and only the .gitignore text could be read. The distinction is the whole
+	 * point: a literal read is a best effort and must never be reported as proof.
+	 */
+	confidence: "git" | "literal";
+}
+
+/**
+ * Check whether git really ignores the plugin-owned paths.
+ *
+ * Two facts decide it, and only git can answer the first one: a pattern the
+ * parser does not understand still ignores the file, and an ignore rule is
+ * powerless against a file that is already in the index. The old literal
+ * comparison missed both, which is how a committed `.sdd/.env` survived a
+ * `.gitignore` that "looked" right.
+ */
+function gitignoreCoverage(projectRoot: string): GitignoreCoverage {
+	if (!isGitWorkTree(projectRoot)) {
+		// Outside a work tree nothing is versioned YET, so no tracked path can
+		// exist — but the missing ignore rules are still reported, because the
+		// day someone runs `git init` is the day that gap becomes a leak.
+		const uncovered = literalMissingEntries(projectRoot);
+		return {
+			covered: uncovered.length === 0,
+			missingPaths: uncovered,
+			trackedPaths: [],
+			inGitRepo: false,
+			confidence: "literal",
+		};
+	}
+	const repoTop = gitTopLevel(projectRoot) ?? projectRoot;
+	const trackedPaths: string[] = [];
+	const canAskGit = gitIsAvailable();
+	let missingPaths: string[];
+	if (canAskGit) {
+		missingPaths = [];
+		for (const [relPath, display] of PROTECTED_PATHS) {
+			if (isTrackedByGit(repoTop, relPath)) {
+				trackedPaths.push(display);
+				continue;
+			}
+			if (!isIgnoredByGit(repoTop, relPath)) missingPaths.push(display);
+		}
+	} else {
+		// No git to ask. The index cannot be read at all, so nothing is reported as
+		// tracked, and the ignore rules fall back to reading the file itself.
+		missingPaths = literalMissingEntries(repoTop);
+	}
+	return {
+		covered: missingPaths.length === 0 && trackedPaths.length === 0,
+		missingPaths,
+		trackedPaths,
+		inGitRepo: true,
+		confidence: canAskGit ? "git" : "literal",
+	};
+}
+
+/**
+ * What to tell the developer about the coverage check, and whether writing a
+ * credential file now would take an unnecessary risk.
+ */
+function gitignoreNote(coverage: GitignoreCoverage): {
+	note: string;
+	/** Writing now is unsafe with certainty: a tracked path, or a verified gap. */
+	blocked: boolean;
+} {
+	if (coverage.covered) return { note: "", blocked: false };
+	// A tracked path is certain and unfixable by editing .gitignore; an unverified
+	// literal reading is not, so it warns loudly without stopping the developer.
+	const blocked = coverage.trackedPaths.length > 0 || coverage.missingPaths.length > 0;
+	const parts: string[] = [];
+	if (coverage.confidence === "literal" && coverage.missingPaths.length > 0) {
+		parts.push(
+			"VERIFIED ONLY BY READING .gitignore (git could not be asked), so a glob, a " +
+				"nested .gitignore or a negated rule would not show up here.",
+		);
+	}
+	if (coverage.trackedPaths.length > 0) {
+		parts.push(
+			`ALREADY TRACKED by git: ${coverage.trackedPaths.join(", ")} — an ignore rule does nothing ` +
+				"against a file that is already in the index. Run " +
+				`\`git rm --cached ${coverage.trackedPaths.join(" ")}\` (it keeps the local file), add the ` +
+				"entries to .gitignore, and commit that removal.",
+		);
+	}
+	if (coverage.missingPaths.length > 0) {
+		parts.push(
+			`MISSING .gitignore entries: ${coverage.missingPaths.join(", ")} — add them before writing ` +
+				"credentials so this file can never be committed.",
+		);
+	}
+	return { note: parts.join(" "), blocked };
 }
 
 interface SkillApi {
@@ -817,6 +1000,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		enterpriseRepoPath: config.enterpriseRepoPath ?? "",
 		autonomy: config.autonomy ?? "supervised",
 		requireCheckpointBeforeMutation: config.requireCheckpointBeforeMutation ?? true,
+		requireGitignoreBeforeCredentials: config.requireGitignoreBeforeCredentials ?? true,
 		requireSpecForChanges: config.requireSpecForChanges ?? true,
 		adoptProjectPointerHint: config.adoptProjectPointerHint ?? true,
 		odooApi: config.odooApi ?? "auto",
@@ -973,9 +1157,13 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		description:
 			"Onboarding for the Odoo instance connection. mode=check (default) reports the credential " +
 			"cascade state (.sdd/.env → user config → legacy .env), the persisted setup decision, and " +
-			".gitignore coverage. mode=interactive writes a chmod-600 .env scaffold with the NON-SECRET " +
+			".gitignore coverage, asked of git itself (check-ignore + ls-files). mode=interactive writes a " +
+			"chmod-600 .env scaffold with the NON-SECRET " +
 			"fields (url, db, username) and leaves ODOO_PASSWORD empty for the developer to fill by hand " +
-			"— secrets are never accepted as tool parameters. mode=authorize asks the DEVELOPER (native " +
+			"— secrets are never accepted as tool parameters. Writing a credential file is REFUSED with " +
+			"status=needs-gitignore while git would still see it (a protected path is neither ignored nor " +
+			"untracked, and for a tracked one only `git rm --cached` helps): that policy is " +
+			"requireGitignoreBeforeCredentials, on by default. mode=authorize asks the DEVELOPER (native " +
 			"approval) for a connection grant covering the current url/db/user: without it no tool may " +
 			"open a socket, because possessing credentials is not authorization. mode=revoke drops the " +
 			"stored grants. mode=instance manages SEVERAL targets per project (list | show | use | add | " +
@@ -1080,6 +1268,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		}, exec?: unknown) {
 			const root = rootFor(exec);
 			const projectRoot = root.root;
+			const guardCredentials = effectiveConfig(exec, projectRoot).requireGitignoreBeforeCredentials;
 			const autonomyMode = readAutonomy(projectRoot);
 			appendAuditLine(projectRoot, "odoo_setup/" + args.mode, args, clientFor(projectRoot).credentials);
 
@@ -1338,7 +1527,27 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						};
 					}
 					// The scaffold carries the NON-SECRET fields only; the secret is filled
-					// by hand, exactly like mode=interactive.
+					// by hand, exactly like mode=interactive. The coverage check comes FIRST:
+					// the file lands under .sdd/, which is the path that must never be
+					// versioned, and refusing before the write is what keeps a leak from
+					// starting at all.
+					const coverage = gitignoreCoverage(projectRoot);
+					const ignoreCheck = gitignoreNote(coverage);
+					if (ignoreCheck.blocked && guardCredentials) {
+						return {
+							mode: "instance" as string,
+							status: "needs-gitignore",
+							envFile: displayPath(target),
+							gitignoreCovered: false,
+							instances: describe(),
+							detail:
+								`Refusing to scaffold ${displayPath(target)}: ${ignoreCheck.note} ` +
+								"Nothing was written. Fix the ignore coverage and re-run " +
+								"odoo_setup mode=instance instance=add; setting " +
+								"requireGitignoreBeforeCredentials=false in .sdd/config.json is " +
+								"the explicit opt-out (not recommended).",
+						};
+					}
 					mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
 					writeFileSync(
 						target,
@@ -1656,9 +1865,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				const candidates = credentialCandidates(projectRoot)
 					.map((c) => `${existsSync(c.path) ? "[x]" : "[ ]"} ${c.source}: ${displayPath(c.path)}`)
 					.join("\n");
-				const gitignoreNote = coverage.covered
+				const ignoreCheck = gitignoreNote(coverage);
+				const gitignoreReport = coverage.covered
 					? ".gitignore covers .sdd/ and .env."
-					: `MISSING .gitignore entries: ${coverage.missing.join(", ")} — add them before writing credentials.`;
+					: ignoreCheck.note;
 				return {
 					mode: "check" as string,
 					status: setup.status,
@@ -1667,7 +1877,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					rootSource: root.source as string,
 					detail:
 						`Delegation: ${autonomyMode.toUpperCase()}.\n${setup.detail}` +
-						`\nCredential cascade:\n${candidates}\n${gitignoreNote}`,
+						`\nCredential cascade:\n${candidates}\n${gitignoreReport}`,
 				};
 			}
 
@@ -1762,6 +1972,27 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						"overwrite. Edit it manually or choose the other scope.",
 				};
 			}
+			// The check runs BEFORE any write: a credential file must never land in a
+			// tree that git is already watching, and a tracked one is the exact shape
+			// of a leak that an ignore rule can no longer prevent.
+			const coverage = gitignoreCoverage(projectRoot);
+			const ignoreCheck = gitignoreNote(coverage);
+			if (ignoreCheck.blocked && guardCredentials) {
+				return {
+					mode: "interactive" as string,
+					status: "needs-gitignore",
+					envFile: displayPath(target),
+					gitignoreCovered: false,
+					projectRoot,
+					rootSource: root.source as string,
+					detail:
+						`Refusing to write ${displayPath(target)}: ${ignoreCheck.note} ` +
+						"Nothing was written, so no secret is at risk yet. Fix the ignore " +
+						"coverage and re-run odoo_setup; setting " +
+						"requireGitignoreBeforeCredentials=false in .sdd/config.json is the " +
+						"explicit opt-out (not recommended).",
+				};
+			}
 			const scaffold = [
 				"# dsh-odoo-sdd credentials — written by odoo_setup (mode=interactive).",
 				"# Fill the secret by hand: ODOO_PASSWORD=<account password>",
@@ -1790,10 +2021,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				scope,
 				envFile: target,
 			});
-			const coverage = gitignoreCoverage(projectRoot);
-			const gitignoreNote = coverage.covered
-				? ""
-				: `\nWARNING: .gitignore does not cover ${coverage.missing.join(", ")} — add the entries so the credential file can never be committed.`;
+			const gitignoreWarning = ignoreCheck.note === "" ? "" : `\nWARNING: ${ignoreCheck.note}`;
 			const permissionNote =
 				permission.note === undefined ? "" : `\nWARNING: ${permission.note}`;
 			return {
@@ -1811,7 +2039,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						: "(owner-only mode requested). ") +
 					"Ask the developer to " +
 					"fill ODOO_PASSWORD directly in that file — never through chat. Then run " +
-					`odoo_connect to validate.${permissionNote}${gitignoreNote}\n${rootNote(root)}`,
+					`odoo_connect to validate.${permissionNote}${gitignoreWarning}\n${rootNote(root)}`,
 			};
 		},
 	}));
@@ -2692,6 +2920,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					".",
 			},
 			requireCheckpointBeforeMutation: { type: "boolean", description: "Refuse mutations until a checkpoint exists (fail-closed)." },
+			requireGitignoreBeforeCredentials: { type: "boolean", description: "Refuse to write a credential file while git would still see it (fail-closed)." },
 			requireInstanceChoice: {
 				type: "boolean",
 				description:
@@ -2749,6 +2978,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							// REPORTED so it can be deleted, never applied (the edition is per spec).
 							licensed: { type: "string", description: "DEPRECATED legacy key, reported only." },
 							requireCheckpointBeforeMutation: { type: "boolean", required: true },
+							requireGitignoreBeforeCredentials: { type: "boolean", required: true },
 							requireSpecForChanges: { type: "boolean" },
 							adoptProjectPointerHint: { type: "boolean" },
 							specPolicyScope: { type: "string", description: "\"odoo\" (default) arms the spec policy only where Odoo work is detected; \"everywhere\" arms it in every directory." },
@@ -2811,6 +3041,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			licensed?: string;
 			requireCheckpointBeforeMutation?: boolean;
 			requireSpecForChanges?: boolean;
+			requireGitignoreBeforeCredentials?: boolean;
 			specPolicyScope?: string;
 			adoptProjectPointerHint?: boolean;
 			odooApi?: string;
@@ -2842,6 +3073,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					// can hold EE and CE projects at the same time.
 					...(typeof data["licensed"] === "string" ? { licensed: data["licensed"] } : {}),
 					requireCheckpointBeforeMutation: typeof data["requireCheckpointBeforeMutation"] === "boolean" ? data["requireCheckpointBeforeMutation"] : true,
+					requireGitignoreBeforeCredentials: typeof data["requireGitignoreBeforeCredentials"] === "boolean" ? data["requireGitignoreBeforeCredentials"] : true,
 					requireSpecForChanges: typeof data["requireSpecForChanges"] === "boolean" ? data["requireSpecForChanges"] : true,
 					specPolicyScope: data["specPolicyScope"] === "everywhere" ? "everywhere" : "odoo",
 					adoptProjectPointerHint: typeof data["adoptProjectPointerHint"] === "boolean" ? data["adoptProjectPointerHint"] : true,
@@ -2988,6 +3220,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.methodAllowlist !== undefined) updates["methodAllowlist"] = args.methodAllowlist;
 			if (args.autonomy !== undefined) updates["autonomy"] = args.autonomy;
 			if (args.requireCheckpointBeforeMutation !== undefined) updates["requireCheckpointBeforeMutation"] = args.requireCheckpointBeforeMutation;
+			if (args.requireGitignoreBeforeCredentials !== undefined) updates["requireGitignoreBeforeCredentials"] = args.requireGitignoreBeforeCredentials;
 			if (args.requireSpecForChanges !== undefined) updates["requireSpecForChanges"] = args.requireSpecForChanges;
 			if (args.specPolicyScope !== undefined) {
 				if (args.specPolicyScope !== "odoo" && args.specPolicyScope !== "everywhere") {
@@ -3116,6 +3349,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			enterpriseRepoPath: asString(merged["enterpriseRepoPath"], config.enterpriseRepoPath ?? ""),
 			autonomy: asString(merged["autonomy"], config.autonomy ?? "supervised"),
 			requireCheckpointBeforeMutation: asBool(merged["requireCheckpointBeforeMutation"], config.requireCheckpointBeforeMutation ?? true),
+			requireGitignoreBeforeCredentials: asBool(merged["requireGitignoreBeforeCredentials"], config.requireGitignoreBeforeCredentials ?? true),
 			requireSpecForChanges: asBool(merged["requireSpecForChanges"], config.requireSpecForChanges ?? true),
 			specPolicyScope: ((): string => {
 				const v = asString(merged["specPolicyScope"], config.specPolicyScope ?? "odoo");
@@ -3778,7 +4012,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (cfg.methodAllowlist.length > 0) lines.push(`- method allowlist=${JSON.stringify(cfg.methodAllowlist)}`);
 			lines.push(`- communityRepo=${cfg.communityRepoPath || cfg.communityRepoUrl}`);
 			lines.push(`- enterpriseRepo=${cfg.enterpriseRepoPath || cfg.enterpriseRepoUrl}`);
-			lines.push(`- requireCheckpointBeforeMutation=${cfg.requireCheckpointBeforeMutation} securityReviewRequired=${cfg.securityReviewRequired} auditAllTools=${cfg.auditAllTools}`);
+			lines.push(`- requireCheckpointBeforeMutation=${cfg.requireCheckpointBeforeMutation} requireGitignoreBeforeCredentials=${cfg.requireGitignoreBeforeCredentials} securityReviewRequired=${cfg.securityReviewRequired} auditAllTools=${cfg.auditAllTools}`);
 			lines.push("");
 			// A waiver is the one thing that lets work happen outside the pipeline:
 			// the closing document has to carry it, with the reason the developer

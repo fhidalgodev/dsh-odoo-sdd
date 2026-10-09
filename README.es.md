@@ -640,6 +640,16 @@ camino de mutación tiene vuelta atrás y forma de probar qué pasó.
   nunca copian `.env` ni material de claves.
 - **Guard fail-closed.** Un fallo interno del guard deniega con un motivo visible
   en vez de dejar pasar la llamada.
+- **Un archivo de credenciales no se escribe mientras git todavía pueda verlo
+  (fail-closed).** Antes de crear un `.env`, el plugin le pregunta a git mismo
+  — `git check-ignore` para las reglas y `git ls-files` para el índice — y se
+  niega con `status: needs-gitignore` cuando una ruta protegida falta en el
+  `.gitignore` **o ya está trackeada**, y en ese caso el único arreglo que nombra
+  es `git rm --cached`. Una regla de ignore nunca protege a un archivo que está
+  en el índice, y ese hueco es exactamente cómo un `.sdd/.env` con contraseña
+  viva llegó una vez a una rama remota. Donde no hay git, el fallback lee el
+  texto del `.gitignore` y lo declara, en vez de fingir una prueba. Se desactiva
+  por proyecto con `requireGitignoreBeforeCredentials: false`.
 - **Rollback de archivos.** `sdd_checkpoint restore` devuelve los archivos del
   snapshot tal cual eran; `sdd_phase rollback` retorna la spec a `WRITE_CODE` con
   el fallo registrado, para reiniciar desde un estado conocido. Un checkpoint
@@ -821,6 +831,7 @@ presets para copiar y pegar donde los necesites.
         autonomy: supervised    # supervised | autonomous
         licensed: community     # community | enterprise (OCA se busca siempre)
         requireCheckpointBeforeMutation: true
+        requireGitignoreBeforeCredentials: true   # niega el .env mientras git lo vería
         requireSpecForChanges: true     # todo cambio necesita una spec en una fase de escritura (o un waiver)
         specPolicyScope: odoo           # odoo (solo donde se detecta trabajo Odoo) | everywhere
         securityReviewRequired: true

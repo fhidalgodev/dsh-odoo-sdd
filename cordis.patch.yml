@@ -54,3 +54,6 @@
         # own rules file (or an explicit choice) says otherwise.
         documentationPolicy: 'required'
         documentationLanguage: ''
+        # Where odoo_manual keeps the narrated manuals: specs (default), docs or module.
+        # manualsMode: 'specs'
+        # manualsDir: 'docs/manuals'

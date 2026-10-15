@@ -360,6 +360,10 @@ check("the panel keeps the specs dir key for compatibility", /specsDir:\s*form\.
 check("the panel reads the policy scope from the snapshot", /specPolicyScope:\s*s\.specPolicyScope\s*===\s*"everywhere"/.test(source));
 check("the panel maps the policy scope into the form", /specPolicyScope:\s*snap\.specPolicyScope/.test(source));
 check("the panel persists the policy scope", /specPolicyScope:\s*form\.specPolicyScope\s*===/.test(source));
+check("the panel reads the manuals keys from the snapshot", /manualsMode:\s*\["specs", "docs", "module"\]\.indexOf\(s\.manualsMode\)/.test(source) && /manualsDir:\s*asStr\(s\.manualsDir, "docs\/manuals"\)/.test(source));
+check("the panel maps the manuals keys into the form", /manualsMode:\s*snap\.manualsMode/.test(source) && /manualsDir:\s*snap\.manualsDir/.test(source));
+check("the panel persists the manuals keys and hides the folder outside docs mode", /manualsMode:\s*\["specs", "docs", "module"\]\.indexOf\(form\.manualsMode\)/.test(source) && /form\.manualsMode === "docs"\s*\?\s*dirField\("manualsDir"/.test(source));
+check("the manuals card explains each mode", /manualsModeHint_specs/.test(source) && /manualsModeHint_docs/.test(source) && /manualsModeHint_module/.test(source));
 check(
 	"the narrow-input rule is actually shipped in the stylesheet",
 	/\.odoo-sdd-input--short\{width:min\(100%,200px\)\}/.test(source),

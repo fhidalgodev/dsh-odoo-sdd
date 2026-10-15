@@ -126,6 +126,10 @@ export interface PluginConfig {
 	documentationPolicy?: "required" | "optional" | "off";
 	/** Documentation language; empty resolves from project files, then English. */
 	documentationLanguage?: string;
+	/** Where narrated manuals live: "specs" (default) | "docs" | "module". */
+	manualsMode?: "specs" | "docs" | "module";
+	/** Folder for manuals in docs mode, relative to the project root. */
+	manualsDir?: string;
 }
 
 export type { ModuleInfo, LogEntry, Phase, KbNode, SddState };

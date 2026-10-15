@@ -1519,7 +1519,12 @@ export function initSpecDir(specDir: string, mode: PipelineMode | null = null): 
 				"## Documentation\n\n<!-- Language (default English unless the project says otherwise), the OCA\n" +
 				"     readme fragments that apply mapped to their Diátaxis audience (Tutorial/How-to/\n" +
 				"     Reference/Explanation), and whether index.html, Web Tours and migrations apply.\n" +
-				"     Write \"no extra fragments\" explicitly when none are needed. -->\n",
+				"     Write \"no extra fragments\" explicitly when none are needed.\n" +
+				"     DECIDE the narrated user manual too: whether one is written, which flows and\n" +
+				"     roles it covers, and where it lives (manualsMode: next to the spec, under the\n" +
+				"     project, or inside the module's readme/manual). A manual is OPTIONAL, but the\n" +
+				"     decision is not: odoo_docs adds a \"## User manual\" section and its ERRORs to\n" +
+				"     the documentation verdict as soon as a storyboard exists. -->\n",
 		],
 		testPlan,
 	];

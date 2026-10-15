@@ -69,6 +69,7 @@ keeps the data journal used for compensation.
 | `odoo_import use=prepare\|preview\|map\|plan\|status` | the native importer: upload the authorised file, read back what Odoo parsed, record a decision per column, and turn it into an `apply` batch. It never applies anything by itself. |
 | `odoo_functional operations=plan\|approve\|apply\|inspect\|status\|reconcile\|verify\|compensate` | the batches: where they are declared, approved, executed operation by operation, reconciled when an outcome is unknown, and compensated. |
 | `odoo_errors`, `odoo_docs`, `odoo_validate`, `odoo_security_scan` | server logs after a failure, and the module-level checks when the run also touches code. |
+| `odoo_manual operation=explore\|capture` | UI evidence for the runbook: `explore` returns the ARIA snapshot of a real screen, and a READ-ONLY `capture` writes annotated screenshots (`images/`, `capture.json`) that the `verify` rows cite as `ui` evidence. It is standalone (no spec needed for the capture itself); `allow_actions=true` is a MUTATION (checkpoint + phase gate) and is never read-only evidence. Without a browser it answers `NEEDS_BROWSER` with the remedy — mark those rows for human verification instead of skipping them. |
 
 ## Phase 1 — CLARIFY
 

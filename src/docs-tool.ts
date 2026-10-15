@@ -21,6 +21,8 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { auditManual, findManualsFor, manualAuditFindings, renderManualSection, type ManualAudit } from "./manual-audit.js";
+import type { ManualsMode } from "./manual-model.js";
 import { resolveModuleDir } from "./paths.js";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import {
@@ -57,6 +59,12 @@ export interface DocsToolDeps {
 	 * the session reads whichever project the fallback root names.
 	 */
 	configuredLanguage(exec?: unknown): string;
+	/**
+	 * Where the narrated manuals live (Settings): mode plus the folder used in
+	 * `docs` mode, and the specs base the `specs` mode resolves against. The
+	 * docs verdict reads them, never writes them.
+	 */
+	manualScope(exec?: unknown): { mode: ManualsMode; dir: string; specsBase: string };
 	/** Path masking helper for display. */
 	display(pathValue: string): string;
 }
@@ -195,9 +203,29 @@ export function registerDocsTool(
 			// which project (and which folder) the run actually touched.
 			const location = `Resolved module_dir: ${deps.display(moduleDir)}\nProject root: ${deps.display(projectRoot)}`;
 
+			/**
+			 * The manuals that belong to this module, audited read-only. A
+			 * missing manual yields no findings at all: it is optional.
+			 */
+			const auditsFor = (): ManualAudit[] => {
+				const scope = deps.manualScope(exec);
+				return findManualsFor({ ...scope, projectRoot, moduleDir })
+					.map((dir) => auditManual(dir, { projectRoot, language }))
+					.filter((a): a is ManualAudit => a !== null);
+			};
+			/** The scan plus the manual findings: one verdict for both. */
+			const withManuals = (scan: DocsScanResult, audits: ManualAudit[]): DocsScanResult => {
+				const extra = manualAuditFindings(audits);
+				if (extra.length === 0) return scan;
+				const findings = [...scan.findings, ...extra];
+				return { ...scan, findings, clean: findings.every((f) => f.severity !== "ERROR") };
+			};
+
 			// ---- check -------------------------------------------------------
 			if (args.operation === "check") {
-				const scan = scanDocs(moduleDir, { mode, language });
+				const audits = auditsFor();
+				const scan = withManuals(scanDocs(moduleDir, { mode, language }), audits);
+				const manualLines = renderManualSection(audits);
 				return {
 					ok: scan.clean,
 					operation: "check" as string,
@@ -206,6 +234,7 @@ export function registerDocsTool(
 					artifacts,
 					detail:
 						formatFindings(scan, `Documentation check — ${moduleName} (mode=${mode}, language=${language} ${provenance})`, deps) +
+						(manualLines.length > 0 ? `\n\n${manualLines.join("\n")}` : "") +
 						`\n\n${location}`,
 				};
 			}
@@ -307,7 +336,8 @@ export function registerDocsTool(
 			}
 
 			// ---- report ------------------------------------------------------
-			const scan: DocsScanResult = scanDocs(moduleDir, { mode, language });
+			const audits = auditsFor();
+			const scan: DocsScanResult = withManuals(scanDocs(moduleDir, { mode, language }), audits);
 			const errors = scan.findings.filter((f) => f.severity === "ERROR").length;
 			const warns = scan.findings.filter((f) => f.severity === "WARN").length;
 			// APPROVED requires real content: a scaffolded fragment is not a pass.
@@ -333,6 +363,11 @@ export function registerDocsTool(
 				body.push(`  - fix: ${f.hint}`);
 			}
 			body.push("");
+			const manualLines = renderManualSection(audits);
+			if (manualLines.length > 0) {
+				body.push(...manualLines);
+				body.push("");
+			}
 			body.push("## Not verifiable by this plugin");
 			body.push("- README.rst compilation (`gen-odoo-readme`), Towncrier rendering and Ruff/pylint are your toolchain steps.");
 			body.push("- Screenshot rules (zoom 110-125%, ALT text, one instruction per image) are a human checklist.");

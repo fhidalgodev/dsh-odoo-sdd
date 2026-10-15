@@ -65,6 +65,12 @@ different in kind — and so is the temptation to fake it:
 - `ui` evidence: a menu path and a field label are only verified if a browser
   session actually showed them. Without a browser, the row stays `pending` until
   a human confirms it — never mark it `pass` on the strength of the design;
+- a READ-ONLY `odoo_manual operation=capture` run is `ui` evidence: cite the
+  flow and the captured file (`<workspace>/images/<slug>-<stepId>.png` plus
+  `capture.json`) in the row. It counts only for what the screenshot shows, it
+  never covers a write the run performed, and `allow_actions=true` — which the
+  guard treats as a mutation — is NOT read-only evidence: re-capture with a
+  read-only flow instead;
 - `manual` evidence needs the named human who ran it, in the row's parentheses;
 - a `BLOCKED` run with an `indeterminate` operation cannot be verified: reconcile
   first, then verify what is actually on the instance.

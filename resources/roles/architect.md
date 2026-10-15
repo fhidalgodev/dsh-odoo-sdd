@@ -111,7 +111,10 @@ note it — never leave an implicit assumption.
   blocks the advance;
 - `## Documentation` must decide the language and the fragments (an untouched
   template comment is not a decision) — it blocks `DONE` under the default
-  `documentationPolicy=required`;
+  `documentationPolicy=required`. Decide the narrated manual in the same
+  section: whether it is written, the flows and roles it covers, and where it
+  lives (`manualsMode`: beside the spec, under the project, or in the module's
+  `readme/manual`). "No manual" is a valid decision; silence is not;
 - every required heading must be present in `architecture.md` and in
   `test-plan.md` (`| AC | Scenario | …` with one row per criterion);
 - the ADVANCE itself is a gated phase: it needs the host's approval (native when

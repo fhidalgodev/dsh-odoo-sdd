@@ -93,3 +93,31 @@ jobs:
 
       - name: Tests against the floor
         run: npm test
+
+  # The capture pipeline (Fase 3) needs a REAL browser: the E2E drives a fake
+  # Odoo served on loopback through the same Chromium the tool launches.
+  capture-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: ''
+
+      - name: Install dev dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Install host packages for typecheck
+        run: npm install --no-save --no-audit --no-fund @deepseek-ai/dsh@^0.1.2-rc.1
+
+      - name: Build
+        run: npm run build
+
+      - name: Install Chromium for playwright-core
+        run: npx playwright-core install --with-deps chromium
+
+      - name: Capture E2E (browser required)
+        run: ODOO_SDD_REQUIRE_BROWSER=1 node tests/capture.mjs

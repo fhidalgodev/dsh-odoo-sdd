@@ -364,7 +364,7 @@ check("the publish simulation kept the roles and skills", staged.has("resources/
 		skills: { register: (def) => registered.push(def) },
 	};
 	pluginMod.apply(ctx, { projectRoot: process.cwd() });
-	check("both bundled skills register with a resource base", registered.length === 2 && registered.every((s) => s.resourceBase?.kind === "directory"));
+	check("all three bundled skills register with a resource base", registered.length === 3 && registered.map((s) => s.name).join() === "odoo-sdd-workflow,odoo-functional-sdd,odoo-user-manual" && registered.every((s) => s.resourceBase?.kind === "directory"));
 	let refs = 0;
 	let unresolvable = 0;
 	for (const skill of registered) {
@@ -421,7 +421,10 @@ check("the publish simulation kept the roles and skills", staged.has("resources/
 		measured("a\r\nb\r\n") === measured("a\nb\n") && measured("a\nb\n") === 4,
 		`crlf=${measured("a\r\nb\r\n")} lf=${measured("a\nb\n")}`,
 	);
-	const BUDGET = { guide: 16_000, total: 30_000, roles: 40_000 };
+	// The release that shipped narrated manuals added one phase row to the guide
+	// and a ninth role (the storyteller): the guide was trimmed back under its
+	// budget, the role total carries the new file.
+	const BUDGET = { guide: 16_000, total: 30_000, roles: 42_000 };
 	check(
 		`the technical guide body stays under ${BUDGET.guide} bytes (it was 32,495)`,
 		bodyBytes(guide) > 0 && bodyBytes(guide) < BUDGET.guide,
@@ -436,7 +439,7 @@ check("the publish simulation kept the roles and skills", staged.has("resources/
 		.filter((f) => f.endsWith(".md"))
 		.reduce((sum, f) => sum + measured(readFileSync(join(root, "resources", "roles", f), "utf8")), 0);
 	check(
-		`the role files together stay under ${BUDGET.roles} bytes (they absorbed the moved detail)`,
+		`the role files together stay under ${BUDGET.roles} bytes (nine roles after the storyteller joined)`,
 		rolesBytes > 0 && rolesBytes < BUDGET.roles,
 		`${rolesBytes}`,
 	);

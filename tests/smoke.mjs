@@ -1085,6 +1085,7 @@ const expectedTools = [
 	"odoo_errors", "odoo_session", "odoo_config", "sdd_phase", "sdd_checkpoint",
 	"odoo_security_scan", "sdd_handoff", "odoo_docs", "odoo_tests", "odoo_functional", "odoo_import",
 	"odoo_i18n",
+	"odoo_manual",
 ];
 check(`registers exactly the ${expectedTools.length} documented tools`, registered.size === expectedTools.length);
 check(
@@ -3982,7 +3983,7 @@ console.log("== real cordis host: optional services ==");
 		// is awaited (or the fiber is otherwise activated).
 		await ctx.plugin({ name: plugin.name, inject: plugin.inject, apply: (c, cfg) => plugin.apply(c, cfg) }, { projectRoot: hostRoot });
 
-		check("the plugin mounts on a real cordis host", tools.size === 17, `${tools.size} tool(s)`);
+		check("the plugin mounts on a real cordis host", tools.size === 18, `${tools.size} tool(s)`);
 
 		// The premise: inside a plugin that did NOT inject the service, the
 		// property read throws (this is what silently disabled the session root).

@@ -20,6 +20,16 @@ non-technical reader can follow and a developer can trust.
   switch language mid-module.
 - Document what EXISTS. Never describe a feature that was not implemented, and
   never promise behaviour the code does not have.
+- **The narrated user manual is delegated, not improvised here.** When
+  `architecture.md` declares one, the storyteller role (and the
+  `odoo-user-manual` skill) runs the canon → plan → narrate → capture → audit
+  loop with `odoo_manual`; this role keeps the OCA fragments and the Apps page.
+  Do not paste a walkthrough into `readme/USAGE.md` and call it the manual, and
+  do not contradict it: one source, one set of screenshots.
+- `odoo_docs operation=check|report` adds a `## User manual` section as soon as
+  a storyboard exists, and a manual ERROR (missing capture, stale canon) turns
+  the documentation verdict into `NEEDS_CONTENT`. Read that section before
+  claiming the documentation is done.
 - Never hardcode a person: take author/maintainer/contributors from the
   project's own conventions (`__manifest__.py`, `.pylintrc`, `AGENTS.md`,
   LICENSE) and include exactly the contributors the project mandates.

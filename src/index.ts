@@ -74,6 +74,7 @@ import { withAudit } from "./audit.js";
 import { registerRuntimeTools } from "./tools-runtime.js";
 import { isReadMethod, isCallableMethodName } from "./method-classification.js";
 import { registerDocsTool } from "./docs-tool.js";
+import { registerManualTool } from "./manual-tool.js";
 import { registerTestsTool } from "./tests-tool.js";
 import { registerI18nTools } from "./odoo-i18n.js";
 import { isLanguageCode } from "./po.js";
@@ -233,6 +234,8 @@ export const Config = z.object({
 	maxCheckpoints: markVolatile(z.number()),
 	documentationPolicy: markVolatile(z.string()),
 	documentationLanguage: markVolatile(z.string()),
+	manualsMode: markVolatile(z.string()),
+	manualsDir: markVolatile(z.string()),
 });
 
 /** Effective deployment configuration after validation. */
@@ -311,6 +314,10 @@ interface OdooSddConfig {
 	documentationPolicy?: string;
 	/** Documentation language; empty means resolve from project files, then "en". */
 	documentationLanguage?: string;
+	/** Where narrated manuals live: "specs" (default) | "docs" | "module". */
+	manualsMode?: string;
+	/** Folder for manuals in docs mode, relative to the project root. */
+	manualsDir?: string;
 }
 
 /** Minimal structural view of the host tool registry. */
@@ -841,6 +848,13 @@ const ODOO_SDD_SKILLS: Array<{ dir: string; resourceBase: string; fallbackDescri
 			"modules actually provide, configure and import in human-approved batches, and close with an " +
 			"operational runbook a person can repeat.",
 	},
+	{
+		dir: "odoo-user-manual",
+		resourceBase: "resources",
+		fallbackDescription:
+			"Narrated Odoo user manuals built on evidence: odoo_manual reads the functional canon, " +
+			"plans the storyboard against it, narrates in 3 acts, captures screens and compiles with lint.",
+	},
 ];
 
 /**
@@ -1011,6 +1025,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		maxCheckpoints: config.maxCheckpoints ?? 5,
 		documentationPolicy: config.documentationPolicy ?? "required",
 		documentationLanguage: config.documentationLanguage ?? "",
+		manualsMode: config.manualsMode ?? "specs",
+		manualsDir: config.manualsDir ?? "docs/manuals",
 	};
 	// Live source of the Settings section. The host hands us a THUNK returning
 	// the currently authoritative value (the resolved user scope while attached,
@@ -2949,6 +2965,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			auditAllTools: { type: "boolean", description: "Record every tool call of the run in .sdd/audit.jsonl." },
 			documentationPolicy: { type: "string", enum: ["required", "optional", "off"], description: "Whether documentation blocks DONE." },
 			documentationLanguage: { type: "string", description: "Documentation language; empty resolves from the project's own rules, then English." },
+			manualsMode: { type: "string", enum: ["specs", "docs", "module"], description: "Where odoo_manual keeps the manuals: specs (default, next to the spec), docs (a documentation tree under manualsDir) or module (OCA fragments under the module's readme/manual/)." },
+			manualsDir: { type: "string", description: "Folder for the manuals in docs mode, relative to the project root (default docs/manuals)." },
 			maxCheckpoints: { type: "number", description: "How many checkpoints to retain." },
 		},
 		output: {
@@ -2989,6 +3007,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 							auditAllTools: { type: "boolean", required: true },
 					documentationPolicy: { type: "string", required: true },
 					documentationLanguage: { type: "string", required: true },
+					manualsMode: { type: "string", required: true },
+					manualsDir: { type: "string", required: true },
 							maxCheckpoints: { type: "number", required: true },
 						},
 					},
@@ -3052,6 +3072,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			maxCheckpoints?: number;
 			documentationPolicy?: string;
 			documentationLanguage?: string;
+			manualsMode?: string;
+			manualsDir?: string;
 		}, exec?: unknown) {
 			/** Project the stored JSON onto the known, typed configuration shape. */
 			const normalize = (data: Record<string, unknown>) => {
@@ -3092,6 +3114,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					})(),
 					documentationLanguage: asString(data["documentationLanguage"], ""),
 					maxCheckpoints: typeof data["maxCheckpoints"] === "number" ? data["maxCheckpoints"] : 5,
+					manualsMode: (() => {
+						const v = asString(data["manualsMode"], "specs");
+						return v === "docs" || v === "module" ? v : "specs";
+					})(),
+					manualsDir: asString(data["manualsDir"], "docs/manuals"),
 				};
 			};
 
@@ -3239,6 +3266,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.auditAllTools !== undefined) updates["auditAllTools"] = args.auditAllTools;
 			if (args.documentationPolicy !== undefined) updates["documentationPolicy"] = args.documentationPolicy;
 			if (args.documentationLanguage !== undefined) updates["documentationLanguage"] = args.documentationLanguage;
+			if (args.manualsMode !== undefined) updates["manualsMode"] = args.manualsMode;
+			if (args.manualsDir !== undefined) updates["manualsDir"] = args.manualsDir;
 			if (args.maxCheckpoints !== undefined) updates["maxCheckpoints"] = args.maxCheckpoints;
 			if (Object.keys(updates).length === 0) {
 				return {
@@ -3367,6 +3396,11 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			maxCheckpoints: asNum(merged["maxCheckpoints"], config.maxCheckpoints ?? 5),
 			documentationPolicy: asString(merged["documentationPolicy"], config.documentationPolicy ?? "required"),
 			documentationLanguage: asString(merged["documentationLanguage"], config.documentationLanguage ?? ""),
+			manualsMode: (() => {
+				const v = asString(merged["manualsMode"], config.manualsMode ?? "specs");
+				return v === "docs" || v === "module" ? v : "specs";
+			})(),
+			manualsDir: asString(merged["manualsDir"], config.manualsDir ?? "docs/manuals"),
 		};
 	};
 
@@ -4166,6 +4200,13 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			// `reconcile` change local state, not the instance.
 			return String(args["operation"] ?? "") === "apply";
 		}
+		if (name === "odoo_manual") {
+			// Capturing is read-only by default, but with allow_actions=true the
+			// browser really clicks/fills Odoo (business-action contract: the UI
+			// effect is not journalable). The tool ALSO refuses those flows without
+			// confirm_destructive — the guard and the tool are independent fences.
+			return String(args["operation"] ?? "") === "capture" && args["allow_actions"] === true;
+		}
 		return false;
 	};
 
@@ -4715,7 +4756,81 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		});
 		},
 		configuredLanguage: (exec) => effectiveConfig(exec).documentationLanguage,
+		// The docs verdict READS the manuals (optional): mode, folder and the
+		// specs base are the same keys `odoo_manual` writes with.
+		manualScope: (exec) => {
+			const cfg = effectiveConfig(exec);
+			return {
+				mode: (cfg.manualsMode === "docs" || cfg.manualsMode === "module" ? cfg.manualsMode : "specs") as "docs" | "module" | "specs",
+				dir: cfg.manualsDir,
+				specsBase: cfg.specsMode === "central" && cfg.specsRoot ? cfg.specsRoot : join(cfg.projectRoot, cfg.specsDir),
+			};
+		},
 		display: (v) => displayPath(v),
+	});
+
+	// odoo_manual — narrated user manuals. The canon is read from the connected
+	// instance (like the JSON-RPC surface above); the manuals live where
+	// Settings says (manualsMode/manualsDir), and standalone work without a
+	// spec never blocks on one.
+	registerManualTool(ctx, {
+		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
+		specDir: (specId, exec) => {
+			const cfg = effectiveConfig(exec);
+			return specDirOf(cfg.projectRoot, cfg.specsDir, specId ?? "", {
+				specsMode: cfg.specsMode,
+				specsRoot: cfg.specsRoot,
+			});
+		},
+		specsBase: (exec) => {
+			const cfg = effectiveConfig(exec);
+			return cfg.specsMode === "central" && cfg.specsRoot ? cfg.specsRoot : join(cfg.projectRoot, cfg.specsDir);
+		},
+		manuals: (exec) => {
+			const cfg = effectiveConfig(exec);
+			return {
+				mode: (cfg.manualsMode === "docs" || cfg.manualsMode === "module" ? cfg.manualsMode : "specs") as "docs" | "module" | "specs",
+				dir: cfg.manualsDir,
+			};
+		},
+		configuredLanguage: (exec) => effectiveConfig(exec).documentationLanguage || undefined,
+		client: (exec) => clientForExec(exec).client ?? undefined,
+		display: (v) => displayPath(v),
+		repos: (exec) => {
+			const cfg = effectiveConfig(exec);
+			return { communityPath: cfg.communityRepoPath || undefined, enterprisePath: cfg.enterpriseRepoPath || undefined };
+		},
+		webSession: async (exec) => {
+			// In-memory FIRST: the cookie never touches the disk on this path.
+			// The persisted .sdd/session.json (odoo_session / mintSession) is the
+			// fallback, so a session minted earlier still works.
+			const cfg = effectiveConfig(exec);
+			const entry = clientForExec(exec);
+			const client = entry.client;
+			let loginError = "";
+			if (client) {
+				const login = await client.webLogin();
+				if (login.ok) {
+					return { ok: true, value: { baseUrl: entry.credentials?.url ?? "", sessionId: login.value.sessionId, uid: login.value.uid } };
+				}
+				if (login.errorKind === "needs_password") {
+					return { ok: false, errorKind: "needs_session", error: login.error };
+				}
+				// password auth failed — fall through to the persisted session
+				loginError = login.error;
+			}
+			const persisted = readWebSession(cfg.projectRoot);
+			if (persisted && persisted.url) {
+				return { ok: true, value: { baseUrl: persisted.url, sessionId: persisted.sessionId, uid: -1 } };
+			}
+			return {
+				ok: false,
+				errorKind: "needs_session",
+				error:
+					(loginError ? `Web login failed (${loginError}) and ` : "") +
+					"no persisted web session exists (.sdd/session.json): run odoo_session (needs an account PASSWORD — an API key cannot open a web session) or create the session file by hand.",
+			};
+		},
 	});
 
 	/**

@@ -27,7 +27,8 @@ export type OwnedKind =
 	| "plugin configuration"
 	| "setup decision"
 	| "checkpoints"
-	| "functional runs";
+	| "functional runs"
+	| "manual workspaces (standalone captures and recordings)";
 
 /** One plugin-owned path. */
 export interface OwnedPath {
@@ -82,6 +83,7 @@ export function ownedStatePaths(projectRoot: string): OwnedPath[] {
 		{ rel: ".sdd/setup-state.json", kind: "setup decision", dir: false },
 		{ rel: ".sdd/checkpoints", kind: "checkpoints", dir: true },
 		{ rel: ".sdd/functional", kind: "functional runs", dir: true },
+		{ rel: ".sdd/manual", kind: "manual workspaces (standalone captures and recordings)", dir: true },
 	];
 	return defs.map((d) => {
 		const abs = join(projectRoot, d.rel);

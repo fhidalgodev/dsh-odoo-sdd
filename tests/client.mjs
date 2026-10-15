@@ -353,6 +353,13 @@ check("the panel persists the switch", /requireSpecForChanges:\s*form\.requireSp
 check("the panel writes specsMode", /specsMode:\s*form\.specsMode/.test(source));
 check("the panel never writes projectRoot", !/projectRoot:\s*form\.projectRoot/.test(source));
 check("the panel keeps the specs dir key for compatibility", /specsDir:\s*form\.specsDir/.test(source));
+// The scope switch was once painted without being round-tripped (readSnap,
+// toForm and persist all ignored it): the control showed unselected and a
+// change reported "saved" without writing anything. These three checks keep
+// every leg of that round trip pinned.
+check("the panel reads the policy scope from the snapshot", /specPolicyScope:\s*s\.specPolicyScope\s*===\s*"everywhere"/.test(source));
+check("the panel maps the policy scope into the form", /specPolicyScope:\s*snap\.specPolicyScope/.test(source));
+check("the panel persists the policy scope", /specPolicyScope:\s*form\.specPolicyScope\s*===/.test(source));
 check(
 	"the narrow-input rule is actually shipped in the stylesheet",
 	/\.odoo-sdd-input--short\{width:min\(100%,200px\)\}/.test(source),

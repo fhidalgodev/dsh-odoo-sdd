@@ -70,7 +70,7 @@ plugin.apply(
 	{},
 );
 const toolNames = [...registered.keys()].sort();
-check("the plugin registers 17 tools", toolNames.length === 17, `got ${toolNames.length}`);
+check("the plugin registers 18 tools", toolNames.length === 18, `got ${toolNames.length}`);
 
 /**
  * Line indexes that are OUTSIDE fenced code blocks. Every structural assertion
@@ -352,9 +352,16 @@ for (const doc of docs) {
 		/translations=\s*\[/.test(raw),
 	);
 	// Config keys the code declares must appear in the documented example.
-	for (const key of ["communityRepoPath", "enterpriseRepoPath", "odooApi", "requireInstanceChoice", "specPolicyScope"]) {
+	for (const key of ["communityRepoPath", "enterpriseRepoPath", "odooApi", "requireInstanceChoice", "specPolicyScope", "manualsMode", "manualsDir"]) {
 		check(`${doc.file}: documents the ${key} config key`, raw.includes(key));
 	}
+	// The manual section is only useful if a reader can find: where a manual may
+	// live (the three modes), and that driving the UI is an action, not a default.
+	for (const mode of ["specs", "docs", "module"]) {
+		check(`${doc.file}: names the ${mode} manuals location`, new RegExp(`manualsMode[^\\n]*${mode}|${mode}[^\\n]*manualsMode`, "i").test(raw) || raw.includes(`\`${mode}\``));
+	}
+	check(`${doc.file}: documents the capture action flag`, raw.includes("allow_actions"));
+	check(`${doc.file}: explains the read-only default of a capture`, /read-only|solo lectura|只读/i.test(raw) && /odoo_manual/.test(raw));
 	// The scope of the spec policy, and the fact that a waiver needs no spec: both
 	// are behaviour a reader has to know to get out of a refusal.
 	check(`${doc.file}: documents where the spec policy applies`, /specPolicyScope/.test(raw) && /odoo/i.test(raw));

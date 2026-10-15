@@ -73,7 +73,8 @@
 | **DSH ≥ 0.1.2-rc.1**，运行在 **Node ≥ 20** 上 | 插件以 Cordis bundle 的形式挂载，并使用 `tools` 服务 |
 | 一个可通过 HTTP(S) 访问的**现有 Odoo 实例** | 闭环需要一台真实服务器来安装模块并读取 traceback |
 | 一个**可丢弃的 dev/staging 数据库** | 验证过程会安装模块并写入测试数据 |
-| *（可选）* 一个 **Playwright** 浏览器工具 | 仅用于验证的 UI 层；没有它时，这些场景会被标记为需要人工检查 |
+| *（可选）* 一个 **Playwright** 浏览器工具 | 仅用于验证的 UI 层以及叙述式手册的截图；没有它时，这些场景会被标记为需要人工检查 |
+| *（可选）* `playwright-core` ≥ 1.63.0 | 作为可选依赖随插件发布；截图引擎会驱动 Chromium、Chrome 或 Edge，一个都找不到时会返回 `NEEDS_BROWSER` 并附上一行补救命令 |
 
 ---
 
@@ -103,6 +104,24 @@ flowchart TD
 
 - 🎯 **永远先有 spec，再写代码。** `spec.md` 携带编号的验收标准；磁盘上没有
   持久化的 `PASSED` 结论，就永远到不了 `DONE`。
+- 🧬 **稳定的需求标识。** 每个需求块获得一个稳定的 `REQ-<AREA>-NN` id（章节 slug + 序号），
+  外加一枚提交到 `req-baseline.json` 的指纹。在已有 id 之下改写需求措辞就是 **DRIFT**：
+  在你回退它或显式接受它（`sdd_phase operation=baseline`）之前，推进会被拒绝，这样一份
+  计划或一个测试就绝不会悄悄引用一条已经不再那么说的需求。
+- 🔗 **双向覆盖。** 用 `# REQ-<AREA>-NN` 标注代码和测试，`odoo_validate module_dir=… spec_dir=…`
+  会同时检查两个方向 —— 没有实现的需求，以及 spec 已不再声明的孤立标注。下限：
+  `must`/`shall` 在 1.0 处阻断，`should` 在 0.8 处报告，`may` 仅作信息。每条需求都会落在
+  `covered / untested / test-only / unimplemented` 这架梯子上。
+- 🔍 **歧义 lint（建议性）。** `mark_spec_loaded` 报告没有量化的形容词、含糊的量词、
+  `TBD` 占位符、没有施动者的被动句以及 and/or 复合句，每一条都给出具体改写 —— 只是建议，
+  绝不是门禁。
+- 🧪 **真的会失败的测试。** `odoo_tests` 检查安装日志看不见的测试套件：Odoo 从不导入的
+  测试文件（没有任何东西加载它）、什么都不断言的测试、被吞掉的异常、破坏逐测试回滚的
+  `cr.commit()`、`time.sleep`、跳过 —— 并把每一条验收标准映射到提到它的测试。`scaffold`
+  写出 RED 桩（在实现之前一直抛错），而不是空洞的通过。
+- 🔴 **修 bug 时先 RED 后 GREEN。** 在 `mode=bug` 下，流水线拒绝离开 `WRITE_CODE`，
+  直到 `test-plan.md` 记录了**先失败**的复现（`red (evidence: …)`，修复后则是
+  `pass (red first: …)`）—— 一个从未失败过的回归测试证明不了任何东西。
 - 🔁 **真实的反馈闭环。** `odoo_module install` 返回服务器自己的输出或
   traceback；`odoo_errors` 读取 `ir.logging`；失败会变成一个持久化的 FAILED
   结论，而不是一份乐观的总结。
@@ -120,6 +139,11 @@ flowchart TD
 - 🧪 **无需实例的静态层。** `odoo_validate`（结构 + ACL 一致性）和
   `odoo_security_scan`（原生 SQL、`sudo()`、`auth="none"`、QWeb `t-raw`……）
   在任何东西被安装之前就给出带 `file:line` 的发现。
+- 📖 **手册像故事一样写，像代码一样检查。** `odoo_manual` 从实例读取一个模型的
+  功能 canon（按钮以及显示它们的状态、必填字段、notebook 页、菜单、访问规则、
+  确切的 `raise UserError` 位置），规划出分镜，用 canon 校验散文，**默认只读**地
+  截取带标注的截图，并渲染出一份人能照着走的手册 —— 每条指令配一张带标注的
+  截图，并在 canon 表明该按钮可能报错时给出恢复路径。
 - 🧑⚖️ **模型无法自行放松的策略。** 白名单、守卫和委派模式，任何改动都需要
   原生人工批准。
 - 🤖 **受监督或自主。** 同一条流水线，可以由人逐个回答门禁，也可以由人工代理
@@ -145,12 +169,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.14.1`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.15.0`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.14.1，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.15.0，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]
@@ -436,7 +460,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 
 ---
 
-## 🧰 17 个工具
+## 🧰 18 个工具
 
 | 工具 | 用途 |
 |---|---|
@@ -451,6 +475,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | `sdd_checkpoint` | 回滚面：`create`（对工作区做快照，成为活动 checkpoint）、`list`、`restore`（恢复文件，并在 `restore_data=true` 和 `confirm_destructive=true` 时恢复已记录的数据变更：撤销会在该变更用过的公司上下文中运行，把读取形态转换成写入值，标记每个操作以免重试时重复补偿它，拒绝来自其他目标的日志，并报告每一个它无法恢复的字段；它**总是报告** checkpoint 之后创建的文件，且只有 `remove_created=true` 才会删除它们）、`drop`、`journal`。 |
 | `odoo_docs` | 模块文档，可**独立使用**（不需要 spec、阶段、checkpoint 或实例），因此一个已有模块也能直接被文档化：`check`（把 OCA 片段映射到 Diátaxis、版本方案、changelog、`index.html`、docstring、xpath 注释、OWL 指令 → 带 `file:line` 的 ERROR/WARN）、`plan`、`scaffold`（只创建、绝不覆盖的骨架）和 `report`（持久化 `docs-report.md`；只有当不存在仍是骨架的片段时才是 APPROVED）。对已发布模块的任何改动都必须写 changelog 条目。 |
 | `odoo_security_scan` | 本地静态安全审查（不需要实例）：拼接式原生 SQL、`eval`/`exec`/`pickle`、硬编码密钥、没有理由的 `sudo()`、`auth="none"`、被关闭的 CSRF、QWeb `t-raw`。发现项带有 `file:line` + 修复提示；任何 ERROR 都会阻止 `DONE`。 |
+| `odoo_manual` | 基于证据的叙述式用户手册。**`canon`** 从实例读取一个模型的功能 canon（视图、header 按钮以及显示它们的状态、必填字段、notebook 页、动作、菜单、访问规则、用户组、`raise UserError`/`ValidationError` 与 `_sql_constraints` 位置）并连同指纹持久化：手册只能描述 canon 说过的话。**`plan`** 把 canon 变成一份分镜（流程、有序步骤、每步一句话），且只创建、不覆盖。**`lint`** 用 canon 校验分镜和渲染后的散文（`CANON-STALE`、`TARGET-UNKNOWN`、`PLACEHOLDER-UNBOUND`、`ACTS-MISSING`、`RECOVERY-MISSING`、西语和英语的 AI 腔模式 → 带确切行号的 ERROR/WARN）。**`explore`** 返回真实屏幕的 ARIA 快照，因此不会去猜任何 xml id 或标签。**`capture`** 驱动浏览器：只读步骤总是执行，而动作步骤（`new`/`fill`/`select`/`press`/`click`）需要 `allow_actions=true` —— 守卫会把它当作一次变更。**`render`** 写出手册和一个 Apps 页面（只创建，除非 `overwrite=true`）。**`import`** 把 Playwright `codegen` 录制转换成一条流程，并拒绝任何携带凭据的录制。手册存放在「设置」指定的位置（`manualsMode`：`specs` 与 spec 同目录、`docs` 在 `manualsDir` 下、`module` 作为模块 `readme/manual/` 下的 OCA 片段）；没有 spec 的独立工作绝不会因此被阻塞。只要分镜已存在，`odoo_docs` 就会在文档结论中加入 `## User manual` 一节 —— 没有分镜时则保持不变。 |
 | `odoo_tests` | 管道的测试一侧，可**独立使用**（不需要 spec、阶段、checkpoint 或实例）：`check` 扫描 Python 测试中安装日志看不到的问题 —— `tests/__init__.py` 从未导入的 `tests/*.py`（Odoo 只加载被导入的模块，因此该测试从不运行）、不是 Odoo 测试用例的类、没有任何断言或断言恒真的 `test_*`、被吞掉的异常、`time.sleep`、显式 skip、测试内的 `cr.commit()`（破坏每个测试的回滚）、17+ 上的 `SavepointCase`、没有 `start_tour` 的 `HttpCase`，并以断言密度作为参考指标。`plan` 把 spec 的每个验收标准映射到提到它的测试（按 AC id 或按其需求的 `REQ-<AREA>-NN`），并列出没有任何测试的标准。`scaffold` 为每个未覆盖的标准写一个 **RED stub**（函数体抛出 `NotImplementedError`，绝不是空洞的通过），只创建且幂等，并追加 import 让文件真正被加载。 |
 | `sdd_handoff` | 在运行收尾时写入 `specs/<id>/handoff.md`（最终阶段、结论、决策、blockers、checkpoint、**完整的**按 spec 的数据日志、生效配置、下一步）。 |
 | `odoo_config` | 读取或更新持久化配置，并回答**"我现在在哪个项目里？"**：解析出的根目录、它的来源（会话 cwd / 已配置 / 进程 cwd）、specs 基础目录、生效的 spec 目录和正在使用的配置文件。 |
@@ -597,7 +622,25 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
   通用的 `password=` / `Bearer` / `api_key=` / `session_id` 形态）以及家目录路径
   掩码（`/home/user/…` → `~/…`）。
 - **会话 cookie 永远不会到达模型。** `odoo_session` 把 cookie 写入
-  `.sdd/session.json`（chmod 600），只返回路径。
+  `.sdd/session.json`（chmod 600），只返回路径。截图引擎甚至不写 cookie：它在内存中
+  认证 web 会话，并把 cookie 留在浏览器上下文里。
+- **截图浏览器被锁定在实例源上。** 任何离开实例基础 URL 的请求都会被中止，因此试图访问
+  第三方主机的页面会失败而不是加载。截图默认只读：只做观察的步骤（`goto`、`menu`、
+  `wait`、`assert`、`explore`、`screenshot`、`confirm`）总是执行；会动手的步骤
+  （`new`、`fill`、`select`、`press`、`click`）需要 `allow_actions=true` **和**
+  `confirm_destructive=true`，守卫会把这次调用归类为一次变更（spec 处于写作阶段，或者
+  有 waiver）—— 而**一次点击没有可补偿的条目**：与 CRUD 调用不同，插件无法撤销 UI 做过
+  的事。请针对可丢弃的数据库做截图。
+- **录制只作为数据读取，凭据会被拒绝。** `odoo_manual operation=import` 解析 `codegen`
+  文本；携带密码字段、`Authorization` 头或 cookie 的录制会按行被拒绝，而且那个值绝不会
+  被回显出来。
+- **在 git 还能看到它时，凭据文件不会被写入（fail-closed）。** 在脚手架出一个 `.env`
+  之前，插件会去问 git 自己 —— 忽略规则问 `git check-ignore`，索引问 `git ls-files` ——
+  当受保护的路径不在 `.gitignore` 里**或已经被跟踪**时，就以 `status: needs-gitignore`
+  拒绝，在后一种情况下它给出的唯一修法是 `git rm --cached`。忽略规则永远保护不了已经
+  进入索引的文件，而这个缺口正是一个带着有效密码的 `.sdd/.env` 曾经到达远程分支的原因。
+  在 git 缺席的地方，回退方案会读取 `.gitignore` 文本并说明这一点，而不是声称已证明。
+  可用 `requireGitignoreBeforeCredentials: false` 按项目关掉。
 - **构建之外没有安装脚本。** 唯一的生命周期脚本是 `prepare`/`prepack`，它们把
   `src/` 编译成随包发布的 `lib/`，别的什么都不做 —— 没有网络，没有
   `postinstall`，没有 shell。两者的失败策略故意相反：**`prepare`（在安装时运行）
@@ -647,6 +690,7 @@ DSH 能跑的地方插件就能跑，并声称支持 **Linux、macOS 和 Windows
 │   ├── .env                    # 凭据（chmod 600）
 │   ├── config.json             # 项目配置
 │   ├── grants.json             # 人工授权回执
+│   ├── instances/<name>.env    # 每个被命名目标的凭据（chmod 600）；一个是激活的
 │   ├── session.json            # Playwright cookie
 │   ├── audit.jsonl             # 每一次工具调用，已脱敏
 │   ├── setup-state.json        # 上手引导 + 委派决定
@@ -714,6 +758,8 @@ spec*：没有自己指针的会话，在它足够新（< 12 小时）且该 spe
         maxCheckpoints: 5
         documentationPolicy: required   # required | optional | off
         documentationLanguage: ''       # 留空 = 英文，除非项目另有规定
+        manualsMode: specs              # specs（spec 同目录）| docs（在 manualsDir 下）| module（readme/manual/）
+        manualsDir: docs/manuals        # 仅当 manualsMode 为 docs 时使用
 ```
 
 > [!IMPORTANT]
@@ -726,7 +772,7 @@ spec*：没有自己指针的会话，在它足够新（< 12 小时）且该 spe
 
 ## 🤖 模型体验
 
-agent 看到 15 个自包含描述的工具。典型流程：
+agent 看到 18 个自包含描述的工具。典型流程：
 `sdd_phase init` → 安全访谈 + `odoo_connect` → 带 `APPROVED` 的门禁阶段 →
 `sdd_checkpoint create` → 写代码 → `odoo_security_scan` →
 `odoo_module install` → 出现 traceback 时用 `odoo_errors` + `sdd_phase fail`
@@ -762,6 +808,18 @@ traceback、门禁拒绝理由和补救说明。
   存储和报告，但流水线从 `.sdd/setup-state.json` 读取委派决定（用
   `odoo_setup mode=autonomy` 设置），并通过 ARCHITECTURE 的内容门禁强制执行安全
   访谈。已记为待办工作。
+- **手动截图需要浏览器和密码** —— `playwright-core` 是可选依赖，浏览器本身并不随包发布：
+  没有 Chromium、Chrome 或 Edge 时，截图会返回 `NEEDS_BROWSER` 以及那行安装命令。web 会话
+  还需要账号**密码**（Odoo 在交互式登录中拒绝 API key），所以一个只有 API key 的项目仍然
+  能编写和 lint 一份手册，但无法自动驱动截图。
+- **手册一次只覆盖一个模型** —— canon 是按模型读取的，所以一次跨模型的走查就是针对多份
+  canon 规划出的多条流程，而分镜会保留它规划时所用 canon 的指纹（实例变动时
+  `CANON-STALE` 会警告）。
+- **UI 家族 15、16、18、19 是声明，不是已验证** —— 截图选择器在 17 上做过端到端验证；
+  其他家族共享同样的结构，但在你依赖它们之前必须对着一个 dev 实例检查，而且 `familyFor`
+  会拒绝一个它不认识的 major，而不是去猜。
+- **散文 lint 是建议性的** —— AI 腔规则是启发式的，在 v1 里每一条都被设计成 WARN：只有
+  结构性规则（每个被截图的步骤一句话，过程内不出现标题）和 canon 规则能够阻断。
 - **没有富 UI 渲染器** —— 工具输出就是 DSH web GUI 里的文本。
 
 ---
@@ -778,6 +836,12 @@ traceback、门禁拒绝理由和补救说明。
 | 一切都停了 | `stop.md` 存在 | 读它，然后删除它 |
 | 面板改动似乎被忽略 | 项目的 `.sdd/config.json` 优先级高于全局 Settings 层 | `odoo_config mode=read` 显示生效值 |
 | 某个 spec 目录"找不到" | 你在另一个项目文件夹里 | 在会话中打开那个项目的文件夹 |
+| `odoo_manual capture` 返回 `NEEDS_BROWSER` | 找不到 Chromium/Chrome/Edge | `npx playwright-core install chromium`，或者传 `browser: "chrome"` |
+| `odoo_manual capture` 返回 `NEEDS_WEB_SESSION` | 目标只有 API key，而 Odoo 在交互式登录中拒绝它 | 在 `.env` 里放一个账号密码，或者用 `odoo_session` 创建 `.sdd/session.json` |
+| 截下来的屏幕语言不对 | 浏览器跟随登录用户的语言，而插件从不写 `res.users` | 用一个语言与手册一致的用户来截图 |
+| `allow_actions=true` 被拒绝 | 守卫把它归类为一次变更 | 把 spec 推进到写作阶段，或者登记一份 waiver —— 并使用可丢弃的数据库 |
+| 截图进行到一半就停了 | 第一个失败的步骤会中止运行并写下它已经拿到的内容 | 修好分镜，然后用 `from_step: "<失败步骤的 id>"` 重跑 |
+| `odoo_docs` 在没有片段缺失时仍报 `NEEDS_CONTENT` | 一条手册 ERROR（截图缺少对应图片、canon 已过期），或者有骨架还留在原地 | 读报告里的 `## User manual` 一节 |
 
 ---
 
@@ -797,7 +861,7 @@ JS ModuleLoader bundle，它贡献 **Odoo SDD** 设置区块。
 
 | 文件 | 作用 |
 |---|---|
-| `src/index.ts` | 插件入口：注册 17 个工具、解析配置和策略守卫 |
+| `src/index.ts` | 插件入口：注册 18 个工具、解析配置和策略守卫 |
 | `src/types.ts` | 公开的 payload 类型（绝不包含密钥材料） |
 | `src/credentials.ts` | 凭据级联、`.env` 加载/校验、权限验证、`redact()`、fail-closed |
 | `src/odoo-client.ts` | JSON-RPC 客户端：`common.version`、`authenticate`、`execute_kw`、`button_immediate_*`、`ir.logging`、`/web/session/authenticate` |
@@ -814,6 +878,16 @@ JS ModuleLoader bundle，它贡献 **Odoo SDD** 设置区块。
 | `src/lifecycle.ts` | 归属清单和 `purge` 原语（只处理自有状态；绝不碰 `.env`/`stop.md`/`specs/`） |
 | `src/docs-scan.ts` | 文档规则：OCA 片段 + Diátaxis、版本方案、changelog、index.html、docstring、xpath、OWL |
 | `src/docs-tool.ts` | `odoo_docs` 工具（check/plan/scaffold/report），无需流水线即可使用 |
+| `src/test-scan.ts` | 模块 Python 测试的静态规则（未被导入的测试模块、用例类、断言密度、被吞掉的错误、`cr.commit`、sleep、跳过、按版本区分的 `SavepointCase`） |
+| `src/tests-tool.ts` | `odoo_tests` 工具（`check`/`plan`/`scaffold`），无需流水线即可使用 |
+| `src/manual-model.ts` | 手册工作区解析（3 种模式，带包含性检查）、带稳定 id 的分镜读写、从 canon 出计划、canon 规则校验、步骤安全分级 |
+| `src/manual-canon.ts` | 功能 canon：XML arch 分词器（17 的 `invisible=` 表达式、14–16 的 `attrs`/`states`、statusbar 状态）、模块错误扫描、按版本区分的读取清单（≤15 用 `load_views`，16+ 用 `get_views`，19 中 `groups_id`→`group_ids`）以及一枚稳定的指纹 |
+| `src/manual-tool.ts` | `odoo_manual` 工具：canon / plan / lint / render / explore / capture / import，带只创建策略和失败后恢复的路径 |
+| `src/prose-lint.ts` | 西语和英语的建议性散文规则（AI 腔模式、句子长度、可读性）以及 OCA 格式所依赖的两条结构性 ERROR 规则 |
+| `src/manual-render.ts` | 确定性的 Markdown + Apps 页面渲染、逐文件 `sha256`，以及一个绝不会被覆盖（除非 `overwrite=true`）的手工编辑文件 |
+| `src/manual-capture.ts` | 浏览器引擎：源锁定、只读优先的步骤门禁、带标注的 PNG（1440×900，标注层已移除）、ARIA 快照、`capture.json` |
+| `src/manual-import.ts` | Playwright `codegen` 方言读取器：canon 标签映射、以 WARN 代替猜测的通用步骤、按行拒绝凭据 |
+| `src/manual-audit.ts` | 只读审计，让文档结论能覆盖一份已有手册（截图覆盖率、canon 新旧、散文健康度），没有手册时不改动任何东西 |
 | `src/project-conventions.ts` | 从项目自己的规则解析文档语言，默认英文 |
 
 ### 安全决策
@@ -899,12 +973,26 @@ environment **留空**（不一致会得到 `403 npm-trusted-publisher-not-confi
 
 ## 🙏 致谢
 
-这个插件为 Odoo 开发者社区而构建，它立足于两个生态：
+这个插件为 Odoo 开发者社区而构建，它立足于三个生态：
 
 - **[Odoo Community Association (OCA)](https://github.com/OCA)** —— 这条流水线
   所执行的编码规范、模块布局和质量门禁。
 - **[DeepSeek Harness (DSH)](https://github.com/deepseek-ai)** —— 这个插件所
   运行的插件架构（Cordis tools/plugins、skills、subagents）。
+- **[Playwright](https://playwright.dev)** —— `odoo_manual operation=capture`
+  背后的浏览器引擎，以及导入所读取的 `codegen` 录制。
+
+手册写作指南取材于已出版的文档实践，而不是另立一套自家风格：**Diátaxis**
+（OCA readme 已经在用的片段象限）、**Information Mapping** 和 **John Carroll 的
+极简主义**用于面向任务的过程，**ISO/IEC 26514** 用于用户文档的结构，开篇一幕则
+采用 **StoryBrand / "lead with insight"** 这一派叙事框架。反 AI 腔的散文清单参考了
+公开的 storytelling 与 content skill 合集（尤其是
+[artemnovitckii/content-skills](https://github.com/artemnovitckii/content-skills)、
+[yaxeen/storytelling-skills](https://github.com/yaxeen/storytelling-skills)、
+[Donchitos/team-narrative](https://github.com/Donchitos/team-narrative)、
+[fabric](https://github.com/danielmiessler/fabric) 和
+[lyndonkl](https://github.com/lyndonkl/claude)）—— 留下来的规则是那些能抓住一个真实
+小毛病、又不惩罚一句清楚句子的规则。
 
 感谢每一位贡献模式、评审和想法来塑造 SDD 工作流的人。贡献者：
 

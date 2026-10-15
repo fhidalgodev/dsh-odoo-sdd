@@ -77,7 +77,8 @@ Odoo development pipeline. Two ideas hold it together:
 | **DSH ≥ 0.1.2-rc.1** on **Node ≥ 20** | the plugin mounts as a Cordis bundle and uses the `tools` service |
 | An **existing Odoo instance** reachable over HTTP(S) | the loop needs a real server to install into and read tracebacks from |
 | A **disposable dev/staging database** | verification installs modules and writes test data |
-| *(optional)* a **Playwright** browser tool | only for the UI layer of verification; without it those scenarios are marked for manual checking |
+| *(optional)* a **Playwright** browser tool | only for the UI layer of verification and for narrated-manual captures; without it those scenarios are marked for manual checking |
+| *(optional)* `playwright-core` ≥ 1.63.0 | ships with the plugin as an optional dependency; the capture motor drives Chromium, Chrome or Edge, and answers `NEEDS_BROWSER` with the one-line remedy when none is present |
 
 ---
 
@@ -152,6 +153,13 @@ autonomous mode.
 - 🧪 **Instance-free static layers.** `odoo_validate` (structure + ACL coherence)
   and `odoo_security_scan` (raw SQL, `sudo()`, `auth="none"`, QWeb `t-raw`…)
   give findings with `file:line` before anything is installed.
+- 📖 **Manuals written like a story, checked like code.** `odoo_manual` reads
+  the functional canon of a model from the instance (buttons and the states that
+  show them, required fields, notebook pages, menus, access rules, the exact
+  `raise UserError` sites), plans a storyboard, lints the prose against the
+  canon, captures annotated screenshots **read-only by default**, and renders a
+  manual a person can follow — a labelled screenshot per instruction, with the
+  recovery path when the canon says the button can raise.
 - 🧑⚖️ **Policy the model cannot relax.** Allowlist, guards and delegation mode
   all require native human approval to change.
 - 🤖 **Supervised or autonomous.** The same pipeline runs with a human answering
@@ -179,12 +187,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.14.1`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.15.0`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.14.1, published with a provenance attestation
+npm install dsh-odoo-sdd        # 0.15.0, published with a provenance attestation
 ```
 
 > [!IMPORTANT]
@@ -506,7 +514,7 @@ every tool result.
 
 ---
 
-## 🧰 The 17 tools
+## 🧰 The 18 tools
 
 | Tool | Purpose |
 |---|---|
@@ -521,6 +529,7 @@ every tool result.
 | `sdd_checkpoint` | The rollback surface: `create` (snapshots the workspace, becomes the active checkpoint), `list`, `restore` (files, plus — with `restore_data=true` and `confirm_destructive=true` — the journaled data mutations: the undo runs under the company context the mutation used, turns read shapes into write values, marks each op so a retry never compensates it twice, refuses a journal from another destination, and reports every field it could not restore; it always REPORTS files created after the checkpoint and deletes them only with `remove_created=true`), `drop`, `journal`. |
 | `odoo_docs` | Documentation for a module, usable **on its own** (no spec, phase, checkpoint or instance), so an existing module can simply be documented: `check` (OCA fragments mapped to Diátaxis, version scheme, changelog, `index.html`, docstrings, xpath comments, OWL directives → ERROR/WARN with `file:line`), `plan`, `scaffold` (create-only skeletons, never overwrites) and `report` (persists `docs-report.md`; APPROVED only when nothing is still a scaffold). The changelog entry is mandatory for any change to a released module. |
 | `odoo_security_scan` | Local static security review (no instance needed): raw SQL by concatenation, `eval`/`exec`/`pickle`, hardcoded secrets, unjustified `sudo()`, `auth="none"`, disabled CSRF, QWeb `t-raw`. Findings carry `file:line` + a fix hint; any ERROR blocks `DONE`. |
+| `odoo_manual` | Narrated user manuals built on evidence. **`canon`** reads the functional canon of a model from the instance (views, header buttons and the states that reveal them, required fields, notebook pages, actions, menus, access rules, groups, `raise UserError`/`ValidationError` and `_sql_constraints` sites) and persists it with a fingerprint: the manual may only describe what the canon says. **`plan`** turns the canon into a storyboard (flows, ordered steps, one sentence per step) and is create-only. **`lint`** checks the storyboard and the rendered prose against the canon (`CANON-STALE`, `TARGET-UNKNOWN`, `PLACEHOLDER-UNBOUND`, `ACTS-MISSING`, `RECOVERY-MISSING`, AI-tell patterns in Spanish and English → ERROR/WARN with the exact line). **`explore`** returns the ARIA snapshot of a real screen so no xml id or label is guessed. **`capture`** drives a browser: read-only steps always run, and action steps (`new`/`fill`/`select`/`press`/`click`) require `allow_actions=true` — which the guard treats as a mutation. **`render`** writes the manual and an Apps page (create-only unless `overwrite=true`). **`import`** turns a Playwright `codegen` recording into a flow and refuses any recording that carries credentials. Manuals live where Settings says (`manualsMode`: `specs` next to the spec, `docs` under `manualsDir`, `module` as OCA fragments under the module's `readme/manual/`); standalone work without a spec never blocks on one. `odoo_docs` adds a `## User manual` section to the documentation verdict as soon as a storyboard exists — and stays untouched when there is none. |
 | `odoo_tests` | The testing half of the pipeline, usable **on its own** (no spec, phase, checkpoint or instance): `check` scans the Python tests for what an install log cannot show — a `tests/*.py` that `tests/__init__.py` never imports (Odoo only loads what is imported, so the test never runs), a class that is not an Odoo test case, a `test_*` that asserts nothing or asserts something trivially true, a swallowed exception, `time.sleep`, explicit skips, `cr.commit()` inside a test (it breaks the per-test rollback), `SavepointCase` on 17+, an `HttpCase` without `start_tour` — with assertion density as an informational metric. `plan` maps every acceptance criterion of the spec to the test that mentions it (by AC id or by the `REQ-<AREA>-NN` id of its requirement) and lists the criteria with no test. `scaffold` writes one **RED stub per uncovered criterion** (body raises `NotImplementedError`, never a vacuous pass), create-only and idempotent, adding the import so the file actually loads. |
 | `sdd_handoff` | Writes `specs/<id>/handoff.md` (final phase, verdict, decisions, blockers, checkpoints, the COMPLETE per-spec data journal, effective config, next steps) when the run closes. |
 | `odoo_config` | Reads or updates the persistent configuration and answers **"which project am I in?"**: the resolved root, its provenance (session cwd / configured / process cwd), the specs base, the effective spec directory and the config file in use. |
@@ -717,7 +726,22 @@ has a way back and a way to prove what happened.
   `session_id` shapes) and home-path masking (`/home/user/…` → `~/…`) before
   being shown to the model or persisted to the KB.
 - **Session cookies never reach the model.** `odoo_session` writes the cookie to
-  `.sdd/session.json` (chmod 600) and returns only the path.
+  `.sdd/session.json` (chmod 600) and returns only the path. The capture motor
+  does not even write one: it authenticates the web session in memory and keeps
+  the cookie there for the browser context.
+- **The capture browser is locked to the instance origin.** Every request that
+  leaves the instance's base URL is aborted, so a page that tries to reach a
+  third-party host fails instead of loading. Capture is read-only by default:
+  steps that only observe (`goto`, `menu`, `wait`, `assert`, `explore`,
+  `screenshot`, `confirm`) always run; steps that act (`new`, `fill`, `select`,
+  `press`, `click`) require `allow_actions=true` AND `confirm_destructive=true`,
+  the guard classifies that call as a mutation (spec in a writing phase or a
+  waiver) — and **a click has no compensating entry**: unlike a CRUD call, the
+  plugin cannot undo what the UI did. Capture against a disposable database.
+- **A recording is read as data, and credentials are refused.** `odoo_manual
+  operation=import` parses the `codegen` text; a recording carrying a password
+  field, an `Authorization` header or a cookie is rejected by line, and the
+  value is never echoed back.
 - **A credential file is not written while git can still see it (fail-closed).**
   Before scaffolding a `.env`, the plugin asks git itself — `git check-ignore`
   for the ignore rules and `git ls-files` for the index — and refuses with
@@ -845,6 +869,8 @@ few copy-paste presets where you need them.
         maxCheckpoints: 5
         documentationPolicy: required   # required | optional | off
         documentationLanguage: ''       # empty = English unless the project says otherwise
+        manualsMode: specs              # specs (next to the spec) | docs (under manualsDir) | module (readme/manual/)
+        manualsDir: docs/manuals        # used only when manualsMode is docs
 ```
 
 > [!IMPORTANT]
@@ -858,7 +884,7 @@ few copy-paste presets where you need them.
 
 ## 🤖 Model experience
 
-The agent sees 17 tools with self-contained descriptions. Typical flow:
+The agent sees 18 tools with self-contained descriptions. Typical flow:
 `sdd_phase init` → security interview + `odoo_connect` → gated phases with
 `APPROVED` → `sdd_checkpoint create` → code → `odoo_security_scan` →
 `odoo_module install` → on traceback, `odoo_errors` + `sdd_phase fail` (which may
@@ -898,6 +924,23 @@ when the model selects it (the catalog is summaries only) or when you type
   delegation decision from `.sdd/setup-state.json` (set with `odoo_setup
   mode=autonomy`) and enforces the security interview through the ARCHITECTURE
   content gate. Tracked as pending work.
+- **Manual capture needs a browser and a password** — `playwright-core` is an
+  optional dependency and the browser itself is not shipped: without Chromium,
+  Chrome or Edge the capture answers `NEEDS_BROWSER` with the install line. A
+  web session also needs the account **password** (Odoo refuses an API key on
+  interactive logins), so an API-key-only project can still write and lint a
+  manual but cannot drive the screenshots automatically.
+- **The manual covers one model at a time** — the canon is read per model, so a
+  cross-model walkthrough is several flows planned against several canons, and
+  the storyboard keeps the fingerprint of the canon it was planned with
+  (`CANON-STALE` warns when the instance moved).
+- **UI families 15, 16, 18 and 19 are declared, not proven** — the capture
+  selectors are verified end-to-end on 17; the other families share the same
+  structure but must be checked against a dev instance before you rely on them,
+  and `familyFor` refuses a major it does not know instead of guessing.
+- **Prose lint is advisory** — the AI-tell rules are heuristics and every one of
+  them is a WARN by design in v1: only the structural rules (one sentence per
+  captured step, no heading inside a procedure) and the canon rules can block.
 - **No rich UI renderer** — tool output is text in the DSH web GUI.
 
 ---
@@ -914,6 +957,12 @@ when the model selects it (the catalog is summaries only) or when you type
 | Everything is halted | `stop.md` exists | read it, then remove it |
 | A panel change seems ignored | the project's `.sdd/config.json` outranks the global Settings layer | `odoo_config mode=read` shows the effective values |
 | A spec directory "cannot be found" | you are in a different project folder | open that project's folder in a session |
+| `NEEDS_BROWSER` from `odoo_manual capture` | no Chromium/Chrome/Edge was found | `npx playwright-core install chromium`, or pass `browser: "chrome"` |
+| `NEEDS_WEB_SESSION` from `odoo_manual capture` | the target only has an API key, and Odoo refuses one on interactive logins | put an account password in `.env`, or create `.sdd/session.json` with `odoo_session` |
+| The captured screen is in the wrong language | the browser follows the login user's language, and the plugin never writes to `res.users` | capture with a user whose language matches the manual |
+| `allow_actions=true` is refused | the guard classifies it as a mutation | move the spec into a writing phase, or record a waiver — and use a disposable database |
+| A capture stops midway | the first failing step aborts the run and writes what it got | fix the storyboard, then re-run with `from_step: "<the failing step id>"` |
+| `odoo_docs` says `NEEDS_CONTENT` with no fragment missing | a manual ERROR (a screenshot without its image, a stale canon) or a scaffold left in place | read the `## User manual` section of the report |
 
 ---
 
@@ -934,7 +983,7 @@ settings section.
 
 | File | Role |
 |---|---|
-| `src/index.ts` | Plugin entry: registration of the 17 tools, config resolution and the policy guard |
+| `src/index.ts` | Plugin entry: registration of the 18 tools, config resolution and the policy guard |
 | `src/types.ts` | Public payload types (never contain secret material) |
 | `src/credentials.ts` | Credential cascade, `.env` load/validation, permission verification, `redact()`, fail-closed |
 | `src/odoo-client.ts` | JSON-RPC client: `common.version`, `authenticate`, `execute_kw`, `button_immediate_*`, `ir.logging`, `/web/session/authenticate` |
@@ -957,6 +1006,14 @@ settings section.
 | `src/docs-scan.ts` | Documentation rules: OCA fragments + Diátaxis, version scheme, changelog, index.html, docstrings, xpath, OWL |
 | `src/docs-tool.ts` | The `odoo_docs` tool (check/plan/scaffold/report), usable without the pipeline |
 | `src/project-conventions.ts` | Resolves the documentation language from the project's own rules, defaulting to English |
+| `src/manual-model.ts` | Manual workspace resolution (3 modes, containment-checked), storyboard read/write with stable ids, plan from the canon, canon-rule validation, step safety classes |
+| `src/manual-canon.ts` | The functional canon: XML arch tokenizer (17 `invisible=` expressions, 14–16 `attrs`/`states`, statusbar states), module error scan, per-version read list (`load_views` ≤15, `get_views` 16+, `groups_id`→`group_ids` in 19) and a stable fingerprint |
+| `src/manual-tool.ts` | The `odoo_manual` tool: canon / plan / lint / render / explore / capture / import, with the create-only policy and the resume-after-failure path |
+| `src/prose-lint.ts` | Advisory prose rules in Spanish and English (AI-tell patterns, sentence length, readability) plus the two structural ERROR rules the OCA format depends on |
+| `src/manual-render.ts` | Deterministic Markdown + Apps-page rendering, per-file `sha256`, and a hand-edited file that is never overwritten unless `overwrite=true` |
+| `src/manual-capture.ts` | The browser motor: origin lock, read-only-first step gating, annotated PNGs (1440×900, overlay removed), ARIA snapshots, `capture.json` |
+| `src/manual-import.ts` | Playwright `codegen` dialect reader: canon label mapping, generic steps with WARN instead of guesses, credential rejection by line |
+| `src/manual-audit.ts` | Read-only audit that lets the documentation verdict cover an existing manual (capture coverage, canon staleness, prose health) and change nothing when there is none |
 
 ### Security decisions
 
@@ -1046,12 +1103,28 @@ with a notice when it is not (a `file:` install has no devDependencies).
 
 ## 🙏 Acknowledgments
 
-Built for the Odoo developer community, this plugin rests on two ecosystems:
+Built for the Odoo developer community, this plugin rests on three ecosystems:
 
 - **[Odoo Community Association (OCA)](https://github.com/OCA)** — the coding
   conventions, module layout and quality gates this pipeline enforces.
 - **[DeepSeek Harness (DSH)](https://github.com/deepseek-ai)** — the plugin
   architecture (Cordis tools/plugins, skills, subagents) this plugin runs on.
+- **[Playwright](https://playwright.dev)** — the browser motor behind
+  `odoo_manual operation=capture`, and the `codegen` recordings the import reads.
+
+The manual writing guide draws on published documentation practice rather than
+inventing a house style: **Diátaxis** (the fragment quadrants the OCA readme
+already follows), **Information Mapping** and **John Carroll's minimalism** for
+task-oriented procedures, **ISO/IEC 26514** for the structure of user
+documentation, and the **StoryBrand / "lead with insight"** school of narrative
+framing for the opening act. The anti-AI prose list was informed by public
+storytelling and content-skill collections (notably
+[artemnovitckii/content-skills](https://github.com/artemnovitckii/content-skills),
+[yaxeen/storytelling-skills](https://github.com/yaxeen/storytelling-skills),
+[Donchitos/team-narrative](https://github.com/Donchitos/team-narrative),
+[fabric](https://github.com/danielmiessler/fabric) and
+[lyndonkl](https://github.com/lyndonkl/claude)) — the rules that survived are
+the ones that catch a real tic without punishing a clear sentence.
 
 Thank you to everyone who contributes patterns, reviews and ideas that shape the
 SDD workflow. Contributors:

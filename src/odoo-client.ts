@@ -37,7 +37,7 @@ const MODULE_OP_TIMEOUT_MS = 300_000;
  * answer. Callers that only mutate must treat `transport`/`protocol` as
  * INDETERMINATE, never as a plain failure.
  */
-export type RpcErrorKind = "transport" | "server" | "protocol";
+export type RpcErrorKind = "transport" | "server" | "protocol" | "needs_password";
 
 /** Result of a JSON-RPC call: either the payload or a sanitized error. */
 export type RpcResult<T> =
@@ -598,22 +598,24 @@ export class OdooClient {
 	}
 
 	/**
-	 * Mint a passwordless web session (the connect_as_user pattern) and store
-	 * the cookie in a chmod-600 runtime file for Playwright/UI tests. The
-	 * cookie value itself is NEVER returned to the model — only the file path.
-	 * @param projectRoot - workspace root; the cookie lands in .sdd/session.json.
-	 * @returns the path of the session file and the authenticated uid.
+	 * Authenticate an Odoo WEB session IN MEMORY: no file is written, and the
+	 * session id is only ever returned to in-process callers (the tools never
+	 * echo it). Everything that needs a browser cookie builds on this; the
+	 * persisting variant is {@link OdooClient.mintSession}.
+	 *
+	 * `/web/session/authenticate` goes through `Session.authenticate`, which
+	 * authenticates with `{'interactive': True}` (odoo/http.py), and
+	 * `res.users._check_credentials` only consults the API-key table under
+	 * `if not interactive`. So an API key is REFUSED here by Odoo itself — and
+	 * when the credential was declared as one, the request is not even sent:
+	 * there is nothing to learn from a call that cannot succeed.
+	 * @returns the session id (without the `session_id=` prefix) and the uid.
 	 */
-	async mintSession(projectRoot: string): Promise<RpcResult<{ sessionFile: string; uid: number }>> {
-		// `/web/session/authenticate` goes through `Session.authenticate`, which
-		// authenticates with `{'interactive': True}` (odoo/http.py), and
-		// `res.users._check_credentials` only consults the API-key table under
-		// `if not interactive`. So an API key is REFUSED here by Odoo itself — and
-		// when the credential was declared as one, the request is not even sent:
-		// there is nothing to learn from a call that cannot succeed.
+	async webLogin(): Promise<RpcResult<{ sessionId: string; uid: number }>> {
 		if (this.#credentials.secretKind === "api_key") {
 			return {
 				ok: false,
+				errorKind: "needs_password",
 				error:
 					"A web session needs the account PASSWORD, and this target is configured with an API key " +
 					"(ODOO_API_KEY): Odoo skips the API-key check for interactive logins, so the request was NOT " +
@@ -653,14 +655,27 @@ export class OdooClient {
 		if (sessionId == null) {
 			return { ok: false, error: "Authenticated but no session_id cookie was returned." };
 		}
+		return { ok: true, value: { sessionId, uid: res.value.uid } };
+	}
+
+	/**
+	 * Mint a passwordless web session (the connect_as_user pattern) and store
+	 * the cookie in a chmod-600 runtime file for Playwright/UI tests. The
+	 * cookie value itself is NEVER returned to the model — only the file path.
+	 * @param projectRoot - workspace root; the cookie lands in .sdd/session.json.
+	 * @returns the path of the session file and the authenticated uid.
+	 */
+	async mintSession(projectRoot: string): Promise<RpcResult<{ sessionFile: string; uid: number }>> {
+		const login = await this.webLogin();
+		if (!login.ok) return login;
 		const sessionFile = join(projectRoot, ".sdd", "session.json");
 		mkdirSync(dirname(sessionFile), { recursive: true });
 		writeFileSync(
 			sessionFile,
-			JSON.stringify({ url: this.#credentials.url, db: this.#credentials.db, session_id: sessionId }, null, 2),
+			JSON.stringify({ url: this.#credentials.url, db: this.#credentials.db, session_id: login.value.sessionId }, null, 2),
 			{ mode: 0o600 },
 		);
 		chmodSync(sessionFile, 0o600);
-		return { ok: true, value: { sessionFile, uid: res.value.uid } };
+		return { ok: true, value: { sessionFile, uid: login.value.uid } };
 	}
 }

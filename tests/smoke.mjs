@@ -3687,11 +3687,33 @@ console.log("== odoo_docs (fragments, Diátaxis, changelog, scaffold) ==");
 	check("scaffold creates the index.html skeleton", existsSync(join(modDir, "static", "description", "index.html")));
 	check("scaffold marks the fragments as unfinished", dr.findings.some((f) => f.rule === "docs-fragment-scaffolded"));
 	check("scaffolded fragments are reported, not approved", /NEEDS_CONTENT|SCAFFOLD/.test(dr.summary) || dr.findings.some((f) => f.rule === "docs-fragment-scaffolded"));
+	const scaffoldText = readFileSync(join(modDir, "readme", "DESCRIPTION.md"), "utf8");
+	check("scaffold does NOT write an H1 (the OCA bot owns it)", !/^#\s/m.test(scaffoldText), JSON.stringify(scaffoldText.slice(0, 120)));
 	const before = readFileSync(join(modDir, "readme", "DESCRIPTION.md"), "utf8");
-	writeFileSync(join(modDir, "readme", "DESCRIPTION.md"), before.replace("# DESCRIPTION", "# DESCRIPTION\n\nX\n").replace(/<!-- odoo-sdd:scaffold[^>]*-->/, ""), { mode: 0o600 });
+	writeFileSync(join(modDir, "readme", "DESCRIPTION.md"), before.replace(/<!--[^>]*-->/g, "").trim() + "\n\nX\n", { mode: 0o600 });
 	dr = await docs.execute({ operation: "scaffold", module_dir: modDir });
 	const after = readFileSync(join(modDir, "readme", "DESCRIPTION.md"), "utf8");
 	check("scaffold NEVER overwrites existing content", after.includes("X"));
+
+	// Fragment content lint: the OCA bot owns the H1, and referenced images
+	// must exist and carry alt text. Fenced examples never count as prose.
+	mkdirSync(join(modDir, "static", "description"), { recursive: true });
+	writeFileSync(join(modDir, "static", "description", "ok.png"), "png", { mode: 0o600 });
+	writeFileSync(
+		join(modDir, "readme", "USAGE.md"),
+		"# Usage\n\n![screenshot](../static/description/ok.png)\n\n![](missing.png)\n\n```md\n![x](fenced.png)\n```\n",
+		{ mode: 0o600 },
+	);
+	const usageScan = docsMod.scanDocs(modDir);
+	check("a hand-written H1 in a fragment is a WARN", usageScan.findings.some((f) => f.rule === "docs-fragment-h1" && f.severity === "WARN" && f.file === "readme/USAGE.md" && f.line === 1));
+	check("a relative image that does not exist is an ERROR", usageScan.findings.some((f) => f.rule === "docs-fragment-image-missing" && f.severity === "ERROR" && f.line === 5));
+	check("an image without alt text is a WARN", usageScan.findings.some((f) => f.rule === "docs-fragment-image-alt" && f.line === 5));
+	check("an existing image referenced the OCA way is clean", !usageScan.findings.some((f) => f.rule.startsWith("docs-fragment-image") && f.line === 3));
+	check("an image inside a fenced example is never linted", !usageScan.findings.some((f) => /fenced\.png/.test(f.message)));
+	check("fragmentImages skips fences and keeps line numbers", (() => {
+		const imgs = docsMod.fragmentImages("# t\n\n![a](one.png)\n\n```md\n![b](two.png)\n```\n");
+		return imgs.length === 1 && imgs[0].target === "one.png" && imgs[0].line === 3;
+	})());
 
 	// report: needs a spec to persist, and refuses a hollow doc set.
 	dr = await docs.execute({ operation: "report", module_dir: modDir, mode: "bug" });
@@ -4345,6 +4367,25 @@ console.log("== API key as a first-class credential ==");
 		const pwClient = new clientModKey.OdooClient(onlyPassword.credentials, { api: "jsonrpc" });
 		await pwClient.mintSession(dir);
 		check("a password IS attempted for a web session (the guard is specific)", sessionCalls === 1, `requests=${sessionCalls}`);
+		// webLogin is the in-memory variant the browser path builds on: same
+		// guard and hint, the cookie comes back to the caller, and NOTHING is
+		// written to disk.
+		const realFetchLogin = globalThis.fetch;
+		globalThis.fetch = async () =>
+			new Response(JSON.stringify({ jsonrpc: "2.0", id: "1", result: { uid: 7, session_id: "payload" } }), {
+				status: 200,
+				headers: { "set-cookie": "session_id=from-cookie; Path=/; HttpOnly" },
+			});
+		try {
+			const fresh = join(dir, "webLoginWritesNothing");
+			mkdirSync(fresh, { recursive: true });
+			const mem = await new clientModKey.OdooClient(onlyPassword.credentials, { api: "jsonrpc" }).webLogin();
+			check("webLogin returns the session in memory", mem.ok === true && mem.value.sessionId === "from-cookie" && mem.value.uid === 7, mem.ok ? "" : mem.error.slice(0, 110));
+			check("webLogin prefers the Set-Cookie header over the payload", mem.ok === true && mem.value.sessionId !== "payload");
+			check("webLogin writes NOTHING to disk", !existsSync(join(fresh, ".sdd", "session.json")));
+		} finally {
+			globalThis.fetch = realFetchLogin;
+		}
 	} finally {
 		globalThis.fetch = realFetchKey;
 	}

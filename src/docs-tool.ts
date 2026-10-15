@@ -64,14 +64,15 @@ export interface DocsToolDeps {
 /** Default language the plugin assumes until something says otherwise. */
 const DEFAULT_LANGUAGE = "en";
 
-/** Minimal headings written into a scaffolded fragment, per Diátaxis quadrant. */
-function scaffoldBody(file: string, quadrant: string, language: string): string {
+/** Minimal skeleton written into a scaffolded fragment, per Diátaxis quadrant. */
+function scaffoldBody(_file: string, quadrant: string, language: string): string {
 	const marker = `<!-- ${SCAFFOLD_MARKER}: replace this skeleton with real content -->`;
-	const heading = file.replace(/\.md$/, "");
+	// No H1 on purpose: the OCA readme bot generates the fragment's H1 from the
+	// file name, so the content must start at ## (see docs-fragment-h1).
 	if (language === "es") {
-		return `${marker}\n# ${heading}\n\n<!-- ${quadrant}. Escribí el contenido real; borrá este marcador al terminar. -->\n\n`;
+		return `${marker}\n\n<!-- ${quadrant}. Escribí el contenido real; borrá este marcador al terminar. -->\n\n`;
 	}
-	return `${marker}\n# ${heading}\n\n<!-- ${quadrant}. Write the real content and remove this marker when done. -->\n\n`;
+	return `${marker}\n\n<!-- ${quadrant}. Write the real content and remove this marker when done. -->\n\n`;
 }
 
 /** Skeleton for the Apps page, honest about being a starting point. */

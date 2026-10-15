@@ -26,6 +26,8 @@ non-technical reader can follow and a developer can trust.
 
 ## The fragments (OCA readme/ + Diátaxis)
 Write one fragment per concern; the OCA bot compiles them into `README.rst`.
+Every fragment starts at `##`: the OCA bot generates the H1 from the file name,
+so a hand-written `#` heading is duplicated in the compiled README.
 - `DESCRIPTION.md` — **Reference, mandatory**: what the module is and does.
 - `CONTRIBUTORS.md` — **Reference, mandatory**: credit list.
 - `CONTEXT.md` — **Explanation**: why it exists, which business need it covers.

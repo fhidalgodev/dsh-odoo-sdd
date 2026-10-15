@@ -103,6 +103,56 @@ const VERSION_SCHEME = /^\d+\.\d+\.\d+\.\d+\.\d+$/;
 /** Placeholder markers that mean "not actually written". */
 const PLACEHOLDER = /^\s*(?:<!--.*?-->\s*)?(?:todo|tbd|fixme|xxx|\.\.\.|-)?\s*$/i;
 
+/** One markdown image reference found outside fenced code blocks. */
+export interface FragmentImage {
+	/** The alt text as written (may be empty — that is what the lint flags). */
+	alt: string;
+	/** The target as written: a relative path, an absolute path, or a URL. */
+	target: string;
+	/** 1-based line where the reference appears in the original text. */
+	line: number;
+}
+
+/**
+ * Drop fenced code blocks so line-level prose rules never read examples as
+ * if they were the document itself (a ```block``` quoting "# Title" or an
+ * image syntax must not trigger the rules).
+ * @param text - full markdown text.
+ * @returns the text with fenced blocks blanked out, line count preserved.
+ */
+export function outsideCodeFences(text: string): string {
+	const lines = text.split(/\r?\n/);
+	let inFence = false;
+	return lines
+		.map((line) => {
+			if (/^\s*(```|~~~)/.test(line)) {
+				inFence = !inFence;
+				return "";
+			}
+			return inFence ? "" : line;
+		})
+		.join("\n");
+}
+
+/**
+ * Extract every markdown image reference outside fenced code blocks.
+ * @param text - full markdown text (fences are skipped).
+ * @returns the references in document order, with 1-based line numbers.
+ */
+export function fragmentImages(text: string): FragmentImage[] {
+	const out: FragmentImage[] = [];
+	const stripped = outsideCodeFences(text);
+	const lines = stripped.split("\n");
+	for (let i = 0; i < lines.length; i += 1) {
+		const re = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
+		let m: RegExpExecArray | null;
+		while ((m = re.exec(lines[i]!)) !== null) {
+			out.push({ alt: m[1]!.trim(), target: m[2]!, line: i + 1 });
+		}
+	}
+	return out;
+}
+
 /**
  * Marker written into scaffolded skeletons. A fragment carrying it is a valid
  * starting point but NOT finished documentation, so it can never yield an
@@ -269,6 +319,48 @@ export function scanDocs(moduleDir: string, options: DocsScanOptions = {}): Docs
 				message: `${fragment.file} is still the generated skeleton.`,
 				hint: `Replace the scaffold with the real ${fragment.quadrant} content: ${fragment.purpose}.`,
 			});
+		}
+		if (text !== null && !PLACEHOLDER.test(text) && !text.includes(SCAFFOLD_MARKER)) {
+			// The OCA readme bot generates the fragment's H1 from the file name,
+			// so a fragment that carries its own `#` heading ends up with the
+			// title twice on the compiled README.rst.
+			const stripped = outsideCodeFences(text);
+			const h1Line = stripped.split("\n").findIndex((l) => /^#\s+\S/.test(l));
+			if (h1Line >= 0) {
+				findings.push({
+					severity: "WARN",
+					rule: "docs-fragment-h1",
+					file: rel,
+					line: h1Line + 1,
+					message: `${fragment.file} starts with a "#" H1.`,
+					hint: "Start at ## — the OCA bot generates the H1 from the fragment name, so a hand-written H1 is duplicated in README.rst.",
+				});
+			}
+			// Images: a relative target that does not resolve breaks the compiled
+			// README (ERROR), and an empty alt is an accessibility gap (WARN).
+			for (const img of fragmentImages(text)) {
+				const external = /^(?:[a-z]+:|#|\/)/i.test(img.target);
+				if (!external && !existsSync(join(readmeDir, img.target))) {
+					findings.push({
+						severity: "ERROR",
+						rule: "docs-fragment-image-missing",
+						file: rel,
+						line: img.line,
+						message: `Image "${img.target}" does not exist relative to readme/.`,
+						hint: `Add the file (typically static/description/..., linked as ../static/description/...) or fix the path.`,
+					});
+				}
+				if (img.alt === "") {
+					findings.push({
+						severity: "WARN",
+						rule: "docs-fragment-image-alt",
+						file: rel,
+						line: img.line,
+						message: "Image without alt text.",
+						hint: 'Add alt="..." describing the screenshot (accessibility and searchability).',
+					});
+				}
+			}
 		}
 	}
 

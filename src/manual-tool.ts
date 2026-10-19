@@ -4,7 +4,7 @@
  * instance (NEVER invented), persist it with its fingerprint in the manual
  * workspace, and summarize it. Later phases add plan/lint/render/capture.
  */
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { existsSync, readFileSync, lstatSync, realpathSync } from "node:fs";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { resolveModuleDir } from "./paths.js";
@@ -491,7 +491,9 @@ export function importRecordingOp(
 				"Record with `npx @playwright/cli open <url> --headed`, log in BY HAND, then recording-start / recording-stop.",
 		};
 	}
-	const abs = recording.startsWith("/") ? recording : join(projectRoot, recording);
+	// isAbsolute, not startsWith("/"): a Windows drive path is absolute too, and
+	// a POSIX-only test concatenated "D:\\..." under the project root.
+	const abs = isAbsolute(recording) ? resolve(recording) : resolve(projectRoot, recording);
 	let stat;
 	try {
 		stat = lstatSync(abs);

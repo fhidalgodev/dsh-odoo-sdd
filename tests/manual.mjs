@@ -800,6 +800,16 @@ test('test', async ({ page }) => {
 	check("import REFUSES a symlinked recording", impLink.ok === false && /symlink/.test(impLink.detail));
 	const impSecret = toolMod.importRecordingOp(secretPath, "Secreto", false, impWs, "imp", art, fakeDeps, impWs);
 	check("the tool surfaces the credential rejection", impSecret.ok === false && /credential/i.test(impSecret.detail));
+	// The recording may be given as an absolute path, and on Windows that starts
+	// with a drive letter: a POSIX-only test used to treat "D:\..." as relative
+	// and the file was "not found".
+	const absWs = join(impWs, "abs");
+	mkdirSync(absWs, { recursive: true });
+	model.writeStoryboard(absWs, { schema: "dsh-odoo-sdd/manual/1", slug: "abs", flows: [] });
+	const absRec = join(absWs, "rec.ts");
+	writeFileSync(absRec, codegenTest, { mode: 0o600 });
+	const impAbs = toolMod.importRecordingOp(absRec, "Abs", false, absWs, "abs", art, fakeDeps, absWs);
+	check("import accepts an absolute recording path", impAbs.ok === true, impAbs.ok ? "" : impAbs.detail);
 	rmSync(impWs, { recursive: true, force: true });
 }
 

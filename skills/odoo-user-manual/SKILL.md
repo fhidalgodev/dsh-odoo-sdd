@@ -19,10 +19,36 @@ buttons or the states. Read the full canon summary before writing a single
 sentence: buttons with `visibleStates`, required fields, groups and the error
 catalogue.
 
+**The interview is evidence too** — answer it when you call the canon:
+
+- `as_user`: WHO reads the manual (a login, or `admin`). Without it the canon
+  records the connected user (`asUserSource=connected`), or `unknown` when the
+  connection carries no login — and `lint` fails with `INTERVIEW-MISSING` until
+  the storyboard declares it.
+- `module`/`modules`: which modules the manual covers. The canon then
+  inventories EVERY menu, EVERY action and EVERY model the modules own — and
+  each model arrives with ITS fields (label, type, required,
+  relation/selection, groups), its form AND list buttons, its statusbar states
+  and its per-group access rows. `module` may stand alone: the first model of
+  the module is then read as the primary one.
+- `groups`: the access groups to walk, one flow each. Default: every group the
+  module mentions on a menu, an action or an access row (the module's own
+  declaration). Never answer these by guessing: an unanswered question is a
+  finding, not an assumption.
+
+That inventory is the coverage surface: nothing about the module may be left at
+"high level", and a model the server denies is marked `unreadable` instead of
+being invented.
+
 ## Phase 2 — PLAN (gate: storyboard validated with no ERROR)
 
-`odoo_manual operation=plan` generates the skeleton (goto → new → fill required →
-header buttons in state order). Audience:
+`odoo_manual operation=plan` drafts the skeleton (goto → new → fill required →
+header buttons in state order), one flow per module menu, one flow per
+access-group walk (`role` = the group), and it SEEDS `docs.models[model]` with
+the empty cells you must fill: one sentence per field ("what it is for") and per
+button ("what it does"). Re-running `plan` MERGES: your narration, captures and
+prose are kept by id, new menus and groups get a flow, and nothing you wrote is
+deleted behind your back. Audience:
 
 - **Bottom-up by use case**: what is the user trying to achieve? One flow
   per case, not one flow per button.
@@ -31,9 +57,15 @@ header buttons in state order). Audience:
 
 Diátaxis structure → CONTEXT, CONFIGURE, USAGE. Information Mapping: separate
 Procedure (the user's steps) from Process (what Odoo does: it goes as a quote).
-After narrating, `operation=lint`: the structural rules
-(`procedure-one-sentence`, `heading-in-narrative`, `ACTS-MISSING`,
-`RECOVERY-MISSING` with raise evidence) are ERROR; the rest is a warning.
+After narrating, `operation=lint`. ERROR (the manual is not honest yet):
+`procedure-one-sentence`, `heading-in-narrative`, `ACTS-MISSING`,
+`RECOVERY-MISSING` with raise evidence, `MODULE-COVERAGE` while a menu or a
+navigable action is unreferenced, `INTERVIEW-MISSING`, `FIELD-COVERAGE`,
+`BUTTON-COVERAGE`, `WORKFLOW-COVERAGE` and `GROUP-COVERAGE` while the docs
+checklist still has an empty cell or a group is not walked. WARN: the rest,
+including `ROLE-UNVERIFIED` (a capture runs as the connected user, so it cannot
+prove what another group sees) and `MODEL-UNREADABLE`. A `skip` with a reason
+is documented coverage, not an omission.
 
 **Approval gate**: in `supervised` mode, the developer approves the
 outline (flows and titles) and then the narrated storyboard before capturing. In
@@ -42,8 +74,11 @@ in audit mode and human-proxy authorizes the result.
 
 ## Phase 3 — NARRATIVE
 
-Three acts: I CONTEXT (what for, who), II USAGE (procedure: 1 sentence per
-step + 1 image), III RESOLUTION (error table from the canon + recovery).
+Three acts: I CONTEXT (what for, who — the interview's audience), II USAGE
+(procedure: 1 sentence per step + 1 image), III RESOLUTION (error table from the
+canon + recovery). The docs checklist is prose with the canon's own evidence
+next to it: the TYPE, the states and the groups come from the canon, the "what
+it is for" is yours — never restate a type the canon does not show.
 Levers: lead with insight, gap vs gain (with a number or label from the canon,
 never empty rhetoric), tension-turn-reward in act III. "What Odoo does"
 goes as a quote, not as a step. Full reference:
@@ -73,6 +108,11 @@ the existing flow is replaced.
 `odoo_manual operation=render` writes MANUAL.md and index.html (files edited by
 hand are not overwritten without `overwrite=true`). Run `operation=lint` again.
 **The final verdict comes from `odoo_docs report`, never from this skill.**
+The render adds a section per model (one row per field and per button, with the
+type/states/groups from the canon and your sentence) and a section per access
+group. One credential cannot capture as another group: register a second
+instance in Settings and capture there, or declare `docs.groupsWhy` — that
+downgrades `GROUP-COVERAGE` to a documented WARN, never hides it.
 If the manual lives in a module (manualsMode=module), the fragments start at `##`
 and pass the odoo_docs rules (H1 from the OCA bot, images that exist, mandatory
 alt).

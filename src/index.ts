@@ -997,36 +997,51 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			installSection(owner: unknown, ns: string, schema: unknown, entry: unknown, hooks: SddsSettingsHooks): void;
 		}>;
 	};
+	// Type-checked reads of a configuration layer. A host can hand a field down
+	// as something other than its declared type — the Settings service resolves
+	// a `.volatile()` string field to a descriptor object when it has no value
+	// for it — and `?? fallback` does NOT catch that: an object is not nullish,
+	// so it flows straight through. An object where a path was expected crashes
+	// inside `node:path` ("The \"path\" argument must be of type string.
+	// Received an instance of Object") naming nothing the developer can fix; a
+	// truthy object where a boolean was expected silently disables the guard
+	// that reads it. Every layer therefore ends at the declared type or at the
+	// built-in default.
+	const pickString = (v: unknown, fallback: string): string => (typeof v === "string" && v !== "" ? v : fallback);
+	const pickBool = (v: unknown, fallback: boolean): boolean => (typeof v === "boolean" ? v : fallback);
+	const pickNum = (v: unknown, fallback: number): number => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
+	const pickList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+
 	const sddsDefaultConfig = {
 		// Kept in the schema for headless/CI hosts, but NOT offered as an
 		// editable field: the project root is resolved per session (the folder
 		// the developer opened), so a plugin-wide value would be wrong for every
 		// project but one.
-		projectRoot: config.projectRoot ?? "",
-		specsMode: config.specsMode ?? "project",
-		specsRoot: config.specsRoot ?? "",
-		specsDir: config.specsDir ?? "specs",
-		executeAllowlist: config.executeAllowlist ?? [],
-		methodAllowlist: config.methodAllowlist ?? [],
-		communityRepoUrl: config.communityRepoUrl ?? "https://github.com/odoo/odoo",
-		communityRepoPath: config.communityRepoPath ?? "",
-		enterpriseRepoUrl: config.enterpriseRepoUrl ?? "https://github.com/odoo/enterprise",
-		enterpriseRepoPath: config.enterpriseRepoPath ?? "",
-		autonomy: config.autonomy ?? "supervised",
-		requireCheckpointBeforeMutation: config.requireCheckpointBeforeMutation ?? true,
-		requireGitignoreBeforeCredentials: config.requireGitignoreBeforeCredentials ?? true,
-		requireSpecForChanges: config.requireSpecForChanges ?? true,
-		adoptProjectPointerHint: config.adoptProjectPointerHint ?? true,
-		odooApi: config.odooApi ?? "auto",
-		requireInstanceChoice: config.requireInstanceChoice ?? true,
-		securityReviewRequired: config.securityReviewRequired ?? true,
-		securityInterviewRequired: config.securityInterviewRequired ?? true,
-		auditAllTools: config.auditAllTools ?? true,
-		maxCheckpoints: config.maxCheckpoints ?? 5,
-		documentationPolicy: config.documentationPolicy ?? "required",
-		documentationLanguage: config.documentationLanguage ?? "",
-		manualsMode: config.manualsMode ?? "specs",
-		manualsDir: config.manualsDir ?? "docs/manuals",
+		projectRoot: pickString(config.projectRoot, ""),
+		specsMode: pickString(config.specsMode, "project"),
+		specsRoot: pickString(config.specsRoot, ""),
+		specsDir: pickString(config.specsDir, "specs"),
+		executeAllowlist: pickList(config.executeAllowlist),
+		methodAllowlist: pickList(config.methodAllowlist),
+		communityRepoUrl: pickString(config.communityRepoUrl, "https://github.com/odoo/odoo"),
+		communityRepoPath: pickString(config.communityRepoPath, ""),
+		enterpriseRepoUrl: pickString(config.enterpriseRepoUrl, "https://github.com/odoo/enterprise"),
+		enterpriseRepoPath: pickString(config.enterpriseRepoPath, ""),
+		autonomy: pickString(config.autonomy, "supervised"),
+		requireCheckpointBeforeMutation: pickBool(config.requireCheckpointBeforeMutation, true),
+		requireGitignoreBeforeCredentials: pickBool(config.requireGitignoreBeforeCredentials, true),
+		requireSpecForChanges: pickBool(config.requireSpecForChanges, true),
+		adoptProjectPointerHint: pickBool(config.adoptProjectPointerHint, true),
+		odooApi: pickString(config.odooApi, "auto"),
+		requireInstanceChoice: pickBool(config.requireInstanceChoice, true),
+		securityReviewRequired: pickBool(config.securityReviewRequired, true),
+		securityInterviewRequired: pickBool(config.securityInterviewRequired, true),
+		auditAllTools: pickBool(config.auditAllTools, true),
+		maxCheckpoints: pickNum(config.maxCheckpoints, 5),
+		documentationPolicy: pickString(config.documentationPolicy, "required"),
+		documentationLanguage: pickString(config.documentationLanguage, ""),
+		manualsMode: pickString(config.manualsMode, "specs"),
+		manualsDir: pickString(config.manualsDir, "docs/manuals"),
 	};
 	// Live source of the Settings section. The host hands us a THUNK returning
 	// the currently authoritative value (the resolved user scope while attached,
@@ -3357,50 +3372,60 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		for (const [key, value] of Object.entries(data)) {
 			if (value !== undefined) merged[key] = value;
 		}
-		const asString = (v: unknown, fallback: string): string => (typeof v === "string" && v !== "" ? v : fallback);
-		const asList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
-		const asBool = (v: unknown, fallback: boolean): boolean => (typeof v === "boolean" ? v : fallback);
-		const asNum = (v: unknown, fallback: number): number => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
+		// Every field resolves through all three layers and ends at its declared
+		// type (see `pickString` above): the project's `.sdd/config.json` wins,
+		// then Settings, then the deployment config, and a layer that hands down
+		// something else — an empty string, a descriptor object — is skipped
+		// instead of accepted. A key missing from BOTH the deployment config and
+		// the file used to reach `node:path` as an object and crash every tool
+		// that resolved a folder from it.
+		const deployed = config as unknown as Record<string, unknown>;
+		const cfgString = (key: string, fallback: string): string => pickString(merged[key], pickString(deployed[key], fallback));
+		const cfgBool = (key: string, fallback: boolean): boolean => pickBool(merged[key], pickBool(deployed[key], fallback));
+		const cfgNum = (key: string, fallback: number): number => pickNum(merged[key], pickNum(deployed[key], fallback));
+		// An explicit empty allowlist is a DECISION (mutate nothing), so a real
+		// array wins even when it is empty; only a non-array falls through.
+		const cfgList = (key: string): string[] => (Array.isArray(merged[key]) ? pickList(merged[key]) : pickList(deployed[key]));
 		return {
 			// The RESOLVED root always wins: `projectRoot` in a config file can
 			// only ever be a fallback for hosts without a session.
 			projectRoot: resolved.root,
 			rootSource: resolved.source as RootSource,
 			sessionId: resolved.sessionId,
-			specsMode: asSpecsMode(merged["specsMode"] ?? config.specsMode),
-			specsRoot: asString(merged["specsRoot"], config.specsRoot ?? ""),
-			specsDir: asString(merged["specsDir"], config.specsDir ?? "specs"),
-			executeAllowlist: Array.isArray(merged["executeAllowlist"]) ? asList(merged["executeAllowlist"]) : (config.executeAllowlist ?? []),
-			methodAllowlist: Array.isArray(merged["methodAllowlist"]) ? asList(merged["methodAllowlist"]) : (config.methodAllowlist ?? []),
-			communityRepoUrl: asString(merged["communityRepoUrl"], config.communityRepoUrl ?? "https://github.com/odoo/odoo"),
-			communityRepoPath: asString(merged["communityRepoPath"], config.communityRepoPath ?? ""),
-			enterpriseRepoUrl: asString(merged["enterpriseRepoUrl"], config.enterpriseRepoUrl ?? "https://github.com/odoo/enterprise"),
-			enterpriseRepoPath: asString(merged["enterpriseRepoPath"], config.enterpriseRepoPath ?? ""),
-			autonomy: asString(merged["autonomy"], config.autonomy ?? "supervised"),
-			requireCheckpointBeforeMutation: asBool(merged["requireCheckpointBeforeMutation"], config.requireCheckpointBeforeMutation ?? true),
-			requireGitignoreBeforeCredentials: asBool(merged["requireGitignoreBeforeCredentials"], config.requireGitignoreBeforeCredentials ?? true),
-			requireSpecForChanges: asBool(merged["requireSpecForChanges"], config.requireSpecForChanges ?? true),
+			specsMode: asSpecsMode(merged["specsMode"] ?? deployed["specsMode"]),
+			specsRoot: cfgString("specsRoot", ""),
+			specsDir: cfgString("specsDir", "specs"),
+			executeAllowlist: cfgList("executeAllowlist"),
+			methodAllowlist: cfgList("methodAllowlist"),
+			communityRepoUrl: cfgString("communityRepoUrl", "https://github.com/odoo/odoo"),
+			communityRepoPath: cfgString("communityRepoPath", ""),
+			enterpriseRepoUrl: cfgString("enterpriseRepoUrl", "https://github.com/odoo/enterprise"),
+			enterpriseRepoPath: cfgString("enterpriseRepoPath", ""),
+			autonomy: cfgString("autonomy", "supervised"),
+			requireCheckpointBeforeMutation: cfgBool("requireCheckpointBeforeMutation", true),
+			requireGitignoreBeforeCredentials: cfgBool("requireGitignoreBeforeCredentials", true),
+			requireSpecForChanges: cfgBool("requireSpecForChanges", true),
 			specPolicyScope: ((): string => {
-				const v = asString(merged["specPolicyScope"], config.specPolicyScope ?? "odoo");
+				const v = cfgString("specPolicyScope", "odoo");
 				return v === "everywhere" ? "everywhere" : "odoo";
 			})(),
-			adoptProjectPointerHint: asBool(merged["adoptProjectPointerHint"], config.adoptProjectPointerHint ?? true),
+			adoptProjectPointerHint: cfgBool("adoptProjectPointerHint", true),
 			odooApi: ((): string => {
-				const v = asString(merged["odooApi"], config.odooApi ?? "auto");
+				const v = cfgString("odooApi", "auto");
 				return v === "json2" || v === "jsonrpc" ? v : "auto";
 			})(),
-			requireInstanceChoice: asBool(merged["requireInstanceChoice"], config.requireInstanceChoice ?? true),
-			securityReviewRequired: asBool(merged["securityReviewRequired"], config.securityReviewRequired ?? true),
-			securityInterviewRequired: asBool(merged["securityInterviewRequired"], config.securityInterviewRequired ?? true),
-			auditAllTools: asBool(merged["auditAllTools"], config.auditAllTools ?? true),
-			maxCheckpoints: asNum(merged["maxCheckpoints"], config.maxCheckpoints ?? 5),
-			documentationPolicy: asString(merged["documentationPolicy"], config.documentationPolicy ?? "required"),
-			documentationLanguage: asString(merged["documentationLanguage"], config.documentationLanguage ?? ""),
+			requireInstanceChoice: cfgBool("requireInstanceChoice", true),
+			securityReviewRequired: cfgBool("securityReviewRequired", true),
+			securityInterviewRequired: cfgBool("securityInterviewRequired", true),
+			auditAllTools: cfgBool("auditAllTools", true),
+			maxCheckpoints: cfgNum("maxCheckpoints", 5),
+			documentationPolicy: cfgString("documentationPolicy", "required"),
+			documentationLanguage: cfgString("documentationLanguage", ""),
 			manualsMode: (() => {
-				const v = asString(merged["manualsMode"], config.manualsMode ?? "specs");
+				const v = cfgString("manualsMode", "specs");
 				return v === "docs" || v === "module" ? v : "specs";
 			})(),
-			manualsDir: asString(merged["manualsDir"], config.manualsDir ?? "docs/manuals"),
+			manualsDir: cfgString("manualsDir", "docs/manuals"),
 		};
 	};
 
@@ -4763,7 +4788,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			return {
 				mode: (cfg.manualsMode === "docs" || cfg.manualsMode === "module" ? cfg.manualsMode : "specs") as "docs" | "module" | "specs",
 				dir: cfg.manualsDir,
-				specsBase: cfg.specsMode === "central" && cfg.specsRoot ? cfg.specsRoot : join(cfg.projectRoot, cfg.specsDir),
+				// The same resolver every specs-aware tool uses: it type-checks the
+				// layout and keeps an absolute `specsDir` from being joined under
+				// the root.
+				specsBase: specsBaseFor(cfg),
 			};
 		},
 		display: (v) => displayPath(v),
@@ -4782,10 +4810,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				specsRoot: cfg.specsRoot,
 			});
 		},
-		specsBase: (exec) => {
-			const cfg = effectiveConfig(exec);
-			return cfg.specsMode === "central" && cfg.specsRoot ? cfg.specsRoot : join(cfg.projectRoot, cfg.specsDir);
-		},
+		specsBase: (exec) => specsBaseFor(effectiveConfig(exec)),
 		manuals: (exec) => {
 			const cfg = effectiveConfig(exec);
 			return {

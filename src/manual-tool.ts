@@ -28,6 +28,7 @@ import {
 	summarizeCanon,
 	type Canon,
 	type CanonClient,
+	type Row,
 } from "./manual-canon.js";
 import { renderManual, collectProseFindings } from "./manual-render.js";
 import { captureFlow, exploreScreen, familyFor, loadPlaywright, resolveBrowser } from "./manual-capture.js";
@@ -108,6 +109,35 @@ export function registerManualTool(
 				overwrite: {
 					type: "boolean",
 					description: "render: write the artifacts in the workspace itself and take over hand-edited files. Default false → <workspace>/render/ and hand edits are skipped.",
+				},
+				module: {
+					type: "string",
+					description:
+						"Technical module name to inventory (canon): the canon then carries EVERY menu, EVERY action and every model's " +
+						"fields and buttons, and lint reports MODULE-COVERAGE / FIELD-COVERAGE / BUTTON-COVERAGE / WORKFLOW-COVERAGE " +
+						"until the manual covers all of it. Without it the canon covers only what reaches the model.",
+				},
+				modules: {
+					type: "array",
+					items: { type: "string" },
+					description: "canon: several modules to inventory at once (comma-separated or a list). Implies no single model scope.",
+				},
+				as_user: {
+					type: "string",
+					description:
+						"canon: the user the manual documents (login, or \"admin\"). The interview is recorded in the canon and lint " +
+						"reports INTERVIEW-MISSING until the storyboard declares it.",
+				},
+				admin: {
+					type: "boolean",
+					description: "canon: whether that user is an administrator. Default: derived from the connected user's groups when not given.",
+				},
+				groups: {
+					type: "array",
+					items: { type: "string" },
+					description:
+						"canon: access groups to walk (res.groups xmlids). Default: every group the inventoried modules declare on a " +
+						"menu, an action or a model access row.",
 				},
 				module_dir: {
 					type: "string",
@@ -195,6 +225,11 @@ export function registerManualTool(
 				operation: "canon" | "plan" | "lint" | "render" | "explore" | "capture" | "import";
 				model?: string;
 				slug?: string;
+				module?: string;
+				modules?: string[];
+				as_user?: string;
+				admin?: boolean;
+				groups?: string[];
 				module_dir?: string;
 				spec_id?: string;
 				language?: string;
@@ -256,15 +291,6 @@ export function registerManualTool(
 				if (args.operation !== "canon") {
 					return planLintRender(args.operation, ws.dir, slug, args, deps, artifacts, manualsCfg.mode);
 				}
-				if (!args.model) {
-					return {
-						ok: false,
-						operation: args.operation,
-						summary: "BLOCKED",
-						artifacts,
-						detail: "BLOCKED — operation=canon needs model: the canon is read per model from the instance.",
-					};
-				}
 				const client = deps.client(exec);
 				if (client === undefined) {
 					return {
@@ -289,12 +315,41 @@ export function registerManualTool(
 						detail: `Cannot probe the server version: ${version.error}`,
 					};
 				}
+				const requestedModules = [...new Set([...(args.modules ?? []), ...(args.module ? [args.module] : [])])].filter((m) => m.trim() !== "");
+				let model = args.model;
+				if (!model && requestedModules.length > 0) {
+					// Module-first request: the canon is still read per model, so the
+					// first model the module implements becomes the primary one.
+					const pick = await client.executeKw<Row[]>("ir.model", "search_read", [[["modules", "like", requestedModules[0]]], ["model", "modules"]], { limit: 200 });
+					if (!pick.ok) {
+						return { ok: false, operation: "canon" as string, summary: "BLOCKED", artifacts, detail: `BLOCKED — could not list the module's models: ${pick.error}` };
+					}
+					const first = pick.value.find((r) => String(r["modules"] ?? "").split(",").map((x) => x.trim()).includes(requestedModules[0]));
+					if (!first) {
+						return { ok: false, operation: "canon" as string, summary: "BLOCKED", artifacts, detail: `BLOCKED — module "${requestedModules[0]}" declares no model in ir.model.modules: check the technical name.` };
+					}
+					model = String(first["model"] ?? "");
+				}
+				if (!model) {
+					return {
+						ok: false,
+						operation: args.operation,
+						summary: "BLOCKED",
+						artifacts,
+						detail: "BLOCKED — operation=canon needs model (the canon is read per model) or modules (the first model of the module is then read).",
+					};
+				}
 				const repos = deps.repos?.(exec);
 				const result = await collectCanon(client, {
-					model: args.model,
+					model,
+					modules: requestedModules,
+					asUser: args.as_user,
+					admin: args.admin,
+					groups: args.groups,
 					serverVersion: version.value.server_version,
 					language: args.language ?? deps.configuredLanguage(exec),
-					moduleName: moduleDir ? basename(moduleDir) : undefined,
+					module: args.module,
+					moduleName: args.module ?? requestedModules[0] ?? (moduleDir ? basename(moduleDir) : undefined),
 					moduleDir: moduleDir && existsSync(join(moduleDir, "__manifest__.py")) ? moduleDir : undefined,
 					repos: repos ? { communityPath: repos.communityPath, enterprisePath: repos.enterprisePath } : undefined,
 				});
@@ -335,6 +390,29 @@ export function registerManualTool(
 				lines.push(`- Notebook pages: ${summary.pages.length > 0 ? summary.pages.join(", ") : "(none)"}`);
 				lines.push(`- Window actions: ${canon.actions.length}${canon.actions[0]?.xmlid ? ` (e.g. ${canon.actions[0].xmlid})` : ""}`);
 				lines.push(`- Menus: ${canon.menus.length > 0 ? canon.menus.map((m) => m.completeName).slice(0, 5).join(" | ") : "(none found)"}`);
+				const shown = (list: string[], total: number): string => `${list.slice(0, 12).join(" | ") || "(none)"}${total > 12 ? ` … (+${total - 12} more)` : ""}`;
+				for (const inventory of canon.modules ?? (canon.module ? [canon.module] : [])) {
+					const fields = inventory.models.reduce((n, m) => n + m.fields.length, 0);
+					const buttons = inventory.models.reduce((n, m) => n + m.buttons.length, 0);
+					const unreadable = inventory.models.filter((m) => m.unreadable).length;
+					lines.push(
+						`- Module inventory (${inventory.name}): ${inventory.menus.length} menu(s), ${inventory.actions.length} action(s), ` +
+							`${inventory.models.length} model(s) with ${fields} field(s) and ${buttons} button(s)${unreadable > 0 ? ` (${unreadable} model(s) unreadable)` : ""} — ` +
+							"EVERY one of them is coverage surface: lint reports MODULE/FIELD/BUTTON/WORKFLOW/GROUP-COVERAGE until the manual covers it.",
+					);
+					lines.push(`- Module menus: ${shown(inventory.menus.map((m) => m.completeName || (m.xmlid ?? "?")), inventory.menus.length)}`);
+					lines.push(`- Module actions: ${shown(inventory.actions.map((a) => `${a.xmlid ?? a.name} [${a.kind.replace("ir.actions.", "")}]`), inventory.actions.length)}`);
+					lines.push(`- Module models: ${shown(inventory.models.map((m) => `${m.model} (${m.fields.length} fields)`), inventory.models.length)}`);
+				}
+				if (canon.interview) {
+					const iv = canon.interview;
+					lines.push(
+						`- Interview: asUser ${iv.asUser ?? "(not declared)"} [${iv.asUserSource}]${iv.admin ? ", administrator" : ""}` +
+							`${iv.connectedLogin ? `; connected as ${iv.connectedLogin}` : ""}; modules: ${iv.modules.join(", ") || "(none)"}; ` +
+							`groups to walk: ${iv.groups.length > 0 ? shown(iv.groups, iv.groups.length) : "(none declared by the module)"}`,
+					);
+					if (iv.asUserSource === "unknown") lines.push("  (answer it: pass as_user, or declare it in the storyboard's interview — lint reports INTERVIEW-MISSING until then)");
+				}
 				lines.push(`- Access rules: ${canon.access.access.length} ir.model.access, ${canon.access.rules.length} ir.rule, ${canon.access.groups.length} groups listed`);
 				const ownErr = canon.errors.own;
 				lines.push(
@@ -356,7 +434,7 @@ export function registerManualTool(
 				return {
 					ok: true,
 					operation: "canon" as string,
-					summary: `${canon.model}: ${summary.buttons} buttons, ${summary.requiredFields.length} required fields, ${summary.ownErrors} own error sites`,
+					summary: `${canon.model}: ${summary.buttons} buttons, ${summary.requiredFields.length} required fields, ${summary.ownErrors} own error sites${(canon.modules ?? (canon.module ? [canon.module] : [])).map((m) => ` · module ${m.name}: ${m.menus.length} menus / ${m.actions.length} actions / ${m.models.length} models`).join("")}${canon.interview ? ` · interview: ${canon.interview.asUser ?? "asUser not declared"}, ${canon.interview.groups.length} group(s)` : ""}`,
 					artifacts,
 					detail: lines.join("\n"),
 				};
@@ -487,6 +565,62 @@ export function importRecordingOp(
 }
 
 /**
+ * Reconcile an existing storyboard with a freshly planned one: the planned
+ * structure wins for FLOWS (ids, titles, targets, steps) because it is the one
+ * the canon evidences, while everything the storyteller wrote is preserved —
+ * narration by step id, captures, recovery, audience, docs and the interview.
+ * A step that no longer exists keeps nothing; a new step starts as TODO.
+ */
+export function mergeStoryboards(existing: Storyboard, planned: Storyboard): Storyboard {
+	const byId = new Map(existing.flows.map((f) => [f.id, f]));
+	const flows = planned.flows.map((flow) => {
+		const old = byId.get(flow.id);
+		if (!old) return flow;
+		byId.delete(flow.id);
+		const oldSteps = new Map(old.steps.map((s) => [s.id, s]));
+		return {
+			...flow,
+			recovery: old.recovery,
+			audience: old.audience,
+			captures: old.captures,
+			role: flow.role ?? old.role,
+			steps: flow.steps.map((step) => {
+				const prev = oldSteps.get(step.id);
+				return prev && prev.kind === step.kind ? { ...step, procedure: prev.procedure ?? null, note: step.note ?? prev.note } : step;
+			}),
+		};
+	});
+	// Flows the canon no longer evidences are KEPT (their narration is work) and
+	// reported by the coverage rules instead of being deleted behind the author.
+	for (const leftover of byId.values()) flows.push(leftover);
+	return {
+		...planned,
+		flows,
+		interview: existing.interview ?? planned.interview,
+		docs: mergeDocs(planned.docs, existing.docs),
+		language: existing.language ?? planned.language,
+		updatedAt: planned.updatedAt,
+	};
+}
+
+/** Planned docs are the checklist; the written prose and skip reasons survive. */
+export function mergeDocs(planned: Storyboard["docs"], written: Storyboard["docs"]): Storyboard["docs"] {
+	if (!planned && !written) return undefined;
+	const out = { ...(written ?? {}), ...(planned ?? {}) } as NonNullable<Storyboard["docs"]>;
+	out.models = { ...(written?.models ?? {}) };
+	for (const [model, entry] of Object.entries(planned?.models ?? {})) {
+		const old = written?.models?.[model];
+		out.models[model] = {
+			fields: { ...(entry.fields ?? {}), ...(old?.fields ?? {}) },
+			buttons: { ...(entry.buttons ?? {}), ...(old?.buttons ?? {}) },
+			workflow: (old?.workflow ?? "").trim() !== "" ? old?.workflow : entry.workflow,
+			skip: { ...(entry.skip ?? {}), ...(old?.skip ?? {}) },
+		};
+	}
+	return out;
+}
+
+/**
  * The Motor 2 operations: plan the storyboard against the stored canon, lint
  * narration and structure, render the artifacts. NONE of them talks to the
  * instance — the manual only ever describes what the canon says, and the canon
@@ -525,10 +659,19 @@ async function planLintRender(
 			};
 		}
 		if (existing && !("error" in existing)) {
-			const findings = validateStoryboard(existing, stored.canon);
-			lines.push(`A storyboard already exists (${existing.flows.length} flow(s)); planning is create-only, so it was left untouched.`);
+			// plan MERGES: the storyteller's narration, captures and docs are the
+			// expensive work and are never thrown away; the structure is reconciled
+			// with the canon (new menus/groups get a flow, gone ones are reported).
+			const merged = mergeStoryboards(existing, planStoryboard(stored.canon, slug));
+			merged.canonFingerprint = stored.fingerprint;
+			merged.language = existing.language ?? args.language ?? stored.canon.language;
+			writeStoryboard(dir, merged);
+			artifacts.push(`${slug}/storyboard.json`);
+			const findings = validateStoryboard(merged, stored.canon);
+			const added = merged.flows.length - existing.flows.length;
+			lines.push(`Storyboard merged with the canon: ${merged.flows.length} flow(s) (${added >= 0 ? `+${added}` : added}), narration, captures and docs kept.`);
 			lines.push(...findingLines(findings));
-			return { ok: true, operation, summary: `existing storyboard validated: ${findings.length} finding(s)`, artifacts, detail: lines.join("\n") };
+			return { ok: true, operation, summary: `merged: ${merged.flows.length} flow(s), ${findings.length} finding(s)`, artifacts, detail: lines.join("\n") };
 		}
 		const sb = planStoryboard(stored.canon, slug);
 		sb.canonFingerprint = stored.fingerprint;

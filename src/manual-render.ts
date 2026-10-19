@@ -43,6 +43,71 @@ function stepLines(flow: Flow, markdown: string[]): void {
 	});
 }
 
+/**
+ * The coverage sections a manual owes once the canon was read module-wide: every
+ * field (with the TYPE the canon measured, never guessed), every button with the
+ * states it shows in, the workflow between those states, and what each access
+ * group does. A model the server refused is named, not silently omitted.
+ */
+function coverageSections(sb: Storyboard, canon: Canon | null, t: (es: string, en: string) => string): string[] {
+	const out: string[] = [];
+	const inventories = canon?.modules ?? (canon?.module ? [canon.module] : []);
+	const docs = sb.docs?.models ?? {};
+	const cell = (s: string): string => s.replace(/\|/g, "\\|");
+	for (const inventory of inventories) {
+		for (const doc of inventory.models) {
+			out.push(`### ${t("El modelo", "The model")} \`${doc.model}\`${doc.name && doc.name !== doc.model ? ` — ${doc.name}` : ""}`, "");
+			if (doc.unreadable) {
+				out.push(t(`> No se pudo leer este modelo (${doc.unreadable}); sus campos quedan sin documentar hasta que la lectura funcione.`, `> This model could not be read (${doc.unreadable}); its fields stay undocumented until the read succeeds.`), "");
+				continue;
+			}
+			const written = docs[doc.model] ?? {};
+			if (doc.fields.length > 0) {
+				out.push(t("**Campos**", "**Fields**"), "");
+				out.push(t("| Campo | Etiqueta | Tipo | Obligatorio | Relación / Selección | Grupos | Para qué sirve |", "| Field | Label | Type | Required | Relation / Selection | Groups | What it is for |"), "|---|---|---|---|---|---|---|");
+				for (const f of doc.fields) {
+					const rel = f.relation ?? (f.selection ? f.selection.map((s) => `${s[0]}=${s[1]}`).join(" · ") : "");
+					const prose = (written.fields?.[f.name] ?? "").trim() || (written.skip?.[f.name] ? `— (${written.skip[f.name]})` : "—");
+					out.push(`| ${cell(f.name)} | ${cell(f.string)} | \`${cell(f.type)}\` | ${f.required ? t("Sí", "Yes") : t("No", "No")} | ${cell(rel)} | ${cell((f.groups ?? []).join(", "))} | ${cell(prose)} |`);
+				}
+				out.push("");
+			}
+			const buttons = doc.buttons.filter((b) => b.name);
+			if (buttons.length > 0) {
+				out.push(t("**Botones y en qué estado aparecen**", "**Buttons and the state they show in**"), "");
+				out.push(t("| Botón | Etiqueta | Estados | Grupos | Confirma | Para qué sirve |", "| Button | Label | States | Groups | Confirms | What it does |"), "|---|---|---|---|---|---|");
+				for (const b of buttons) {
+					const prose = (written.buttons?.[b.name] ?? "").trim() || (written.skip?.[b.name] ? `— (${written.skip[b.name]})` : "—");
+					out.push(`| \`${cell(b.name)}\` | ${cell(b.string ?? "")} | ${cell((b.visibleStates ?? []).join(", ") || t("todos", "all"))} | ${cell((b.groups ?? []).join(", "))} | ${b.confirm ? t("Sí", "Yes") : t("No", "No")} | ${cell(prose)} |`);
+				}
+				out.push("");
+			}
+			const workflow = (written.workflow ?? "").trim();
+			if (workflow !== "" || doc.statusbar) {
+				out.push(t("**Workflow**", "**Workflow**"), "");
+				if (doc.statusbar) out.push(`> ${t("Estados", "States")}: ${escapeHtml([doc.statusbar.field, ...(doc.statusbar.visibleStates ?? [])].filter(Boolean).join(" → "))}`, "");
+				out.push(workflow !== "" ? workflow : t("TODO: describe el workflow de este modelo.", "TODO: describe this model's workflow."), "");
+			}
+		}
+	}
+	// Per group: what that group can do, top-down — the flows written for it,
+	// and the menus it can see when the canon recorded the restriction.
+	const groups = canon?.interview?.groups ?? sb.interview?.groups ?? [];
+	if (groups.length > 0) {
+		out.push(t("### Por cada grupo de acceso", "### Per access group"), "");
+		for (const group of groups) {
+			const flows = sb.flows.filter((f) => f.role === group);
+			const menus = inventories.flatMap((m) => m.menus).filter((m) => m.groups?.includes(group)).map((m) => m.completeName);
+			out.push(`#### ${group}`, "");
+			if (menus.length > 0) out.push(t("Menús que ve", "Menus it sees") + ": " + menus.map((m) => `\`${m}\``).join(", "), "");
+			if (flows.length > 0) for (const f of flows) out.push(t(`- ${f.title}`, `- ${f.title}`));
+			else out.push(t(`- (sin flujo propio: ${(sb.docs?.groupsWhy ?? "TODO").trim() || "TODO"})`, `- (no flow of its own: ${(sb.docs?.groupsWhy ?? "TODO").trim() || "TODO"})`));
+			out.push("");
+		}
+	}
+	return out;
+}
+
 /** The Markdown manual: H2 leads (the OCA bot owns the H1), 3 acts. */
 export function renderManualMarkdown(sb: Storyboard, canon: Canon | null): string {
 	const t = (es: string, en: string) => (sb.language?.startsWith("es") || canon?.language.startsWith("es") ? es : en);
@@ -56,6 +121,20 @@ export function renderManualMarkdown(sb: Storyboard, canon: Canon | null): strin
 		),
 		"",
 	);
+	// The audience the interview declared: a manual that does not say who it is
+	// written for is a manual nobody can check.
+	const asUser = sb.interview?.asUser ?? canon?.interview?.asUser ?? null;
+	if (asUser !== null || sb.interview !== undefined || canon?.interview !== undefined) {
+		const admin = sb.interview?.admin ?? canon?.interview?.admin ?? false;
+		const modules = sb.interview?.modules ?? canon?.interview?.modules ?? [];
+		out.push(
+			t(
+				`**Para quién**: ${asUser ?? "—"}${admin ? " (administrador)" : ""}${modules.length > 0 ? ` · módulos: ${modules.join(", ")}` : ""}.`,
+				`**Written for**: ${asUser ?? "—"}${admin ? " (administrator)" : ""}${modules.length > 0 ? ` · modules: ${modules.join(", ")}` : ""}.`,
+			),
+			"",
+		);
+	}
 	// Act II — USAGE, flow by flow
 	for (const flow of sb.flows) {
 		out.push(`### ${flow.title || flow.id}`, "");
@@ -64,6 +143,9 @@ export function renderManualMarkdown(sb: Storyboard, canon: Canon | null): strin
 		stepLines(flow, out);
 		if (flow.recovery) out.push("", t("**Si algo falla**", "**If it fails**"), "", `> ${flow.recovery}`, "");
 	}
+	// Act II-b — the coverage the canon evidences: every field, every button,
+	// every state, and what each access group does.
+	for (const line of coverageSections(sb, canon, t)) out.push(line);
 	// Process block: what Odoo does behind the scenes (quote, not procedure)
 	if (canon) {
 		const statusbar = canon.views.find((v) => v.type === "form")?.arch.statusbar;

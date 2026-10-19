@@ -284,6 +284,15 @@ export class OdooClient {
 	}
 
 	/**
+	 * The authenticated uid, once something authenticated. Null before that:
+	 * callers that need a guaranteed value use `executeKw` first, which
+	 * authenticates lazily. Never exposes the login or the secret.
+	 */
+	currentUid(): number | null {
+		return this.#uid;
+	}
+
+	/**
 	 * Authenticate and cache the uid. Uses the .env secret (password or API
 	 * key). A failure is reported WITHOUT echoing the secret.
 	 */

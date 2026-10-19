@@ -3,7 +3,8 @@
  *
  * A checkpoint is a labelled, on-disk snapshot of a module's source tree plus
  * (optionally) a journal of the data mutations performed through the plugin.
- * It is the plugin's answer to "any devolución": you can put the files back,
+ * It is the plugin's answer to a change the developer sends back: you can put
+ * the files back,
  * and best-effort undo the records the pipeline created or changed.
  *
  * Layout (all under the plugin-owned <projectRoot>/.sdd/ tree):

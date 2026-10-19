@@ -86,7 +86,12 @@ const RULES: Rule[] = [
 		exts: [".py", ".xml", ".yml", ".yaml", ".js"],
 		message: "Hardcoded credential-like literal.",
 		hint: "Read secrets from configuration or ir.config_parameter; never commit literals.",
-		match: (l) => /(password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\s*[:=]\s*["'][^"']{4,}["']/i.test(l),
+		// A boolean or null literal is never a credential. This matters for Odoo
+		// views, where `password="True"` is the attribute that MASKS a field:
+		// without the guard the correct, safer XML (`<field name="api_key"
+		// password="True"/>`) was reported as a hardcoded secret, so the rule
+		// punished the masking instead of the literal it was meant to catch.
+		match: (l) => /(password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\s*[:=]\s*["'](?!true["']|false["']|none["']|null["'])[^"']{4,}["']/i.test(l),
 	},
 	{
 		id: "sudo-unjustified",

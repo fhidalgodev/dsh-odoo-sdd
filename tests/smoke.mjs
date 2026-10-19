@@ -2789,6 +2789,30 @@ check("scan flags sql injection as ERROR", scan.findings.some((f) => f.rule === 
 check("scan flags dynamic exec", scan.findings.some((f) => f.rule === "dynamic-exec"));
 check("scan flags hardcoded secret", scan.findings.some((f) => f.rule === "hardcoded-secret"));
 check("scan result not clean", scan.clean === false);
+// `password="True"` is the attribute that MASKS a field in an Odoo view, not a
+// credential: reading it as one punished the safe spelling of a secret field.
+// The real literal in the fixture above must keep firing, so the rule is only
+// narrowed, never dropped.
+check("only the real literal counts as a secret", scan.findings.filter((f) => f.rule === "hardcoded-secret").length === 1);
+writeFileSync(
+	join(vuln, "masked_view.xml"),
+	'<odoo>\n  <field name="api_key" password="True"/>\n  <field name="oauth_password" password="True"/>\n  <field name="client_secret" password="True"/>\n</odoo>',
+	{ mode: 0o600 },
+);
+writeFileSync(
+	join(vuln, "leaked_template.xml"),
+	'<odoo>\n  <field name="note">api_key: "sk_live_abcdef123456"</field>\n</odoo>',
+	{ mode: 0o600 },
+);
+const maskedScan = sec.scanModule(vuln);
+check(
+	"a masked field is not a hardcoded secret",
+	!maskedScan.findings.some((f) => f.rule === "hardcoded-secret" && f.file === "masked_view.xml"),
+);
+check(
+	"a literal inside a data file is still a hardcoded secret",
+	maskedScan.findings.some((f) => f.rule === "hardcoded-secret" && f.file === "leaked_template.xml"),
+);
 const cleanMod = join(dir, "mod_cleansec");
 mkdirSync(join(cleanMod, "models"), { recursive: true });
 writeFileSync(join(cleanMod, "__manifest__.py"), "{'name':'c','depends':['base']}", { mode: 0o600 });

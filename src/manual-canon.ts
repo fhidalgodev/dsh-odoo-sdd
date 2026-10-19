@@ -23,6 +23,12 @@ export interface CanonClient {
 		args: unknown[],
 		kwargs?: Record<string, unknown>,
 	): Promise<RpcResult<T>>;
+	/**
+	 * The uid this transport authenticated, when it knows it (OdooClient does).
+	 * Optional so a test double stays a CanonClient; without it the interview
+	 * records the connected login as unknown instead of guessing.
+	 */
+	currentUid?(): number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -40,6 +46,8 @@ export interface ArchButton {
 	statesRaw?: string;
 	/** Asks for confirmation → a mutating button. */
 	confirm?: boolean;
+	/** `groups` attribute: the groups that may see the button (raw xmlids). */
+	groups?: string[];
 }
 
 export interface ArchField {
@@ -50,6 +58,8 @@ export interface ArchField {
 	invisibleRaw?: string;
 	visibleStates?: string[];
 	attrsRaw?: string;
+	/** `groups` attribute: the groups that may see the field (raw xmlids). */
+	groups?: string[];
 }
 
 export interface ArchPage {
@@ -94,6 +104,13 @@ function parseAttrs(raw: string): Record<string, string> {
 		out[m[1]] = m[2] ?? m[3] ?? "";
 	}
 	return out;
+}
+
+/** `groups="a,b"` → ["a", "b"]; empty pieces dropped, order kept. */
+function splitGroups(raw: string | undefined): string[] | undefined {
+	if (raw === undefined) return undefined;
+	const items = raw.split(",").map((s) => s.trim()).filter(Boolean);
+	return items.length > 0 ? items : undefined;
 }
 
 /**
@@ -160,6 +177,7 @@ export function parseArch(arch: string): ArchCanon {
 				if (attrs["states"]) btn.statesRaw = attrs["states"];
 				if (attrs["invisible"]) btn.invisibleRaw = attrs["invisible"];
 				if (attrs["attrs"]) btn.invisibleRaw = btn.invisibleRaw ?? attrs["attrs"];
+				btn.groups = splitGroups(attrs["groups"]);
 				btn.visibleStates = simpleVisibleStates(btn.invisibleRaw, btn.statesRaw);
 				canon.buttons.push(btn);
 				break;
@@ -179,6 +197,7 @@ export function parseArch(arch: string): ArchCanon {
 				const f: ArchField = { name: fname, string: attrs["string"], required: attrs["required"] === "1" || attrs["required"] === "True", readonly: attrs["readonly"] === "1" || attrs["readonly"] === "True" };
 				if (attrs["invisible"]) f.invisibleRaw = attrs["invisible"];
 				if (attrs["attrs"]) f.attrsRaw = attrs["attrs"];
+				f.groups = splitGroups(attrs["groups"]);
 				f.visibleStates = simpleVisibleStates(f.invisibleRaw ?? f.attrsRaw);
 				canon.fields.push(f);
 				break;
@@ -271,6 +290,92 @@ export interface CanonMenu {
 	completeName: string;
 }
 
+/** One menu of the module: what the user clicks, and what it opens. */
+export interface CanonModuleMenu extends CanonMenu {
+	/** `sequence` of ir.ui.menu — reading order among siblings. */
+	sequence?: number;
+	/** The action the menu opens, when it opens one. */
+	actionXmlid?: string;
+	actionName?: string;
+	/** res_model of that action, when it has one. */
+	model?: string;
+	/** Groups allowed to see the menu (xmlids); absente = everyone. */
+	groups?: string[];
+}
+
+/** One action of the module, whatever `ir.actions.*` it is. */
+export interface CanonModuleAction extends CanonAction {
+	/** The `ir.actions.*` model the row came from (act_window, server, report…). */
+	kind: string;
+	/** The model the action acts on, when it names one. */
+	model?: string;
+	/** Technical detail of the kind: server state, report_name, client tag, url. */
+	detail?: string;
+	/** Groups allowed to run the action (xmlids); absente = everyone. */
+	groups?: string[];
+}
+
+/** One field of a model, with the evidence a manual may state. */
+export interface CanonField {
+	name: string;
+	string: string;
+	type: string;
+	required: boolean;
+	readonly?: boolean;
+	selection?: Array<[string, string]>;
+	relation?: string;
+	/** `modules` of ir.model (model-level provenance), when the collector set it. */
+	modules?: string;
+	/** Groups allowed to see the field (xmlids). */
+	groups?: string[];
+}
+
+/** What one group may do with one model (from ir.model.access). */
+export interface CanonModelAccess {
+	group: string;
+	groupName: string;
+	read: boolean;
+	write: boolean;
+	create: boolean;
+	unlink: boolean;
+}
+
+/**
+ * One model the module implements, read field by field: this is the surface the
+ * manual must document (every field, every button, every state). `unreadable`
+ * records a server that refused the reads instead of pretending the model has
+ * no fields.
+ */
+export interface CanonModelDoc {
+	model: string;
+	name: string;
+	transient: boolean;
+	fields: CanonField[];
+	buttons: ArchButton[];
+	statusbar?: { field: string; visibleStates?: string[] };
+	pages: ArchPage[];
+	/** Per-group rights, one row per ir.model.access row of the model. */
+	access: CanonModelAccess[];
+	unreadable?: string;
+}
+
+/**
+ * The module-wide inventory. A per-model canon answers "what does this screen
+ * do"; this one answers "what does the MODULE have", so a manual can cover
+ * every menu, every action, every field and every button instead of only the
+ * ones that reach one model. It is built from the module's own xml ids, never
+ * from a name match.
+ */
+export interface CanonModule {
+	name: string;
+	/** EVERY menu the module owns, in menu order. */
+	menus: CanonModuleMenu[];
+	/** EVERY action the module owns. */
+	actions: CanonModuleAction[];
+	/** EVERY model the module implements, with its fields, buttons and rights. */
+	models: CanonModelDoc[];
+}
+
 export interface CanonAccess {
 	models: string; // ir.model.modules (own vs native at model level)
 	access: Array<{ name: string; group?: string; perms: string }>;
@@ -284,6 +389,26 @@ export interface CanonErrorSource {
 	errors: ModuleError[];
 }
 
+/**
+ * The interview answers the manual is written from. The tool records what it
+ * was TOLD and what it could SEE (the connected login); it never invents the
+ * rest — a missing answer stays null and `lint` reports INTERVIEW-MISSING.
+ */
+export interface CanonInterview {
+	/** The user the manual documents (login or "admin"), as declared. */
+	asUser: string | null;
+	/** Where `asUser` came from: the caller, the connected session, or nowhere. */
+	asUserSource: "declared" | "connected" | "unknown";
+	/** true when the documenting user is an administrator. */
+	admin: boolean;
+	/** Login of the connected user, when the transport could read it. */
+	connectedLogin: string | null;
+	/** Modules the manual covers (technical names, in the order given). */
+	modules: string[];
+	/** Access groups to walk (xmlids); empty = every group the modules declare. */
+	groups: string[];
+}
+
 export interface Canon {
 	model: string;
 	serverVersion: string;
@@ -293,13 +418,25 @@ export interface Canon {
 	/** `modules` of ir.model — what is native and what is the project's own. */
 	modelModules: string;
 	views: CanonView[];
-	fields: Array<{ name: string; string: string; type: string; required: boolean; selection?: Array<[string, string]>; relation?: string; modules: string; groups?: string[] }>;
+	fields: CanonField[];
 	/** The field-attribute key this server uses for group restriction. */
 	groupsAttr: "groups_id" | "group_ids";
 	actions: CanonAction[];
 	menus: CanonMenu[];
 	access: CanonAccess;
 	errors: { own?: CanonErrorSource; community?: CanonErrorSource; enterprise?: CanonErrorSource };
+	/** The interview: who it is written for, which modules, which groups. */
+	interview?: CanonInterview;
+	/**
+	 * Present only when the canon was read with `module`: the whole module
+	 * surface (every menu, every action, every model's fields and buttons). A
+	 * manual planned against it must cover all of it — `validateStoryboard`
+	 * reports MODULE-COVERAGE / FIELD-COVERAGE / BUTTON-COVERAGE /
+	 * WORKFLOW-COVERAGE / GROUP-COVERAGE.
+	 */
+	module?: CanonModule;
+	/** One inventory per covered module (module, and modules, in order). */
+	modules?: CanonModule[];
 }
 
 /** Stable fingerprint of the canon: storyboards record it (CANON-STALE). */
@@ -315,6 +452,13 @@ export function canonFingerprint(canon: Canon): string {
 		menus: canon.menus,
 		access: canon.access,
 		errors: canon.errors,
+		// Absent for a per-model canon: JSON.stringify drops the key, so every
+		// storyboard planned before module scope existed keeps its fingerprint.
+		module: canon.module,
+		modules: canon.modules,
+		// The interview is part of the documentation basis: a different audience
+		// or walk list is another canon.
+		interview: canon.interview,
 	};
 	return createHash("sha256").update(JSON.stringify(stable)).digest("hex");
 }
@@ -331,11 +475,23 @@ export interface CanonSummary {
 	pages: string[];
 	ownErrors: number;
 	nativeErrorsKnown: boolean;
+	/** Present when the canon carries the module inventory (module scope). */
+	module?: { name: string; menus: number; actions: number; models: number };
+	/** One entry per covered module (module and modules). */
+	modules?: Array<{ name: string; menus: number; actions: number; models: number }>;
+	/** The interview answers, when the canon recorded them. */
+	interview?: { asUser: string | null; admin: boolean; modules: string[]; groups: number };
 }
 
 /** Bounded summary for display paths — never the full canon. */
 export function summarizeCanon(canon: Canon): CanonSummary {
 	const formArch = canon.views.find((v) => v.type === "form")?.arch;
+	const moduleLine = (m: CanonModule): { name: string; menus: number; actions: number; models: number } => ({
+		name: m.name,
+		menus: m.menus.length,
+		actions: m.actions.length,
+		models: m.models.length,
+	});
 	return {
 		model: canon.model,
 		version: canon.serverVersion,
@@ -348,6 +504,11 @@ export function summarizeCanon(canon: Canon): CanonSummary {
 		pages: (formArch?.pages ?? []).map((p) => p.string ?? p.name ?? "?").slice(0, 15),
 		ownErrors: canon.errors.own?.errors.length ?? 0,
 		nativeErrorsKnown: canon.errors.community !== undefined || canon.errors.enterprise !== undefined,
+		...(canon.module ? { module: moduleLine(canon.module) } : {}),
+		...(canon.modules ? { modules: canon.modules.map(moduleLine) } : {}),
+		...(canon.interview
+			? { interview: { asUser: canon.interview.asUser, admin: canon.interview.admin, modules: canon.interview.modules, groups: canon.interview.groups.length } }
+			: {}),
 	};
 }
 
@@ -365,13 +526,69 @@ export interface CanonRequest {
 	moduleName?: string;
 	/** Local directory of the project's own module (own error evidence). */
 	moduleDir?: string;
+	/**
+	 * Technical name of the module to inventory. Given it, the canon also
+	 * carries EVERY menu and EVERY action the module owns (`canon.module`), and
+	 * the storyboard is checked for coverage of all of them.
+	 */
+	module?: string;
+	/** Every module to inventory (`modules`); `module` is kept for one module. */
+	modules?: string[];
+	/** The user the manual documents, as declared by the caller. */
+	asUser?: string;
+	/** Whether that user is an administrator, as declared by the caller. */
+	admin?: boolean;
+	/** Groups to walk (xmlids); empty = derive them from the modules' own menus. */
+	groups?: string[];
 	/** Local checkouts of Community / Enterprise, for native error evidence. */
 	repos?: { communityPath?: string; enterprisePath?: string };
 }
 
+/**
+ * The interview, as recorded in the canon: what the caller declared, plus the
+ * connected login the transport could read. `unknown` is an answer — the tool
+ * never turns a missing declaration into an invented one.
+ */
+async function collectInterview(client: CanonClient, request: CanonRequest, language: string, inventory: CanonModule[]): Promise<CanonInterview> {
+	const declared = typeof request.asUser === "string" && request.asUser.trim() !== "" ? request.asUser.trim() : null;
+	let connectedLogin: string | null = null;
+	/** Whether the connected user is a Settings administrator (base.group_system). */
+	let connectedIsAdmin: boolean | null = null;
+	const uid = client.currentUid?.() ?? null;
+	if (uid !== null) {
+		const rows = await read(client, "res.users", "read", [[uid], ["login", "groups_id"]], language, "res.users(login)");
+		const row = rows.ok ? rows.value[0] : undefined;
+		if (row && typeof row["login"] === "string") connectedLogin = row["login"] as string;
+		if (row && Array.isArray(row["groups_id"])) {
+			const xmlids = await readGroupXmlids(client, (row["groups_id"] as unknown[]).map((g) => refId(g) ?? Number.NaN), language);
+			connectedIsAdmin = (row["groups_id"] as unknown[]).some((g) => {
+				const id = refId(g);
+				return id !== undefined && xmlids.get(id) === "base.group_system";
+			});
+		}
+	}
+	const declaredGroups = (request.groups ?? []).filter((g) => g.trim() !== "");
+	// Default walk list: every group the inventoried modules actually mention on
+	// a menu, an action or a model access row — the module's own declaration.
+	const derived = new Set<string>();
+	for (const m of inventory) {
+		for (const menu of m.menus) for (const g of menu.groups ?? []) derived.add(g);
+		for (const action of m.actions) for (const g of action.groups ?? []) derived.add(g);
+		for (const doc of m.models) for (const a of doc.access) if (a.group !== "everyone") derived.add(a.group);
+	}
+	return {
+		asUser: declared ?? (connectedLogin !== null ? `The connected user (${connectedLogin})` : null),
+		asUserSource: declared !== null ? "declared" : connectedLogin !== null ? "connected" : "unknown",
+		admin: request.admin ?? connectedIsAdmin ?? false,
+		connectedLogin,
+		modules: inventory.map((m) => m.name),
+		groups: declaredGroups.length > 0 ? declaredGroups : [...derived].sort((a, b) => a.localeCompare(b)),
+	};
+}
+
 export type CanonResult = { ok: true; canon: Canon } | { ok: false; blocked: string };
 
-interface Row {
+export interface Row {
 	[key: string]: unknown;
 }
 
@@ -395,6 +612,308 @@ async function read(
  * mutates and nothing here guesses: a missing language or a failed read is
  * BLOCKED with the exact reason.
  */
+
+/** Field lists per `ir.actions.*` model: what that kind can honestly say. */
+const ACTION_FIELDS: Record<string, string[]> = {
+	"ir.actions.act_window": ["name", "res_model", "view_mode", "domain", "context", "target"],
+	"ir.actions.server": ["name", "model_name", "state"],
+	"ir.actions.client": ["name", "tag"],
+	"ir.actions.report": ["name", "model", "report_name"],
+	"ir.actions.act_url": ["name", "url", "target"],
+	"ir.actions.url": ["name", "url", "target"],
+};
+
+/**
+ * Navigable kinds: a flow can OPEN one with goto, so MODULE-COVERAGE can demand
+ * a flow for them. A server action is triggered by a button, not navigated to,
+ * and is reported as prose territory instead of an unfixable ERROR.
+ */
+export const NAVIGABLE_ACTIONS = new Set(["ir.actions.act_window", "ir.actions.act_url", "ir.actions.url", "ir.actions.client", "ir.actions.report"]);
+
+/** The kind-specific detail: a server state, a client tag, a report name, a url. */
+function actionDetail(kind: string, row: Row): string | undefined {
+	const field =
+		kind === "ir.actions.server" ? "state"
+		: kind === "ir.actions.client" ? "tag"
+		: kind === "ir.actions.report" ? "report_name"
+		: kind === "ir.actions.act_url" || kind === "ir.actions.url" ? "url"
+		: "";
+	return field !== "" && typeof row[field] === "string" ? (row[field] as string) : undefined;
+}
+
+/**
+ * Every menu and every action the module OWNS. `ir.model.data` is the authority
+ * on ownership — a module that merely extends a native action does not own it —
+ * so the inventory is built from the module's own xml ids, never from a name
+ * match. Nothing is inferred: a read that fails is BLOCKED, and whatever lacks
+ * an xml id is reported by the coverage rule instead of being guessed.
+ */
+/** id part of a Reference ("res.groups,4" or [4, "name"] or false). */
+function refId(raw: unknown): number | undefined {
+	if (Array.isArray(raw) && typeof raw[0] === "number") return raw[0];
+	if (typeof raw === "string") {
+		const comma = raw.indexOf(",");
+		const id = comma > 0 ? Number(raw.slice(comma + 1)) : Number.NaN;
+		if (Number.isFinite(id)) return id;
+	}
+	return undefined;
+}
+
+/** display name of a Reference, when the row carries one. */
+function refName(raw: unknown): string | undefined {
+	if (Array.isArray(raw) && typeof raw[1] === "string") return raw[1];
+	return undefined;
+}
+
+/** xmlids of `res.groups` rows, by id. A failed read answers "unknown", not "none". */
+async function readGroupXmlids(client: CanonClient, ids: number[], language: string): Promise<Map<number, string>> {
+	const out = new Map<number, string>();
+	const wanted = [...new Set(ids.filter(Number.isFinite))];
+	if (wanted.length === 0) return out;
+	const rows = await read(client, "ir.model.data", "search_read", [[["model", "=", "res.groups"], ["res_id", "in", wanted]], ["module", "name", "res_id"]], language, "ir.model.data(groups)");
+	if (!rows.ok) return out;
+	for (const r of rows.value) out.set(Number(r["res_id"]), `${r["module"]}.${r["name"]}`);
+	return out;
+}
+
+/**
+ * The groups allowed to see rows of a model, when that model has the field.
+ * `undefined` (no entry) means "not restricted, or the server refused the read"
+ * — the manual never claims "everyone" from a read it did not get.
+ */
+async function readRowGroups(client: CanonClient, model: string, ids: number[], field: string, language: string): Promise<Map<number, string[]>> {
+	const out = new Map<number, string[]>();
+	if (ids.length === 0) return out;
+	const rows = await read(client, model, "search_read", [[["id", "in", ids]], ["id", field]], language, `${model}(${field})`);
+	if (!rows.ok) return out;
+	const groupIds: number[] = [];
+	for (const r of rows.value) {
+		if (!Array.isArray(r[field])) continue;
+		for (const g of r[field] as unknown[]) {
+			const id = refId(g);
+			if (id !== undefined) groupIds.push(id);
+		}
+	}
+	const xmlids = await readGroupXmlids(client, groupIds, language);
+	for (const r of rows.value) {
+		if (!Array.isArray(r[field])) continue;
+		const names = (r[field] as unknown[]).map((g) => (refId(g) !== undefined ? xmlids.get(refId(g) as number) : undefined)).filter((x): x is string => x !== undefined);
+		if (names.length > 0) out.set(Number(r["id"]), names);
+	}
+	return out;
+}
+
+/** The form and list arches of one model, through the same version-aware call the canon uses. */
+async function readModelArches(client: CanonClient, model: string, major: number, language: string): Promise<{ form?: ArchCanon; list?: ArchCanon }> {
+	const wanted: Array<[false, "form" | "list"]> = [[false, "form"], [false, "list"]];
+	const res = await
+		(major >= 16
+			? client.executeKw<{ views: Record<string, { arch: string }> }>(model, "get_views", [wanted], { options: { toolbar: true }, context: { lang: language } })
+			: client.executeKw<{ fields_views: Record<string, { arch: string }> }>(model, "load_views", [wanted], { options: { toolbar: true, load_filters: true }, context: { lang: language } }));
+	if (!res.ok) return {};
+	const raw = major >= 16
+		? (res.value as { views: Record<string, { arch: string }> }).views
+		: (res.value as unknown as { fields_views: Record<string, { arch: string }> }).fields_views;
+	return {
+		...(raw["form"]?.arch ? { form: parseArch(String(raw["form"].arch)) } : {}),
+		...(raw["list"]?.arch ? { list: parseArch(String(raw["list"].arch)) } : {}),
+	};
+}
+
+/**
+ * One model, read field by field: every field (with its type, its label, its
+ * selection or relation, and its group restriction), every button of the form,
+ * the statusbar the workflow runs through, and the per-group rights. This is
+ * the surface the manual has to document — a model the server refuses is
+ * recorded as `unreadable` instead of being reported as empty.
+ */
+async function collectModelDoc(
+	client: CanonClient,
+	row: Row,
+	major: number,
+	language: string,
+	groupsAttr: "groups_id" | "group_ids",
+): Promise<CanonModelDoc> {
+	const model = String(row["model"] ?? "");
+	const doc: CanonModelDoc = {
+		model,
+		name: String(row["name"] ?? model),
+		transient: row["transient"] === true || String(row["transient"] ?? "") === "True",
+		fields: [],
+		buttons: [],
+		pages: [],
+		access: [],
+	};
+	const fg = await client.executeKw<Record<string, Row>>(model, "fields_get", [], {
+		attributes: ["string", "type", "required", "readonly", "selection", "relation", "store", "modules", groupsAttr],
+		context: { lang: language },
+	});
+	if (!fg.ok) {
+		doc.unreadable = `fields_get: ${fg.error}`;
+		return doc;
+	}
+	doc.fields = Object.entries(fg.value)
+		.map(([name, def]) => ({
+			name,
+			string: String(def["string"] ?? name),
+			type: String(def["type"] ?? ""),
+			required: def["required"] === true,
+			readonly: def["readonly"] === true,
+			selection: Array.isArray(def["selection"]) ? (def["selection"] as Array<[string, string]>) : undefined,
+			relation: typeof def["relation"] === "string" ? def["relation"] : undefined,
+			modules: typeof def["modules"] === "string" ? def["modules"] : undefined,
+			groups: Array.isArray(def[groupsAttr])
+				? (def[groupsAttr] as unknown[]).map((g) => refName(g)).filter((n): n is string => typeof n === "string")
+				: undefined,
+		}))
+		.sort((a, b) => a.name.localeCompare(b.name));
+	const arches = await readModelArches(client, model, major, language);
+	if (arches.form) {
+		doc.pages = arches.form.pages;
+		if (arches.form.statusbar) doc.statusbar = { field: arches.form.statusbar.field, visibleStates: arches.form.statusbar.visibleStates };
+	}
+	// Buttons of the form AND of the list: both are workflows a manual documents.
+	const byName = new Map<string, ArchButton>();
+	for (const b of [...(arches.form?.buttons ?? []), ...(arches.list?.buttons ?? [])]) {
+		const key = `${b.name}|${b.type ?? "object"}|${b.string ?? ""}`;
+		if (b.name && !byName.has(key)) byName.set(key, b);
+	}
+	doc.buttons = [...byName.values()];
+	const accessRows = await read(client, "ir.model.access", "search_read", [[["model_id", "=", Number(row["id"])]], ["name", "group_id", "perm_read", "perm_write", "perm_create", "perm_unlink"]], language, "ir.model.access");
+	if (accessRows.ok) {
+		const xmlids = await readGroupXmlids(client, accessRows.value.map((r) => refId(r["group_id"]) ?? Number.NaN), language);
+		doc.access = accessRows.value.slice(0, READ_LIMIT).map((r) => {
+			const gid = refId(r["group_id"]);
+			return {
+				group: gid === undefined ? "everyone" : (xmlids.get(gid) ?? `res.groups,${gid}`),
+				groupName: refName(r["group_id"]) ?? (gid === undefined ? "Everyone" : `Group ${gid}`),
+				read: r["perm_read"] === true,
+				write: r["perm_write"] === true,
+				create: r["perm_create"] === true,
+				unlink: r["perm_unlink"] === true,
+			};
+		});
+	}
+	return doc;
+}
+
+/**
+ * Every menu and every action the module OWNS. `ir.model.data` is the authority
+ * on ownership — a module that merely extends a native action does not own it —
+ * so the inventory is built from the module's own xml ids, never from a name
+ * match. Every model the module implements is then read field by field, so the
+ * manual can cover every field, every button and every state. Nothing is
+ * inferred: a read that fails is BLOCKED (or `unreadable` for one model), and
+ * whatever lacks an xml id is reported by the coverage rules instead of guessed.
+ */
+async function collectModuleInventory(
+	client: CanonClient,
+	module: string,
+	language: string,
+	major: number,
+	groupsAttr: "groups_id" | "group_ids",
+): Promise<{ ok: true; value: CanonModule } | { ok: false; blocked: string }> {
+	const dataRows = await read(client, "ir.model.data", "search_read", [[["module", "=", module]], ["module", "model", "res_id", "name"]], language, `ir.model.data(${module})`);
+	if (!dataRows.ok) return { ok: false, blocked: dataRows.error };
+	const ownedMenus: Array<{ resId: number; name: string }> = [];
+	const ownedActions = new Map<string, Array<{ resId: number; name: string }>>();
+	for (const r of dataRows.value) {
+		const model = String(r["model"] ?? "");
+		const resId = Number(r["res_id"]);
+		if (!Number.isFinite(resId)) continue;
+		if (model === "ir.ui.menu") ownedMenus.push({ resId, name: String(r["name"] ?? "") });
+		else if (model.startsWith("ir.actions.")) {
+			const list = ownedActions.get(model) ?? [];
+			list.push({ resId, name: String(r["name"] ?? "") });
+			ownedActions.set(model, list);
+		}
+	}
+
+	// Actions: one read per `ir.actions.*` model the module actually owns. The
+	// declared fields go first; a model that refuses one of them is read again
+	// with just `name`, so its detail stays empty instead of being invented.
+	const actions: CanonModuleAction[] = [];
+	for (const [kind, rows] of ownedActions) {
+		const ids = rows.map((r) => r.resId);
+		const wanted = ACTION_FIELDS[kind] ?? ["name"];
+		let readRows = await read(client, kind, "search_read", [[["id", "in", ids]], wanted], language, kind);
+		if (!readRows.ok) readRows = await read(client, kind, "search_read", [[["id", "in", ids]], ["name"]], language, kind);
+		if (!readRows.ok) return { ok: false, blocked: readRows.error };
+		const groupRows = await readRowGroups(client, kind, ids, groupsAttr, language);
+		const xmlByRes = new Map(rows.map((r) => [r.resId, `${module}.${r.name}`]));
+		for (const r of readRows.value) {
+			const xmlid = xmlByRes.get(Number(r["id"]));
+			const modelField = kind === "ir.actions.server" ? r["model_name"] : (r["res_model"] ?? r["model"]);
+			actions.push({
+				xmlid,
+				name: String(r["name"] ?? xmlid ?? "(unnamed)"),
+				kind,
+				model: typeof modelField === "string" && modelField !== "" ? modelField : undefined,
+				viewMode: typeof r["view_mode"] === "string" ? r["view_mode"] : undefined,
+				domain: typeof r["domain"] === "string" ? r["domain"] : undefined,
+				context: typeof r["context"] === "string" ? r["context"] : undefined,
+				target: typeof r["target"] === "string" ? r["target"] : undefined,
+				detail: actionDetail(kind, r),
+				groups: groupRows.get(Number(r["id"])),
+			});
+		}
+	}
+	actions.sort((a, b) => (a.xmlid ?? a.name).localeCompare(b.xmlid ?? b.name));
+
+	// Menus, in menu order. `action` is a Reference ("ir.actions.act_window,42")
+	// resolved through ir.model.data, so a menu may open a NATIVE action the
+	// module reuses and still be covered by a flow.
+	const menus: CanonModuleMenu[] = [];
+	if (ownedMenus.length > 0) {
+		const menuRows = await read(client, "ir.ui.menu", "search_read", [[["id", "in", ownedMenus.map((m) => m.resId)]], ["complete_name", "sequence", "action"]], language, `ir.ui.menu(${module})`);
+		if (!menuRows.ok) return { ok: false, blocked: menuRows.error };
+		const menuGroups = await readRowGroups(client, "ir.ui.menu", ownedMenus.map((m) => m.resId), groupsAttr, language);
+		const refs = new Map<string, number[]>();
+		const parsed = menuRows.value.map((row) => {
+			const raw = typeof row["action"] === "string" ? row["action"] : "";
+			const comma = raw.indexOf(",");
+			const refModel = comma > 0 ? raw.slice(0, comma) : "";
+			const refId = comma > 0 ? Number(raw.slice(comma + 1)) : Number.NaN;
+			if (refModel !== "" && Number.isFinite(refId)) refs.set(refModel, [...(refs.get(refModel) ?? []), refId]);
+			return { row, refModel, refId };
+		});
+		const xmlByRef = new Map<string, string>();
+		for (const [refModel, refIds] of refs) {
+			const rows = await read(client, "ir.model.data", "search_read", [[["model", "=", refModel], ["res_id", "in", refIds]], ["module", "name", "res_id"]], language, `ir.model.data(${refModel})`);
+			if (!rows.ok) return { ok: false, blocked: rows.error };
+			for (const r of rows.value) xmlByRef.set(`${refModel},${String(r["res_id"])}`, `${r["module"]}.${r["name"]}`);
+		}
+		const actionByXml = new Map(actions.filter((a) => a.xmlid).map((a) => [a.xmlid as string, a]));
+		const xmlByMenuRes = new Map(ownedMenus.map((m) => [m.resId, `${module}.${m.name}`]));
+		for (const { row, refModel, refId } of parsed) {
+			const actionXmlid = refModel !== "" ? xmlByRef.get(`${refModel},${refId}`) : undefined;
+			const action = actionXmlid ? actionByXml.get(actionXmlid) : undefined;
+			menus.push({
+				xmlid: xmlByMenuRes.get(Number(row["id"])),
+				completeName: String(row["complete_name"] ?? row["name"] ?? ""),
+				sequence: typeof row["sequence"] === "number" ? row["sequence"] : undefined,
+				actionXmlid,
+				actionName: action?.name,
+				model: action?.model,
+				groups: menuGroups.get(Number(row["id"])),
+			});
+		}
+		menus.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.completeName.localeCompare(b.completeName));
+	}
+
+	// The models the module implements, read one by one: `ir.model.modules` is
+	// a comma-separated list, so the `like` prefilter is confirmed exactly.
+	const modelRows = await read(client, "ir.model", "search_read", [[["modules", "like", module]], ["id", "model", "name", "modules", "transient"]], language, `ir.model(${module})`);
+	if (!modelRows.ok) return { ok: false, blocked: modelRows.error };
+	const owned = modelRows.value.filter((r) => String(r["modules"] ?? "").split(",").map((s) => s.trim()).includes(module));
+	const models: CanonModelDoc[] = [];
+	for (const row of owned.sort((a, b) => String(a["model"]).localeCompare(String(b["model"])))) {
+		models.push(await collectModelDoc(client, row, major, language, groupsAttr));
+	}
+
+	return { ok: true, value: { name: module, menus, actions, models } };
+}
+
 export async function collectCanon(client: CanonClient, request: CanonRequest): Promise<CanonResult> {
 	const major = Number.parseInt(request.serverVersion, 10);
 	if (!Number.isFinite(major) || major < 13) {
@@ -536,6 +1055,18 @@ export async function collectCanon(client: CanonClient, request: CanonRequest): 
 		})),
 	};
 
+	// 6b. Module inventory — only when the canon was asked for a module: every
+	//     menu, every action and every model's fields and buttons. This is the
+	//     surface the coverage rules hold the storyboard to, so a failed read is
+	//     BLOCKED (a silently smaller inventory would silently drop menus).
+	const inventories: CanonModule[] = [];
+	for (const name of [...new Set([...(request.modules ?? []), ...(request.module ? [request.module] : [])])].filter((m) => m.trim() !== "")) {
+		const inventory = await collectModuleInventory(client, name, language, major, groupsAttr);
+		if (!inventory.ok) return { ok: false, blocked: inventory.blocked };
+		inventories.push(inventory.value);
+	}
+	const interview = await collectInterview(client, request, language, inventories);
+
 	// 7. Error evidence: the project's own module first, then the native
 	//    checkouts when they are configured (never invented).
 	const errors: Canon["errors"] = {};
@@ -571,6 +1102,8 @@ export async function collectCanon(client: CanonClient, request: CanonRequest): 
 			menus,
 			access,
 			errors,
+			interview,
+			...(inventories.length > 0 ? { module: inventories[0], modules: inventories } : {}),
 		},
 	};
 }

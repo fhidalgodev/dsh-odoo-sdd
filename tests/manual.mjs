@@ -119,12 +119,13 @@ check("scanModuleErrors on a missing directory returns nothing", canon.scanModul
 // ---------------------------------------------------------------------------
 const FORM_ARCH_19 = ARCH17.replace('invisible="state in (\'draft\',\'sent\')"', 'invisible="state in (\'draft\', \'sent\')"');
 /** A fake client that records calls and answers with the minimum the collector reads. */
-function fakeClient(major) {
+function fakeClient(major, options = {}) {
 	const calls = [];
 	const row = (obj) => ({ id: calls.length, ...obj });
 	const client = {
 		calls,
 		version: async () => ({ ok: true, value: { server_version: `${major}.0` } }),
+		...(options.connectedUser ? { currentUid: () => 7 } : {}),
 		executeKw: async (m, method, args, kwargs) => {
 			calls.push(`${m}.${method}`);
 			const ctx = kwargs?.context ?? {};
@@ -138,21 +139,79 @@ function fakeClient(major) {
 				// the collector filters by model; only sale.order exists here
 				const [domain] = args;
 				if (JSON.stringify(domain).includes('"no.model"')) return { ok: true, value: [] };
+				// Module scope asks "what does this module implement" with a
+				// `like` prefilter the collector then confirms exactly.
+				if (options.module && JSON.stringify(domain).includes('"like"')) {
+					return { ok: true, value: [
+						row({ model: "sale.order", name: "Sales Order", modules: "sale,sale_stock" }),
+						row({ model: "sale.report", name: "Sales Analysis", modules: "sale" }),
+						row({ model: "stock.picking", name: "Transfer", modules: "sale_stock" }),
+					] };
+				}
 				return { ok: true, value: [row({ modules: "sale" })] };
 			}
 			if (m === "ir.actions.act_window" && args[1]?.length === 1) {
 				return { ok: true, value: [row({ name: "Orders", view_mode: "list,form", domain: "[]", context: "{}", target: "current" })] };
 			}
-			if (m === "ir.actions.act_window") return { ok: true, value: [row({ id: 1 })] };
-			if (m === "ir.ui.menu") return { ok: true, value: [row({ complete_name: "Sales/Orders/Quotations" })] };
-			if (m === "ir.model.access") return { ok: true, value: [row({ name: "sale.order.user", group_id: [5, "User"], perm_read: 1, perm_write: 1, perm_create: 1, perm_unlink: 0 })] };
+			if (m === "ir.actions.act_window") {
+				if (options.module) {
+					// the module inventory reads by id: echo them, so xmlids map back
+					const ids = (JSON.stringify(args).match(/"id","in",\[([^\]]*)\]/)?.[1] ?? "51").split(",").map((s) => Number(s.trim())).filter(Number.isFinite);
+					return { ok: true, value: ids.map((id) => row({ id, name: "Quotations", res_model: "sale.order", view_mode: "list,form", domain: "[]", context: "{}", target: "current" })) };
+				}
+				return { ok: true, value: [row({ id: 1 })] };
+			}
+			if (m === "ir.actions.server" && options.module) {
+				return { ok: true, value: [row({ id: 52, name: "Confirm server", model_name: "sale.order", state: "code" })] };
+			}
+			if (m === "ir.ui.menu") {
+				if (options.module) {
+					// Every menu the module owns, in menu order, with the action it
+					// opens: 41 opens a NATIVE action, 42 an owned one, 43 none.
+					return { ok: true, value: [
+						row({ id: 42, complete_name: "Sales/Orders/Quotations", sequence: 2, action: "ir.actions.act_window,51", groups_id: [[5, "User"]] }),
+						row({ id: 41, complete_name: "Sales/Reporting", sequence: 1, action: "ir.actions.act_report,77", groups_id: [] }),
+						row({ id: 43, complete_name: "Sales/Settings", sequence: 3, action: false, groups_id: [] }),
+					] };
+				}
+				return { ok: true, value: [row({ complete_name: "Sales/Orders/Quotations" })] };
+			}
+			if (m === "res.users" && method === "read") {
+				return { ok: true, value: [row({ login: options.connectedUser, groups_id: options.connectedAdmin ? [[4, "Settings"], [5, "User"]] : [[5, "User"]] })] };
+			}
+			if (m === "ir.model.access") return { ok: true, value: [row({ name: "sale.order.user", group_id: [5, "User"], perm_read: true, perm_write: true, perm_create: true, perm_unlink: false })] };
 			if (m === "ir.rule") return { ok: true, value: [row({ name: "own orders", groups: [[5, "User"]], domain_force: "[('user_id','=',uid)]", active: true })] };
 			if (m === "res.groups") return { ok: true, value: [row({ full_name: "Sales/User" })] };
 			if (m === "ir.model.data") {
-				// echo the res_ids the domain asks for, so xmlids map back
+				// Module scope: what the module OWNS. The ir.qweb row proves
+				// ownership is read from data, not matched by name.
+				if (options.module && JSON.stringify(args[0]).includes(`["module","=","${options.module}"]`)) {
+					return { ok: true, value: [
+						row({ module: options.module, model: "ir.ui.menu", res_id: 41, name: "menu_reporting" }),
+						row({ module: options.module, model: "ir.ui.menu", res_id: 42, name: "menu_quotations" }),
+						row({ module: options.module, model: "ir.ui.menu", res_id: 43, name: "menu_settings" }),
+						row({ module: options.module, model: "ir.actions.act_window", res_id: 51, name: "action_quotations" }),
+						row({ module: options.module, model: "ir.actions.server", res_id: 52, name: "action_server_confirm" }),
+						row({ module: options.module, model: "ir.qweb", res_id: 53, name: "not_a_menu_nor_action" }),
+					] };
+				}
+				// echo the res_ids the domain asks for, so xmlids map back; a
+				// module-owned record keeps the name the inventory gave it.
 				const idsMatch = JSON.stringify(args).match(/"res_id","in",\[([^\]]*)\]/);
 				const ids = idsMatch ? idsMatch[1].split(",").filter(Boolean) : [1];
-				return { ok: true, value: ids.map((id) => row({ module: "sale", name: `xml_${id.trim()}`, res_id: Number(id.trim()) })) };
+				const owned = options.module ? { 41: "menu_reporting", 42: "menu_quotations", 43: "menu_settings", 51: "action_quotations", 52: "action_server_confirm" } : {};
+				const native = { 4: ["base", "group_system"], 5: ["sales_team", "group_sale_salesman"] };
+				return {
+					ok: true,
+					value: ids.map((id) => {
+						const n = Number(id.trim());
+						if (native[n]) return row({ module: native[n][0], name: native[n][1], res_id: n });
+						return row({ module: options.module ?? "sale", name: owned[n] ?? `xml_${n}`, res_id: n });
+					}),
+				};
+			}
+			if (method === "fields_get" && options.module && m === "sale.report") {
+				return { ok: false, error: "AccessError: you are not allowed to access this document", errorKind: "protocol" };
 			}
 			if (method === "fields_get") {
 				const key = major >= 19 ? "group_ids" : "groups_id";
@@ -220,6 +279,25 @@ const wsNoModule = model.resolveManualWorkspace({ mode: "module", dir: "docs/man
 check("workspace module mode without module_dir is BLOCKED", wsNoModule.ok === false && wsNoModule.blocked.includes("module_dir"));
 const wsBadSlug = model.resolveManualWorkspace({ mode: "specs", dir: "docs/manuals", projectRoot: proj, specsBase, slug: "../evil" });
 check("workspace rejects an ascending slug", wsBadSlug.ok === false && wsBadSlug.blocked.includes("safe folder name"));
+// A configured path that arrives as an object — the Settings layer resolves a
+// field it has no value for that way — must BLOCK with the offending key named,
+// never crash inside node:path with "The \"path\" argument must be of type
+// string. Received an instance of Object".
+const wsObjectDir = model.resolveManualWorkspace({ mode: "docs", dir: {}, projectRoot: proj, specsBase, slug: "quotations" });
+check("workspace docs mode blocks a manualsDir that is not a string", wsObjectDir.ok === false && wsObjectDir.blocked.includes("manualsDir"));
+const wsObjectBase = model.resolveManualWorkspace({ mode: "specs", dir: "docs/manuals", projectRoot: proj, specsBase: {}, slug: "quotations" });
+check("workspace specs mode blocks a specsBase that is not a string", wsObjectBase.ok === false && wsObjectBase.blocked.includes("specsBase"));
+const wsObjectModule = model.resolveManualWorkspace({ mode: "module", dir: "docs/manuals", projectRoot: proj, specsBase, moduleDir: {}, slug: "quotations" });
+check("workspace module mode blocks a module_dir that is not a string", wsObjectModule.ok === false && wsObjectModule.blocked.includes("module_dir"));
+check("workspace blocks an EMPTY configured folder instead of joining nothing", (() => {
+	const r = model.resolveManualWorkspace({ mode: "docs", dir: "   ", projectRoot: proj, specsBase, slug: "quotations" });
+	return r.ok === false && r.blocked.includes("empty string");
+})());
+check("a mode never reads a setting it does not use", (() => {
+	// module mode does not join projectRoot, so a broken one cannot block it.
+	const r = model.resolveManualWorkspace({ mode: "module", dir: {}, projectRoot: {}, specsBase: {}, moduleDir, slug: "quotations" });
+	return r.ok === true && r.dir === join(moduleDir, "readme", "manual", "quotations");
+})());
 
 // Storyboard round-trip (atomic write, schema check, stable ids)
 const sb = { schema: "dsh-odoo-sdd/manual/1", slug: "quotations", flows: [{ id: "f1", title: "Confirm a quotation", steps: [{ id: "s01", kind: "goto", procedure: null }] }] };
@@ -254,6 +332,35 @@ check("odoo_manual requires only the operation up front", Array.isArray(manualTo
 
 const canonBlocked = await manualTool.execute({ operation: "canon", model: "sale.order" }, undefined);
 check("odoo_manual canon NEEDS an instance instead of inventing", canonBlocked.ok === false && /instance|connection/i.test(canonBlocked.detail));
+
+// A HOSTILE deployment config: every key the project's .sdd/config.json does
+// not set arrives as a descriptor OBJECT (that is what took the whole manual
+// surface down with "The \"path\" argument must be of type string. Received an
+// instance of Object"). The guard must fall back to the declared default and
+// keep working, naming a real folder — never pass the object to node:path.
+const mountHostile = (deployment) => {
+	const reg = new Map();
+	lib.apply({ tools: { register: (t) => reg.set(t.name, t), guard: () => () => {} }, on: () => () => {} }, deployment);
+	return reg.get("odoo_manual");
+};
+{
+	const projHostile = mkdtempSync(join(tmpdir(), "manual-hostile-"));
+	// docs mode with a broken manualsDir: this is the exact shape that crashed.
+	const docsTool = mountHostile({ projectRoot: projHostile, manualsMode: "docs", manualsDir: { descriptor: "manualsDir" } });
+	const docsRes = await docsTool.execute({ operation: "lint", model: "sale.order", slug: "probe" }, undefined);
+	check("a descriptor object in manualsDir falls back to the default folder", docsRes.ok === false && String(docsRes.detail).includes(join(projHostile, "docs", "manuals", "probe")));
+	check("the crash message never reaches the developer", !/instance of Object/.test(String(docsRes.detail)));
+
+	// Every path key broken at once: mode, specsDir and specsRoot are objects.
+	const allTool = mountHostile({ projectRoot: projHostile, manualsMode: {}, manualsDir: {}, specsDir: {}, specsRoot: {} });
+	const allRes = await allTool.execute({ operation: "lint", model: "sale.order", slug: "probe" }, undefined);
+	check("broken mode/specsDir/specsRoot fall back to the built-in defaults", allRes.ok === false && String(allRes.detail).includes(join(projHostile, "specs", "manuals", "probe")));
+
+	// A call that cannot resolve its folder at all still answers, explaining which key to fix.
+	const none = model.resolveManualWorkspace({ mode: "docs", dir: {}, projectRoot: projHostile, specsBase: join(projHostile, "specs"), slug: "probe" });
+	check("the fallback blocked message names the key and where to fix it", none.ok === false && none.blocked.includes("manualsDir") && /Settings → Odoo SDD|\.sdd\/config\.json/.test(none.blocked));
+	rmSync(projHostile, { recursive: true, force: true });
+}
 
 // ---------------------------------------------------------------------------
 // Guard classification: capture with actions is a MUTATION; read-only is not
@@ -332,8 +439,168 @@ if (canon17) {
 }
 
 // ---------------------------------------------------------------------------
+// Module scope — EVERY menu and EVERY action the module owns is coverage surface
+// ---------------------------------------------------------------------------
+const rModule = await canon.collectCanon(fakeClient(17, { module: "sale" }), {
+	model: "sale.order",
+	serverVersion: "17.0",
+	language: "es",
+	module: "sale",
+	moduleDir: modDir,
+});
+check("module canon succeeds", rModule.ok === true, rModule.ok ? "" : rModule.blocked);
+if (rModule.ok) {
+	const inv = rModule.canon.module;
+	const moduleSb = model.planStoryboard(rModule.canon, "sale-module");
+	const coverage = (sb) => model.validateStoryboard(sb, rModule.canon).filter((f) => f.rule === "MODULE-COVERAGE");
+	check("module inventory is present and named", inv?.name === "sale");
+	check(
+		"module inventory reads EVERY menu the module owns, in menu order",
+		(inv?.menus ?? []).map((m) => m.completeName).join(" | ") === "Sales/Reporting | Sales/Orders/Quotations | Sales/Settings",
+		JSON.stringify(inv?.menus),
+	);
+	check("module inventory maps a menu to the action it opens", inv?.menus.find((m) => m.xmlid === "sale.menu_quotations")?.actionXmlid === "sale.action_quotations");
+	check("module inventory keeps a menu that opens a NATIVE action", inv?.menus.find((m) => m.xmlid === "sale.menu_reporting")?.actionXmlid === "sale.xml_77");
+	check("module inventory keeps a menu that opens nothing", inv?.menus.find((m) => m.xmlid === "sale.menu_settings")?.actionXmlid === undefined);
+	check(
+		"module inventory reads every action kind the module owns, and nothing else",
+		(inv?.actions ?? []).map((a) => a.kind).join() === "ir.actions.act_window,ir.actions.server",
+		JSON.stringify(inv?.actions),
+	);
+	check("module inventory records the model of an act_window action", inv?.actions.find((a) => a.xmlid === "sale.action_quotations")?.model === "sale.order");
+	check("module inventory records the detail of a server action", inv?.actions.find((a) => a.kind === "ir.actions.server")?.detail === "code");
+	check("module inventory lists ONLY the models whose modules contain the module", (inv?.models ?? []).map((m) => m.model).join() === "sale.order,sale.report", JSON.stringify(inv?.models));
+	const summarized = canon.summarizeCanon(rModule.canon);
+	check("summarizeCanon reports the module inventory", summarized.module?.menus === 3 && summarized.module.actions === 2 && summarized.module.models === 2);
+	check("module canon fingerprints differently from the same canon without inventory", canon.canonFingerprint(rModule.canon) !== canon.canonFingerprint({ ...rModule.canon, module: undefined }));
+
+	check("planStoryboard opens EVERY module menu with a read-only flow", moduleSb.flows.filter((f) => f.id.startsWith("m")).length === 3);
+	check("a module menu flow is goto + screenshot, read-only, on the action it opens", (() => {
+		const flow = moduleSb.flows.find((f) => f.title === "Sales/Orders/Quotations");
+		return flow?.steps.map((s) => `${s.kind}:${s.safety}`).join() === "goto:read-only,screenshot:read-only" && flow.steps[0].target.xmlid === "sale.action_quotations";
+	})());
+	check("a menu with no action targets the menu itself", moduleSb.flows.find((f) => f.title === "Sales/Settings")?.steps[0].target.xmlid === "sale.menu_settings");
+	check("a module canon with no form still plans its menus", model.planStoryboard({ ...rModule.canon, views: [] }, "x").flows.filter((f) => f.id.startsWith("m")).length === 3);
+	const unknownTargets = model.validateStoryboard(moduleSb, rModule.canon).filter((f) => f.rule === "TARGET-UNKNOWN");
+	check("module targets are KNOWN targets (no TARGET-UNKNOWN for a module menu/action)", unknownTargets.length === 0, JSON.stringify(unknownTargets));
+	check("a fully planned module storyboard has no MODULE-COVERAGE ERROR", coverage(moduleSb).every((f) => f.severity !== "ERROR"), JSON.stringify(coverage(moduleSb)));
+
+	const withoutSettings = { ...moduleSb, flows: moduleSb.flows.filter((f) => f.title !== "Sales/Settings") };
+	check("a menu outside every flow is a MODULE-COVERAGE ERROR", coverage(withoutSettings).some((f) => f.severity === "ERROR" && f.message.includes("Sales/Settings")));
+	const withoutReporting = { ...moduleSb, flows: moduleSb.flows.filter((f) => !f.steps.some((s) => s.target?.xmlid === "sale.xml_77")) };
+	check("a menu whose flow is gone is an ERROR again", coverage(withoutReporting).some((f) => f.severity === "ERROR" && f.message.includes("Sales/Reporting")));
+	const viaAction = {
+		...moduleSb,
+		flows: [
+			...withoutReporting.flows,
+			{
+				id: "x1",
+				title: "Reporting",
+				steps: [
+					{ id: "s01", kind: "goto", procedure: null, target: { kind: "action", xmlid: "sale.xml_77" }, safety: "read-only" },
+					{ id: "s02", kind: "screenshot", procedure: null, safety: "read-only" },
+				],
+			},
+		],
+	};
+	check("a menu is covered when a flow opens the action it points to", coverage(viaAction).every((f) => !(f.severity === "ERROR" && f.message.includes("Sales/Reporting"))));
+	check("a non-navigable action nobody can open is a WARN, not an ERROR", coverage(withoutReporting).some((f) => f.severity === "WARN" && f.message.includes("ir.actions.server")), JSON.stringify(coverage(withoutReporting)));
+	check("a per-model canon is unchanged: no inventory, no MODULE-COVERAGE", canon17?.module === undefined && model.validateStoryboard(model.planStoryboard(canon17, "quotations"), canon17).every((f) => f.rule !== "MODULE-COVERAGE"));
+}
+
+// ---------------------------------------------------------------------------
+// 0.17.0 — the interview, field-by-field coverage and the group walk
+// ---------------------------------------------------------------------------
+const rIv = await canon.collectCanon(fakeClient(17, { module: "sale", connectedUser: "fhidalgo", connectedAdmin: true }), {
+	model: "sale.order",
+	serverVersion: "17.0",
+	language: "es",
+	module: "sale",
+	moduleDir: modDir,
+});
+check("the interview canon succeeds", rIv.ok === true, rIv.ok ? "" : rIv.blocked);
+if (rIv.ok) {
+	const iv = rIv.canon.interview;
+	check("the interview records the connected login and derives the administrator", iv?.connectedLogin === "fhidalgo" && iv.admin === true);
+	check("an undeclared asUser comes from the connection (source=connected)", iv?.asUserSource === "connected" && (iv.asUser ?? "").includes("fhidalgo"));
+	check("the walk groups are what the module declares, once each", JSON.stringify(iv?.groups) === JSON.stringify(["sales_team.group_sale_salesman"]), JSON.stringify(iv?.groups));
+	check("the interview names the inventoried modules", (iv?.modules ?? []).join() === "sale");
+	const doc = rIv.canon.modules?.[0]?.models.find((m) => m.model === "sale.order");
+	check(
+		"every field is read with its label, type and required flag",
+		doc?.fields.some((f) => f.name === "partner_id" && f.string === "Customer" && f.type === "many2one" && f.required === true),
+		JSON.stringify(doc?.fields),
+	);
+	check("a field restricted to groups carries them by name", doc?.fields.some((f) => f.name === "partner_id" && Array.isArray(f.groups)));
+	check("the model doc carries the form AND list buttons", (doc?.buttons ?? []).some((b) => b.name === "action_confirm"));
+	check("the model doc carries the statusbar states", Array.isArray(doc?.statusbar?.visibleStates) && doc?.statusbar.visibleStates.length > 0);
+	check("the model doc carries the access matrix by group", doc?.access.some((a) => a.group === "sales_team.group_sale_salesman" && a.read === true && a.unlink === false));
+	const denied = rIv.canon.modules?.[0]?.models.find((m) => m.model === "sale.report");
+	check("a model the server denies is marked unreadable, never invented", (denied?.unreadable ?? "").includes("AccessError") && denied.fields.length === 0);
+
+	const ivSb = model.planStoryboard(rIv.canon, "sale-interview");
+	check("plan copies the interview into the storyboard", (ivSb.interview?.asUser ?? "").includes("fhidalgo") && ivSb.interview?.admin === true && (ivSb.interview?.modules ?? []).join() === "sale");
+	check("plan opens one flow per walk group, with the group as role", (() => {
+		const g = ivSb.flows.find((f) => f.id.startsWith("g"));
+		return ivSb.flows.filter((f) => f.kind === "group").length === 1 && g?.role === "sales_team.group_sale_salesman" && g.steps[0].kind === "goto" && g.steps.some((s) => s.kind === "screenshot");
+	})());
+	check("plan seeds the docs checklist with every field and button", (() => {
+		const seeded = ivSb.docs?.models?.["sale.order"];
+		return seeded !== undefined && "partner_id" in (seeded.fields ?? {}) && Object.values(seeded.fields).every((v) => v === "") && Object.values(seeded.buttons ?? {}).every((v) => v === "");
+	})());
+	const findings0 = model.validateStoryboard(ivSb, rIv.canon);
+	check("a freshly planned module manual OWES the field prose (FIELD-COVERAGE ERROR)", findings0.some((f) => f.rule === "FIELD-COVERAGE" && f.severity === "ERROR"));
+	check("... and the button and workflow prose", findings0.some((f) => f.rule === "BUTTON-COVERAGE" && f.severity === "ERROR") && findings0.some((f) => f.rule === "WORKFLOW-COVERAGE" && f.severity === "ERROR"));
+	check("a denied model is a MODEL-UNREADABLE WARN, not a coverage failure", findings0.some((f) => f.rule === "MODEL-UNREADABLE" && f.severity === "WARN"));
+	check("a group flow runs as a role lint cannot verify from a capture (ROLE-UNVERIFIED WARN)", findings0.some((f) => f.rule === "ROLE-UNVERIFIED" && f.severity === "WARN"));
+	check("INTERVIEW-MISSING is an ERROR when the storyboard drops the interview", model.validateStoryboard({ ...ivSb, interview: undefined }, rIv.canon).some((f) => f.rule === "INTERVIEW-MISSING" && f.severity === "ERROR"));
+
+	const filled = JSON.parse(JSON.stringify(ivSb));
+	for (const entry of Object.values(filled.docs.models)) {
+		for (const k of Object.keys(entry.fields ?? {})) entry.fields[k] = "Guarda el dato que la operación necesita.";
+		for (const k of Object.keys(entry.buttons ?? {})) entry.buttons[k] = "Avanza el documento al siguiente estado.";
+		entry.workflow = "Nace en borrador, se confirma y termina bloqueado o cancelado.";
+	}
+	const findings1 = model.validateStoryboard(filled, rIv.canon);
+	check("with every field, button and workflow written the coverage is clean", findings1.every((f) => !["FIELD-COVERAGE", "BUTTON-COVERAGE", "WORKFLOW-COVERAGE"].includes(f.rule)), JSON.stringify(findings1));
+	const noGroups = { ...filled, flows: filled.flows.filter((f) => f.kind !== "group") };
+	check("a group nobody walks is a GROUP-COVERAGE ERROR", model.validateStoryboard(noGroups, rIv.canon).some((f) => f.rule === "GROUP-COVERAGE" && f.severity === "ERROR"));
+	check("docs.groupsWhy downgrades it to a WARN (a documented limitation)", model.validateStoryboard({ ...noGroups, docs: { ...filled.docs, groupsWhy: "La instancia tiene una sola credencial." } }, rIv.canon).some((f) => f.rule === "GROUP-COVERAGE" && f.severity === "WARN"));
+	const skipped = JSON.parse(JSON.stringify(filled));
+	for (const entry of Object.values(skipped.docs.models)) {
+		entry.skip = { ...(entry.skip ?? {}), partner_id: "Campo técnico que no se edita a mano." };
+		delete entry.fields.partner_id;
+	}
+	check("a skip WITH a reason is documented coverage, not an error", model.validateStoryboard(skipped, rIv.canon).every((f) => !(f.rule === "FIELD-COVERAGE" && f.message.includes("partner_id"))));
+
+	// plan MERGES: the storyteller's work survives a re-plan against the canon
+	const narrated = JSON.parse(JSON.stringify(filled));
+	narrated.language = "es_VE";
+	narrated.flows[0].steps[0].procedure = "Abre el listado de presupuestos.";
+	narrated.flows[0].captures = [{ stepId: "s02", file: "shots/s02.png" }];
+	narrated.docs.models["sale.order"].workflow = "Mi flujo real, escrito a mano.";
+	const replanned = model.planStoryboard(rIv.canon, "sale-interview");
+	const mergeMod = await import(join(root, "lib", "manual-tool.js"));
+	const merged = mergeMod.mergeStoryboards(narrated, replanned);
+	check("plan merge keeps the narration by step id", merged.flows[0].steps[0].procedure === "Abre el listado de presupuestos.");
+	check("plan merge keeps the captures", (merged.flows[0].captures ?? [])[0]?.file === "shots/s02.png");
+	check("plan merge keeps the written workflow prose", merged.docs?.models?.["sale.order"]?.workflow === "Mi flujo real, escrito a mano.");
+	check("plan merge keeps a step the canon no longer plans? no: structure comes from the canon", merged.flows.every((f) => f.steps.every((s) => s.kind !== "wait")));
+	check("plan merge keeps the interview and the language", (merged.interview?.asUser ?? "").includes("fhidalgo"));
+
+	// Render: the type is evidence (canon), the purpose is prose (storyboard)
+	const md = render.renderManualMarkdown(merged, rIv.canon);
+	check("the rendered manual has a field table with type AND purpose", md.includes("| Campo | Etiqueta | Tipo |") && md.includes("| partner_id | Customer |") && md.includes("Guarda el dato que la operación necesita."));
+	check("the rendered manual has a button table", md.includes("| Botón | Etiqueta | Estados |") && md.includes("Avanza el documento al siguiente estado."));
+	check("the rendered manual quotes the workflow the author wrote", md.includes("Mi flujo real, escrito a mano."));
+	check("the rendered manual has a section per access group", md.includes("Por cada grupo de acceso") && md.includes("sales_team.group_sale_salesman"));
+	check("the Act I declares the audience", md.includes("**Para quién**"));
+}
+
+// ---------------------------------------------------------------------------
 // Fase 2 — prose lint (es/en positives and negatives)
 // ---------------------------------------------------------------------------
+
 const pEs = prose.lintProse("No solo acelera el trabajo, sino que transforma la operación completa del área comercial.", { language: "es" });
 check("ai-negative-parallelism WARNs on empty contrast (es)", pEs.some((f) => f.rule === "ai-negative-parallelism"));
 const pEsData = prose.lintProse("No solo guarda 3 pasos, sino que evita reescribir el Cliente.", { language: "es", canonLabels: ["Cliente"] });

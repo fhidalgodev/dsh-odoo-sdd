@@ -54,7 +54,9 @@ jobs:
 
       # The suite output is kept so a failure is READABLE: the log of a job is
       # not always accessible (and a bare "exit code 1" hides which check
-      # failed), while the step summary is public with the check run.
+      # failed), so the tail is emitted twice — as the step summary, and as
+      # annotations, which travel with the check run and stay reachable from the
+      # API even when the job log is not.
       - name: Tests (server invariants + host contract + client bundle + README + functional/import)
         shell: bash
         run: |
@@ -68,6 +70,10 @@ jobs:
               tail -n 80 test-output.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            tail -n 25 test-output.log | while IFS= read -r line; do
+              line=${line//%/%%}
+              [ -n "$line" ] && echo "::error::$line"
+            done
           fi
           exit "$status"
 

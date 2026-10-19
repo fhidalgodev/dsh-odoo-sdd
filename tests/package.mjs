@@ -513,6 +513,23 @@ try {
 	rmSync(installStage, { recursive: true, force: true });
 }
 
+// CI runs the suites as separate steps (a failing step names the suite), so the
+// list lives in two places: package.json and the workflow. This check keeps them
+// from drifting apart, which would silently stop testing a suite on CI.
+{
+	const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+	const workflow = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
+	const fromScript = String(pkg.scripts.test)
+		.split("&&")
+		.map((part) => part.trim().split(/\s+/).pop())
+		.filter((file) => typeof file === "string" && file.startsWith("tests/"));
+	const fromWorkflow = [...workflow.matchAll(/scripts\/ci-test\.sh([^\n]*)/g)]
+		.flatMap((match) => match[1].trim().split(/\s+/))
+		.filter((file) => file.startsWith("tests/"));
+	const missing = fromScript.filter((file) => !fromWorkflow.includes(file));
+	check("every suite in npm test also runs as a CI step", missing.length === 0 && fromScript.length > 0, JSON.stringify({ fromScript, fromWorkflow, missing }));
+}
+
 console.log(`\n${checks - failures}/${checks} checks passed.`);
 if (failures > 0) {
 	console.error(`${failures} CHECK(S) FAILED`);

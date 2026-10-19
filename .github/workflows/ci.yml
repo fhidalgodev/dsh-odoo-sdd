@@ -55,23 +55,23 @@ jobs:
       # One step per group of suites: the failing step NAMES the suite that
       # broke, and scripts/ci-test.sh keeps the tail of a failed run readable
       # (step summary + annotations), because a job log is not always reachable.
-      - name: Tests: server invariants and host contract
+      - name: "Tests: server invariants and host contract"
         shell: bash
         run: bash scripts/ci-test.sh tests/smoke.mjs tests/spec-reqs.mjs tests/test-scan.mjs
 
-      - name: Tests: client bundle and README
+      - name: "Tests: client bundle and README"
         shell: bash
         run: bash scripts/ci-test.sh tests/client.mjs tests/readme.mjs
 
-      - name: Tests: functional and import
+      - name: "Tests: functional and import"
         shell: bash
         run: bash scripts/ci-test.sh tests/functional.mjs tests/import.mjs
 
-      - name: Tests: narrated manuals
+      - name: "Tests: narrated manuals"
         shell: bash
         run: bash scripts/ci-test.sh tests/manual.mjs
 
-      - name: Tests: capture pipeline
+      - name: "Tests: capture pipeline"
         shell: bash
         run: bash scripts/ci-test.sh tests/capture.mjs
 

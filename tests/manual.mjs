@@ -6,17 +6,20 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, copyFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { join } from "node:path";
 
-const root = new URL("..", import.meta.url).pathname;
-const lib = await import(join(root, "lib", "index.js"));
-const sddState = await import(join(root, "lib", "sdd-state.js"));
+const root = fileURLToPath(new URL("..", import.meta.url));
+// import() needs a URL: a Windows drive path is not a valid specifier.
+const libUrl = (name) => pathToFileURL(join(root, "lib", name)).href;
+const lib = await import(libUrl("index.js"));
+const sddState = await import(libUrl("sdd-state.js"));
 const { initSpecDir, loadState, saveState } = sddState;
-const cpsMod = await import(join(root, "lib", "checkpoints.js"));
+const cpsMod = await import(libUrl("checkpoints.js"));
 // The lib entry re-exports the apply() mount; the canon internals live in the
 // compiled module files, imported directly.
-const canon = await import(join(root, "lib", "manual-canon.js"));
-const model = await import(join(root, "lib", "manual-model.js"));
+const canon = await import(libUrl("manual-canon.js"));
+const model = await import(libUrl("manual-model.js"));
 
 let passed = 0;
 const check = (name, cond, extra) => {
@@ -402,9 +405,9 @@ const mountHostile = (deployment) => {
 // ---------------------------------------------------------------------------
 // Fase 2 — plan / validate against the canon
 // ---------------------------------------------------------------------------
-const prose = await import(join(root, "lib", "prose-lint.js"));
-const render = await import(join(root, "lib", "manual-render.js"));
-const docsScan = await import(join(root, "lib", "docs-scan.js"));
+const prose = await import(libUrl("prose-lint.js"));
+const render = await import(libUrl("manual-render.js"));
+const docsScan = await import(libUrl("docs-scan.js"));
 
 // Re-collect WITH module_dir so the error evidence (raising methods) is in
 // the fixture canon — the recovery rule depends on it.
@@ -583,7 +586,7 @@ if (rIv.ok) {
 	narrated.flows[0].captures = [{ stepId: "s02", file: "shots/s02.png" }];
 	narrated.docs.models["sale.order"].workflow = "Mi flujo real, escrito a mano.";
 	const replanned = model.planStoryboard(rIv.canon, "sale-interview");
-	const mergeMod = await import(join(root, "lib", "manual-tool.js"));
+	const mergeMod = await import(libUrl("manual-tool.js"));
 	const merged = mergeMod.mergeStoryboards(narrated, replanned);
 	check("plan merge keeps the narration by step id", merged.flows[0].steps[0].procedure === "Abre el listado de presupuestos.");
 	check("plan merge keeps the captures", (merged.flows[0].captures ?? [])[0]?.file === "shots/s02.png");
@@ -677,8 +680,8 @@ if (canon17) {
 // ---------------------------------------------------------------------------
 // Fase 4 — the Playwright recording import and its credential gate
 // ---------------------------------------------------------------------------
-const importMod = await import(join(root, "lib", "manual-import.js"));
-const toolMod = await import(join(root, "lib", "manual-tool.js"));
+const importMod = await import(libUrl("manual-import.js"));
+const toolMod = await import(libUrl("manual-tool.js"));
 {
 	const codegenTest = `import { test, expect } from '@playwright/test';
 
@@ -803,7 +806,7 @@ test('test', async ({ page }) => {
 // ---------------------------------------------------------------------------
 // Fase 5 — the documentation verdict covers the manual WHEN ONE EXISTS
 // ---------------------------------------------------------------------------
-const auditMod = await import(join(root, "lib", "manual-audit.js"));
+const auditMod = await import(libUrl("manual-audit.js"));
 {
 	const aProj = mkdtempSync(join(tmpdir(), "manual-audit-"));
 	const aSpecs = join(aProj, "specs");

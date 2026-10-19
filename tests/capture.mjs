@@ -10,11 +10,14 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { join } from "node:path";
 
-const root = new URL("..", import.meta.url).pathname;
-const capture = await import(join(root, "lib", "manual-capture.js"));
-const model = await import(join(root, "lib", "manual-model.js"));
+const root = fileURLToPath(new URL("..", import.meta.url));
+// import() needs a URL: a Windows drive path is not a valid specifier.
+const libUrl = (name) => pathToFileURL(join(root, "lib", name)).href;
+const capture = await import(libUrl("manual-capture.js"));
+const model = await import(libUrl("manual-model.js"));
 
 let passed = 0;
 const check = (name, cond, extra) => {

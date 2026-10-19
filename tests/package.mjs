@@ -530,6 +530,21 @@ try {
 	check("every suite in npm test also runs as a CI step", missing.length === 0 && fromScript.length > 0, JSON.stringify({ fromScript, fromWorkflow, missing }));
 }
 
+// A suite that reaches the lib through `new URL(...).pathname` or through a bare
+// join() builds a specifier that only works on POSIX: on Windows the drive path
+// ("D:\\a\\...") is not a valid module specifier, so the suite dies before its
+// first check. Windows CI cannot log into the run, which makes this class of
+// failure expensive to discover, so it is checked here instead.
+{
+	const offenders = readdirSync(join(root, "tests"))
+		.filter((file) => file.endsWith(".mjs"))
+		.filter((file) => {
+			const source = readFileSync(join(root, "tests", file), "utf8");
+			return /new URL\("\.\.", import\.meta\.url\)\.pathname/.test(source) || /await import\(join\(/.test(source);
+		});
+	check("no suite builds a module specifier from a bare path", offenders.length === 0, JSON.stringify(offenders));
+}
+
 console.log(`\n${checks - failures}/${checks} checks passed.`);
 if (failures > 0) {
 	console.error(`${failures} CHECK(S) FAILED`);

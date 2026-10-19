@@ -348,13 +348,16 @@ const mountHostile = (deployment) => {
 	// docs mode with a broken manualsDir: this is the exact shape that crashed.
 	const docsTool = mountHostile({ projectRoot: projHostile, manualsMode: "docs", manualsDir: { descriptor: "manualsDir" } });
 	const docsRes = await docsTool.execute({ operation: "lint", model: "sale.order", slug: "probe" }, undefined);
-	check("a descriptor object in manualsDir falls back to the default folder", docsRes.ok === false && String(docsRes.detail).includes(join(projHostile, "docs", "manuals", "probe")));
+	// The message is display-normalised (the home folder becomes "~"), and on
+	// Windows tmpdir() lives UNDER the home, so the whole prefix is replaced:
+	// assert on the tail of the folder instead of on the absolute path.
+	check("a descriptor object in manualsDir falls back to the default folder", docsRes.ok === false && String(docsRes.detail).includes(join("docs", "manuals", "probe")));
 	check("the crash message never reaches the developer", !/instance of Object/.test(String(docsRes.detail)));
 
 	// Every path key broken at once: mode, specsDir and specsRoot are objects.
 	const allTool = mountHostile({ projectRoot: projHostile, manualsMode: {}, manualsDir: {}, specsDir: {}, specsRoot: {} });
 	const allRes = await allTool.execute({ operation: "lint", model: "sale.order", slug: "probe" }, undefined);
-	check("broken mode/specsDir/specsRoot fall back to the built-in defaults", allRes.ok === false && String(allRes.detail).includes(join(projHostile, "specs", "manuals", "probe")));
+	check("broken mode/specsDir/specsRoot fall back to the built-in defaults", allRes.ok === false && String(allRes.detail).includes(join("specs", "manuals", "probe")));
 
 	// A call that cannot resolve its folder at all still answers, explaining which key to fix.
 	const none = model.resolveManualWorkspace({ mode: "docs", dir: {}, projectRoot: projHostile, specsBase: join(projHostile, "specs"), slug: "probe" });

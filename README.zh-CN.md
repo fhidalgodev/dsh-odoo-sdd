@@ -169,12 +169,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.15.0`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.17.0`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.15.0，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.17.0，发布时带有 provenance 证明
 ```
 
 > [!IMPORTANT]
@@ -475,7 +475,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | `sdd_checkpoint` | 回滚面：`create`（对工作区做快照，成为活动 checkpoint）、`list`、`restore`（恢复文件，并在 `restore_data=true` 和 `confirm_destructive=true` 时恢复已记录的数据变更：撤销会在该变更用过的公司上下文中运行，把读取形态转换成写入值，标记每个操作以免重试时重复补偿它，拒绝来自其他目标的日志，并报告每一个它无法恢复的字段；它**总是报告** checkpoint 之后创建的文件，且只有 `remove_created=true` 才会删除它们）、`drop`、`journal`。 |
 | `odoo_docs` | 模块文档，可**独立使用**（不需要 spec、阶段、checkpoint 或实例），因此一个已有模块也能直接被文档化：`check`（把 OCA 片段映射到 Diátaxis、版本方案、changelog、`index.html`、docstring、xpath 注释、OWL 指令 → 带 `file:line` 的 ERROR/WARN）、`plan`、`scaffold`（只创建、绝不覆盖的骨架）和 `report`（持久化 `docs-report.md`；只有当不存在仍是骨架的片段时才是 APPROVED）。对已发布模块的任何改动都必须写 changelog 条目。 |
 | `odoo_security_scan` | 本地静态安全审查（不需要实例）：拼接式原生 SQL、`eval`/`exec`/`pickle`、硬编码密钥、没有理由的 `sudo()`、`auth="none"`、被关闭的 CSRF、QWeb `t-raw`。发现项带有 `file:line` + 修复提示；任何 ERROR 都会阻止 `DONE`。 |
-| `odoo_manual` | 基于证据的叙述式用户手册。**`canon`** 从实例读取一个模型的功能 canon（视图、header 按钮以及显示它们的状态、必填字段、notebook 页、动作、菜单、访问规则、用户组、`raise UserError`/`ValidationError` 与 `_sql_constraints` 位置）并连同指纹持久化：手册只能描述 canon 说过的话。**`plan`** 把 canon 变成一份分镜（流程、有序步骤、每步一句话），且只创建、不覆盖。**`lint`** 用 canon 校验分镜和渲染后的散文（`CANON-STALE`、`TARGET-UNKNOWN`、`PLACEHOLDER-UNBOUND`、`ACTS-MISSING`、`RECOVERY-MISSING`、西语和英语的 AI 腔模式 → 带确切行号的 ERROR/WARN）。**`explore`** 返回真实屏幕的 ARIA 快照，因此不会去猜任何 xml id 或标签。**`capture`** 驱动浏览器：只读步骤总是执行，而动作步骤（`new`/`fill`/`select`/`press`/`click`）需要 `allow_actions=true` —— 守卫会把它当作一次变更。**`render`** 写出手册和一个 Apps 页面（只创建，除非 `overwrite=true`）。**`import`** 把 Playwright `codegen` 录制转换成一条流程，并拒绝任何携带凭据的录制。手册存放在「设置」指定的位置（`manualsMode`：`specs` 与 spec 同目录、`docs` 在 `manualsDir` 下、`module` 作为模块 `readme/manual/` 下的 OCA 片段）；没有 spec 的独立工作绝不会因此被阻塞。只要分镜已存在，`odoo_docs` 就会在文档结论中加入 `## User manual` 一节 —— 没有分镜时则保持不变。 |
+| `odoo_manual` | 基于证据的叙述式用户手册。**`canon`** 从实例读取一个模型的功能 canon（视图、header 按钮以及显示它们的状态、必填字段、notebook 页、动作、菜单、访问规则、用户组、`raise UserError`/`ValidationError` 与 `_sql_constraints` 位置）并连同指纹持久化：手册只能描述 canon 说过的话。**`plan`** 把 canon 变成一份分镜（流程、有序步骤、每步一句话）：再次运行会**合并**，已经写好的叙述、截图和散文都会保留。**`lint`** 用 canon 校验分镜和渲染后的散文（`CANON-STALE`、`TARGET-UNKNOWN`、`PLACEHOLDER-UNBOUND`、`ACTS-MISSING`、`RECOVERY-MISSING`、西语和英语的 AI 腔模式 → 带确切行号的 ERROR/WARN）。**`explore`** 返回真实屏幕的 ARIA 快照，因此不会去猜任何 xml id 或标签。**`capture`** 驱动浏览器：只读步骤总是执行，而动作步骤（`new`/`fill`/`select`/`press`/`click`）需要 `allow_actions=true` —— 守卫会把它当作一次变更。**`render`** 写出手册和一个 Apps 页面（只创建，除非 `overwrite=true`）。**`import`** 把 Playwright `codegen` 录制转换成一条流程，并拒绝任何携带凭据的录制。手册存放在「设置」指定的位置（`manualsMode`：`specs` 与 spec 同目录、`docs` 在 `manualsDir` 下、`module` 作为模块 `readme/manual/` 下的 OCA 片段）；没有 spec 的独立工作绝不会因此被阻塞。**`canon`** 接收访谈——`as_user`（手册写给谁）、`admin`、`module`/`modules` 与 `groups`——并把它记录下来：清单随即覆盖该模块拥有的**每一个菜单和每一个动作**（菜单打开的动作，即使是原生的），每个模型都会带上它的字段（标签、类型、必填、关联/选择、用户组）、表单和列表按钮、statusbar 状态以及按用户组的访问行。**`plan`** 为每个菜单开一条流程、为每个用户组的巡览开一条流程，并播种一份 `docs` 清单：每个字段、每个按钮一格空白。**`lint`** 在菜单、动作、字段、按钮、工作流或用户组仍未被覆盖时报告 `MODULE-COVERAGE`、`INTERVIEW-MISSING`、`FIELD-COVERAGE`、`BUTTON-COVERAGE`、`WORKFLOW-COVERAGE` 与 `GROUP-COVERAGE` —— 带理由的 `skip` 属于已记录的覆盖，而 `ROLE-UNVERIFIED` 只是警告，因为截图是以已连接用户的身份跑的。**`render`** 为每个模型加一张表（类型、必填、关联、用户组，以及你写的那句话）并为每个访问组加一节。只要分镜已存在，`odoo_docs` 就会在文档结论中加入 `## User manual` 一节 —— 没有分镜时则保持不变。 |
 | `odoo_tests` | 管道的测试一侧，可**独立使用**（不需要 spec、阶段、checkpoint 或实例）：`check` 扫描 Python 测试中安装日志看不到的问题 —— `tests/__init__.py` 从未导入的 `tests/*.py`（Odoo 只加载被导入的模块，因此该测试从不运行）、不是 Odoo 测试用例的类、没有任何断言或断言恒真的 `test_*`、被吞掉的异常、`time.sleep`、显式 skip、测试内的 `cr.commit()`（破坏每个测试的回滚）、17+ 上的 `SavepointCase`、没有 `start_tour` 的 `HttpCase`，并以断言密度作为参考指标。`plan` 把 spec 的每个验收标准映射到提到它的测试（按 AC id 或按其需求的 `REQ-<AREA>-NN`），并列出没有任何测试的标准。`scaffold` 为每个未覆盖的标准写一个 **RED stub**（函数体抛出 `NotImplementedError`，绝不是空洞的通过），只创建且幂等，并追加 import 让文件真正被加载。 |
 | `sdd_handoff` | 在运行收尾时写入 `specs/<id>/handoff.md`（最终阶段、结论、决策、blockers、checkpoint、**完整的**按 spec 的数据日志、生效配置、下一步）。 |
 | `odoo_config` | 读取或更新持久化配置，并回答**"我现在在哪个项目里？"**：解析出的根目录、它的来源（会话 cwd / 已配置 / 进程 cwd）、specs 基础目录、生效的 spec 目录和正在使用的配置文件。 |

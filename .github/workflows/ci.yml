@@ -52,8 +52,24 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The suite output is kept so a failure is READABLE: the log of a job is
+      # not always accessible (and a bare "exit code 1" hides which check
+      # failed), while the step summary is public with the check run.
       - name: Tests (server invariants + host contract + client bundle + README + functional/import)
-        run: npm test
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test-output.log
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            {
+              echo "## Failing checks (tail of the suite)"
+              echo '```'
+              tail -n 80 test-output.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
 
       # Guards the class of bug that only shows up AFTER installation: a file
       # the runtime loads by path but `files` leaves out of the tarball.

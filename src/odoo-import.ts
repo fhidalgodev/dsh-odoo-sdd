@@ -31,6 +31,8 @@ import {
 	type ImportCapabilities,
 } from "./import-capabilities.js";
 import { writeState, isSafeSegment, readPlan } from "./functional.js";
+import { importPrepareReason } from "./approval-i18n.js";
+import type { ApprovalReason } from "./approval-i18n.js";
 
 /** The web session of a target, read from the private session file. */
 export interface WebSession {
@@ -391,7 +393,7 @@ export interface ImportDeps {
 	 */
 	client(exec?: unknown): Promise<{ client: ImportRpc | null; report: string; serverVersion?: string }>;
 	/** Ask the human for the preparation scope (a native approval). */
-	approve(exec: unknown, reason: string): Promise<"allowed-once" | "rejected" | "cancelled" | "unavailable">;
+	approve(exec: unknown, reason: ApprovalReason): Promise<"allowed-once" | "rejected" | "cancelled" | "unavailable">;
 	/** Absolute path of the spec directory. */
 	specDir(specId: string, exec?: unknown): string;
 	/** Whether the imported file path is one the operator allowed, for THIS session. */
@@ -542,8 +544,7 @@ export function registerImportTool(ctx: { tools: { register(tool: unknown): void
 				}
 				const outcome = await deps.approve(
 					exec,
-					`Prepare a file import for spec ${specId} (batch ${batchId}): upload ${deps.display(filePath)} to the ` +
-						"temporary importer of the instance? This writes a temporary record and nothing else.",
+					importPrepareReason({ specId, batchId, file: deps.display(filePath) }),
 				);
 				if (outcome !== "allowed-once") {
 					return { ...base, status: "not-approved", detail: `Preparation NOT approved (outcome: ${outcome}). Nothing was uploaded.` };

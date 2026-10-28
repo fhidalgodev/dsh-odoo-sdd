@@ -795,13 +795,36 @@ var zh = {
 
 	function apply(ctx) {
 		try {
-			// NOTE (pre-existing wart, left as-is on purpose): the host ships only
-			// the `zh` and `en` locales, and English is the fallback, so the `zh`
-			// dictionary below is where the Spanish copy lives. Registering it
-			// under a new id would be ignored (ids are a fixed built-in set), and
-			// dropping it would silently switch the panel to English-only. Anyone
-			// who selects 中文 sees Spanish instead of Chinese: the honest fix is a
-			// language-pack provider, not a rename here.
+			// Spanish as a FIRST-CLASS language for the approval card. The host
+			// ships only zh/en dictionaries for the `approval` namespace
+			// (Waiting for approval / Reject / Allow once); the untyped register
+			// overload exists precisely for language-pack contributions, and
+			// `addLanguage` makes `es` selectable (and browser-derivable). The
+			// plugin also sends `displayReason {en, es, zh}` on every approval,
+			// so the QUESTION text localizes even without this registration —
+			// this one localizes the CARD around it. Degrades silently on hosts
+			// where the namespace or the seam is shaped differently.
+			if (ctx.locale && typeof ctx.locale.addLanguage === "function") {
+				ctx.effect(function () {
+					var disposers = [];
+					try { disposers.push(ctx.locale.addLanguage({ id: "es", label: "Español", fallback: "en" })); }
+					catch (e) { /* id already occupied by another contributor: fine */ }
+					try { disposers.push(ctx.locale.register("approval", "es", {
+						waiting: "Esperando aprobación",
+						"detail.aria": "Detalles de la aprobación",
+						escalation: "La herramienta {toolName} solicita ejecución privilegiada",
+						reject: "Rechazar",
+						allowOnce: "Permitir una vez"
+					})); }
+					catch (e) { /* namespace shaped differently on this host: the card stays zh/en */ }
+					return function () { disposers.forEach(function (d) { try { d(); } catch (e2) { /* noop */ } }); };
+				}, "odoo-sdd: spanish approval card");
+			}
+			// NOTE: `es` above is registered as a first-class language pack
+			// (`addLanguage`), so the Spanish copy lives under its own id — the
+			// card localizes for real. The settings-panel dictionaries below stay
+			// zh/en because the panel predates language packs; a follow-up can
+			// migrate them the same way.
 			ctx.effect(function () { ctx.locale.register(NS, { zh: zh, en: en }); }, "odoo-sdd: dictionaries");
 			var t = ctx.locale.bind(NS);
 			// Registered as an effect so dispose/HMR removes the stylesheet it

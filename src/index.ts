@@ -57,6 +57,16 @@ import {
 	type SetupStatus,
 } from "./setup-state.js";
 import { writeFileAtomic } from "./atomic.js";
+import {
+	authorizeConnectionReason,
+	autonomyReason,
+	configSetReason,
+	gatePhaseReason,
+	purgeReason,
+	toDisplayReason,
+	waiveReason,
+} from "./approval-i18n.js";
+import type { ApprovalReason, DisplayReason } from "./approval-i18n.js";
 import { resolveModuleDir } from "./paths.js";
 import {
 	asSpecsMode,
@@ -141,6 +151,10 @@ import {
 	verdictStaleness,
 	declaredAcIds,
 	redEvidenceGaps,
+	gateDocsFor,
+	hashGateDocs,
+	gatePreviewValid,
+	headingGateReason,
 	GATED_PHASES,
 	type Phase,
 	type PipelineMode,
@@ -386,6 +400,8 @@ interface ApprovalApi {
 		toolName: string;
 		callId?: unknown;
 		reason?: string;
+		/** Localized presentation text; resolved against the user's UI locale. */
+		displayReason?: DisplayReason;
 		signal?: unknown;
 	}): Promise<ApprovalOutcome>;
 }
@@ -440,24 +456,30 @@ function optionalService(ctx: unknown, name: string): unknown {
  * @param ctx - plugin context carrying the optional approval service.
  * @param exec - the running execution (agent, callId, signal).
  * @param toolName - tool the question is about (presentation and audit).
- * @param reason - human-readable explanation of why approval is needed.
+ * @param reason - the question, in every language the plugin presents (or a
+ *   plain English string for callers not localized yet). The English text is
+ *   the audited `reason`; `es`/`zh` travel as `displayReason`, which the host
+ *   resolves against the user's interface locale and never persists.
  * @returns the approval outcome, or `'unavailable'` when it cannot be asked.
  */
 async function requestNativeApproval(
 	ctx: unknown,
 	exec: unknown,
 	toolName: string,
-	reason: string,
+	reason: ApprovalReason,
 ): Promise<ApprovalOutcome> {
 	try {
 		const api = optionalService(ctx, "approval") as ApprovalApi | undefined;
 		if (api === null || api === undefined || typeof api.request !== "function") return "unavailable";
 		const e = (exec ?? {}) as { agent?: unknown; signal?: unknown };
+		const en = typeof reason === "string" ? reason : reason.en;
+		const displayReason = toDisplayReason(reason);
 		const outcome = await api.request({
 			agent: e.agent,
 			toolName,
 			...(callIdOf(exec) !== undefined ? { callId: callIdOf(exec) } : {}),
-			reason,
+			reason: en,
+			...(displayReason !== undefined ? { displayReason } : {}),
 			...(e.signal !== undefined ? { signal: e.signal } : {}),
 		});
 		return outcome === "allowed-once"
@@ -1726,9 +1748,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					ctx,
 					exec,
 					"odoo_setup",
-					`Authorize Odoo connection to ${creds.url} (db=${creds.db}, user=${creds.username})` +
-						`${creds.instance === undefined ? "" : ` [instance=${creds.instance}]`}? ` +
-						"The grant covers this exact target and expires; any change to url/db/user requires a new one.",
+					authorizeConnectionReason({
+						url: creds.url,
+						db: creds.db,
+						username: creds.username,
+						...(creds.instance === undefined ? {} : { instance: creds.instance }),
+					}),
 				);
 				if (outcome !== "allowed-once") {
 					return {
@@ -1819,9 +1844,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					ctx,
 					exec,
 					"odoo_setup",
-					`Purge the plugin's own state under ${displayPath(join(projectRoot, ".sdd"))} ` +
-						"(grants, session cookie, active run, audit log, configuration, setup marker, checkpoints)? " +
-						"Your .env, stop.md and specs/ are preserved.",
+					purgeReason(displayPath(join(projectRoot, ".sdd"))),
 				);
 				if (outcome !== "allowed-once") {
 					return {
@@ -1860,7 +1883,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					ctx,
 					exec,
 					"odoo_setup",
-					`Switch the delegation mode to ${decision.toUpperCase()}? This decides who answers every later phase gate.`,
+					autonomyReason(decision),
 				);
 				if (outcome !== "allowed-once") {
 					return {
@@ -2244,8 +2267,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		name: "sdd_phase",
 		description:
 			"Drive the SDD pipeline state machine for one spec directory. Operations: init (create " +
-			"specs/<id>/ skeleton), status (snapshot), mark_spec_loaded (spec.md assimilated), advance " +
-			"(transition phase; gated phases need approval_marker='APPROVED' — fail-closed), fail " +
+			"specs/<id>/ skeleton), status (snapshot), mark_spec_loaded (spec.md assimilated), preview " +
+			"(read-only: return the CURRENT gate's documents inline so the developer can read them; " +
+			"presents them to the user and stamps the state — a gated advance REQUIRES a fresh preview), advance " +
+			"(transition phase; gated phases need a fresh preview plus the human's native approval — fail-closed), fail " +
 			"(record a failed verification; 3 consecutive failures force deep diagnosis), succeed " +
 			"(record a passed verification with honest verdict; refused unless every AC row in " +
 			"test-plan.md reads an explicit `pass`), rollback (restore the active checkpoint), diagnose " +
@@ -2255,7 +2280,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			operation: {
 				type: "string",
 				required: true,
-				enum: ["init", "clarify", "status", "mark_spec_loaded", "advance", "fail", "succeed", "rollback", "diagnose", "baseline", "waive"],
+				enum: ["init", "clarify", "status", "mark_spec_loaded", "preview", "advance", "fail", "succeed", "rollback", "diagnose", "baseline", "waive"],
 				description: "State-machine operation to perform.",
 			},
 			spec_id: {
@@ -2330,7 +2355,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 		},
 		async execute(args: {
-			operation: "init" | "clarify" | "status" | "mark_spec_loaded" | "advance" | "fail" | "succeed" | "rollback" | "diagnose" | "baseline" | "waive";
+			operation: "init" | "clarify" | "status" | "mark_spec_loaded" | "preview" | "advance" | "fail" | "succeed" | "rollback" | "diagnose" | "baseline" | "waive";
 			spec_id?: string;
 			mode?: PipelineMode;
 			licensed?: "community" | "enterprise";
@@ -2571,10 +2596,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					ctx,
 					exec,
 					"sdd_phase",
-					`Allow THIS session to change the project without a spec.\n` +
-						`Reason given by the developer: ${reason}\n` +
-						`Scope: this chat only (session ${sessionId}); the next session starts under the policy again. ` +
-						`Every change made under it still has to be recorded as a KB decision.`,
+					waiveReason({ reason, sessionId }),
 				);
 				if (outcome !== "allowed-once") {
 					return {
@@ -2654,6 +2676,51 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						`\n${rootNote(root)}`,
 				};
 			}
+			if (args.operation === "preview") {
+				// Read-only: show the developer what the CURRENT gate would ask them
+				// to approve, BEFORE anything is asked. Stamps the state so the gated
+				// advance knows this exact content was presented.
+				const docs = gateDocsFor(state.phase);
+				if (docs.length === 0) {
+					return {
+						operation: "preview" as string, phase: state.phase as string, ok: false, requireDiagnosis: false,
+						summary: summarize(state),
+						detail: `Phase ${state.phase} has no approval gate, so there is nothing to preview. Gates exist for: ${GATED_PHASES.join(", ")}.`,
+					};
+				}
+				const hashes = hashGateDocs(specDir, state.phase);
+				if (hashes === null) {
+					const missing = docs.filter((name) => !existsSync(join(specDir, name)));
+					return {
+						operation: "preview" as string, phase: state.phase as string, ok: false, requireDiagnosis: false,
+						summary: summarize(state),
+						detail:
+							`Cannot preview the ${state.phase} gate: the document(s) it approves do not exist yet — ` +
+							`${missing.join(", ")}. Write them first, then preview again.`,
+					};
+				}
+				const PREVIEW_LINE_CAP = 400;
+				const blocks = docs.map((name) => {
+					const raw = readFileSync(join(specDir, name), "utf8");
+					const lines = raw.split("\n");
+					const truncated = lines.length > PREVIEW_LINE_CAP;
+					const body = (truncated ? lines.slice(0, PREVIEW_LINE_CAP) : lines).join("\n") +
+						(truncated ? `\n… (${lines.length - PREVIEW_LINE_CAP} more lines — open ${displayPath(join(specDir, name))} for the full document)` : "");
+					return `===== ${name} — ${displayPath(join(specDir, name))} =====\n${body}`;
+				});
+				state.gatePreview = { phase: state.phase, docHashes: hashes, createdAt: new Date().toISOString() };
+				saveState(state);
+				return {
+					operation: "preview" as string, phase: state.phase as string, ok: true, requireDiagnosis: false,
+					summary: summarize(state),
+					detail:
+						`PREVIEW of the ${state.phase} gate documents for spec ${args.spec_id}. ` +
+						"Present this content to the developer (open the files in the sidebar when the host allows it) " +
+						"and let them read BEFORE calling advance — the gate asks about exactly these bytes and refuses " +
+						"if they change.\n\n" +
+						blocks.join("\n\n"),
+				};
+			}
 			if (args.operation === "mark_spec_loaded") {
 				state.specLoaded = true;
 				saveState(state);
@@ -2704,12 +2771,47 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				let approvalMarker = args.approval_marker ?? null;
 				let approvalSource: "human" | "human-proxy" = args.approval_source ?? "human";
 				if (GATED_PHASES.includes(state.phase) && args.next_phase !== "BLOCKED") {
+					// Content BEFORE consent: the gate documents must carry their
+					// required sections before anything is previewed or asked, so the
+					// developer is never shown an unapprovable draft (`transition()`
+					// re-checks this — this early check only picks the right error).
+					const headingReason = headingGateReason(state.phase, state.mode, specDir);
+					if (headingReason !== null) {
+						return {
+							operation: "advance" as string, phase: state.phase as string, ok: false, requireDiagnosis: false,
+							summary: summarize(state),
+							detail: headingReason,
+						};
+					}
+					// Preview-first gate: the human decides on content they were SHOWN.
+					// A missing or stale stamp (any gate document edited after the
+					// preview) refuses the ask with the remediation inlined, exactly
+					// like the DRIFT and heading gates above it.
+					const gateDocs = gateDocsFor(state.phase);
+					if (!gatePreviewValid(state, specDir)) {
+						return {
+							operation: "advance" as string, phase: state.phase as string, ok: false, requireDiagnosis: false,
+							summary: summarize(state),
+							detail:
+								`Phase ${state.phase} is gated on a FRESH preview: the developer must be shown what they ` +
+								`approve. Run sdd_phase operation=preview (it returns ${gateDocs.join(", ")} inline and stamps ` +
+								"the state), present the content to the developer, then advance. A stamp from before an " +
+								"edit of any of those documents is refused on purpose.",
+						};
+					}
+					const nextPhase: string = args.next_phase;
+					const gateNote = typeof note === "string" ? note.trim() : "";
 					const asked = await requestNativeApproval(
 						ctx,
 						exec,
 						"sdd_phase",
-						`Approve the phase gate: leave ${state.phase} for ${args.next_phase} in spec ${args.spec_id}` +
-							`${note.trim() === "" ? "" : ` — ${note.trim().slice(0, 300)}`}`,
+						gatePhaseReason({
+							phase: state.phase,
+							next: nextPhase,
+							spec: args.spec_id ?? "",
+							...(gateNote === "" ? {} : { note: gateNote }),
+							docPaths: gateDocs.map((name) => displayPath(join(specDir, name))),
+						}),
 					);
 					if (asked === "rejected" || asked === "cancelled") {
 						return {
@@ -2758,6 +2860,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						documentationPolicy: cfgPhase.documentationPolicy ?? "required",
 					},
 				);
+				// The gate was crossed: the preview stamp is spent (the NEXT gate
+				// needs its own fresh preview) and must not authorize a later ask.
+				if (result.ok && state.gatePreview !== undefined) {
+					delete result.state.gatePreview;
+					saveState(result.state);
+				}
 				// The ACTIVE pointer follows the canonical state even when the
 				// transition FAILED: reaching BLOCKED is persisted by `transition()`
 				// and returned with ok:false, and updating the pointer only on success
@@ -3233,8 +3341,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				ctx,
 				exec,
 				"odoo_config",
-				"Apply plugin configuration changes (allowlist / policy guards / repositories)? " +
-					"This alters which RPC mutations are permitted and which safety guards stay armed.",
+				configSetReason(),
 			);
 			if (outcome !== "allowed-once") {
 				return {

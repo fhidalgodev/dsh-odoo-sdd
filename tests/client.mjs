@@ -174,12 +174,28 @@ function dictionaries() {
 	return globalThis.__odooSddDictEn;
 }
 
-// Capture the English dictionary by intercepting register().
-context.locale.register = (_ns, dict) => {
-	globalThis.__odooSddDictEn = dict.en;
+// Capture the English dictionary and the Spanish approval-card registration by
+// intercepting register()/addLanguage() before apply().
+const esLanguagePacks = [];
+const esApprovalDictionaries = [];
+const baseRegister = context.locale.register.bind(context.locale);
+context.locale.register = (ns, a, b) => {
+	if (ns === "odoo-sdd") globalThis.__odooSddDictEn = a.en;
+	if (ns === "approval" && a === "es") esApprovalDictionaries.push(b);
+	return baseRegister(ns, a, b);
+};
+context.locale.addLanguage = (pack) => {
+	esLanguagePacks.push(pack);
+	return () => {};
 };
 client.apply(context);
 check("applying the bundle registers the settings section", typeof registered === "function");
+check("apply registers Spanish as a first-class language pack", esLanguagePacks.some((p) => p && p.id === "es" && p.label === "Español" && p.fallback === "en"), JSON.stringify(esLanguagePacks));
+check(
+	"apply installs the Spanish approval card keys",
+	esApprovalDictionaries.some((d) => d && d.waiting === "Esperando aprobación" && d.reject === "Rechazar" && d.allowOnce === "Permitir una vez" && d.escalation.includes("{toolName}")),
+	JSON.stringify(esApprovalDictionaries),
+);
 
 /**
  * Render the section once with a given settings snapshot.

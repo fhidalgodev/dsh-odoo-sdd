@@ -1352,6 +1352,9 @@ sddD.execute({ operation: "init", spec_id: "002-proxy" });
 await sddD.execute({ operation: "clarify", spec_id: "002-proxy", mode: "create", licensed: "community" });
 await sddD.execute({ operation: "advance", spec_id: "002-proxy", next_phase: "READ_SPEC" });
 await sddD.execute({ operation: "mark_spec_loaded", spec_id: "002-proxy" });
+// Preview-first: the gate asks only after the documents were shown.
+const proxyPreview = await sddD.execute({ operation: "preview", spec_id: "002-proxy" });
+check("preview stamps the READ_SPEC gate for 002-proxy", proxyPreview.ok === true, String(proxyPreview.detail).slice(0, 160));
 // A phase gate is an ASK, not a word the caller writes: with the human refusing
 // the native request, declaring `approval_source=human-proxy` (or anything else)
 // cannot advance the phase. Before, the gate validated the declaration itself and
@@ -5071,9 +5074,21 @@ console.log("== RED-first evidence for bug specs ==");
 	const walkToWriteCode = async (specId, specBody, what) => {
 		await phaseR.execute({ operation: "advance", spec_id: specId, next_phase: "READ_SPEC" });
 		writeFileSync(join(redProj, "specs", specId, "spec.md"), specBody, { mode: 0o600 });
+		// Preview-first gates: the developer is SHOWN the documents before the
+		// gated advance stamps its approval.
+		const specPreview = await phaseR.execute({ operation: "preview", spec_id: specId });
+		check(`preview covers the READ_SPEC gate (${specId})`, specPreview.ok === true && specPreview.detail.includes("spec.md"), String(specPreview.detail).slice(0, 160));
 		await phaseR.execute({ operation: "mark_spec_loaded", spec_id: specId });
 		await phaseR.execute({ operation: "advance", spec_id: specId, next_phase: "ARCHITECTURE", approval_marker: "APPROVED", approval_source: "human" });
 		writeFileSync(join(redProj, "specs", specId, "architecture.md"), architecture(what), { mode: 0o600 });
+		// The ARCHITECTURE gate approves the test plan too: it must exist to preview.
+		writeFileSync(
+			join(redProj, "specs", specId, "test-plan.md"),
+			"| AC | Scenario | Layer | Status |\n|---|---|---|---|\n| AC1 | pending | server | pending |\n",
+			{ mode: 0o600 },
+		);
+		const archPreview = await phaseR.execute({ operation: "preview", spec_id: specId });
+		check(`preview covers the ARCHITECTURE gate (${specId})`, archPreview.ok === true && archPreview.detail.includes("architecture.md") && archPreview.detail.includes("test-plan.md"), String(archPreview.detail).slice(0, 160));
 		const toCode = await phaseR.execute({ operation: "advance", spec_id: specId, next_phase: "WRITE_CODE", approval_marker: "APPROVED", approval_source: "human" });
 		return toCode;
 	};

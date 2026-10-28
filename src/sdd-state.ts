@@ -68,6 +68,54 @@ export function isPipelineMode(value: unknown): value is PipelineMode {
 export const GATED_PHASES: readonly Phase[] = ["READ_SPEC", "ARCHITECTURE"];
 
 /**
+ * Documents whose content authorizes the CURRENT phase's gate: the human is
+ * asked to approve the phase exactly when they have seen these. READ_SPEC
+ * approves the specification; ARCHITECTURE approves the design and the test
+ * plan derived from it.
+ */
+export function gateDocsFor(phase: Phase): readonly string[] {
+	if (phase === "READ_SPEC") return ["spec.md"];
+	if (phase === "ARCHITECTURE") return ["architecture.md", "test-plan.md"];
+	return [];
+}
+
+/**
+ * Hash every gate document of the phase, or null when one is missing: a gate
+ * cannot be previewed (nor crossed) while its authorizing document does not
+ * exist yet.
+ */
+export function hashGateDocs(specDir: string, phase: Phase): Record<string, string> | null {
+	const hashes: Record<string, string> = {};
+	for (const name of gateDocsFor(phase)) {
+		const file = join(specDir, name);
+		if (!existsSync(file)) return null;
+		hashes[name] = createHash("sha256").update(readFileSync(file)).digest("hex");
+	}
+	return hashes;
+}
+
+/**
+ * Whether the state carries a preview stamp that matches the CURRENT gate
+ * documents byte-for-byte: same phase, every file present, every hash equal.
+ * Editing a document after the preview invalidates the stamp on purpose — the
+ * developer must be shown what they approve.
+ */
+export function gatePreviewValid(state: SddState, specDir: string): boolean {
+	const stamp = state.gatePreview;
+	if (stamp === undefined) return false;
+	if (stamp.phase !== state.phase) return false;
+	const current = hashGateDocs(specDir, state.phase);
+	if (current === null) return false;
+	const before = Object.keys(stamp.docHashes).sort().join(",");
+	const now = Object.keys(current).sort().join(",");
+	if (before !== now) return false;
+	for (const [name, hash] of Object.entries(current)) {
+		if (stamp.docHashes[name] !== hash) return false;
+	}
+	return true;
+}
+
+/**
  * Explicit phase-transition graph for the DEVELOPMENT modes (create/bug).
  * `transition()` refuses a `next` that is not reachable from the current phase,
  * so a run cannot skip phases after CLARIFY (e.g. jump straight to DONE) or move
@@ -165,6 +213,20 @@ export interface SddState {
 	 * it; either way DONE refuses to treat that verdict as current evidence.
 	 */
 	verdictArtifacts?: Record<string, string>;
+	/**
+	 * Stamp left by `sdd_phase operation=preview` for the CURRENT phase's gate:
+	 * the documents the developer was shown, with their hashes at preview time.
+	 * A gated `advance` refuses to ask the human when this stamp is missing or
+	 * stale (a hash no longer matches), so nobody approves a document they were
+	 * never shown — or an edited one. Cleared when the gate is crossed.
+	 */
+	gatePreview?: {
+		/** The phase whose gate this preview covers. */
+		phase: Phase;
+		/** Document filename -> sha256 at preview time. */
+		docHashes: Record<string, string>;
+		createdAt: string;
+	};
 	updatedAt: string;
 }
 
@@ -1430,6 +1492,19 @@ function requiredHeadings(
 			return missingFiles.map((f) => `${f}: (file missing)`).concat(missing);
 		},
 	};
+}
+
+/**
+ * Content gate BEFORE the ask: the phase's deliverables must carry their
+ * required headings, otherwise a preview-first gate would ask the developer to
+ * approve documents that cannot pass anyway (and report the wrong blocker).
+ * Returns null when the content is acceptable; `transition()` re-checks this.
+ */
+export function headingGateReason(phase: Phase, mode: PipelineMode | null, specDir: string): string | null {
+	const check = requiredHeadings(phase, mode);
+	const missing = check.missing(specDir);
+	if (missing.length === 0) return null;
+	return `Phase ${phase} cannot advance: ${check.file} is missing required section(s): ${missing.join(", ")}. Complete them before requesting approval.`;
 }
 
 /** Human-readable snapshot of the pipeline for tool output. */

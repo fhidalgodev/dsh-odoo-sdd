@@ -34,6 +34,8 @@ import { join } from "node:path";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { readJsonWithRecovery, writeFileAtomic } from "./atomic.js";
 import type { TargetEnvironment } from "./credentials.js";
+import { functionalBatchReason } from "./approval-i18n.js";
+import type { ApprovalReason } from "./approval-i18n.js";
 import type { RpcErrorKind } from "./odoo-client.js";
 
 /** What a batch is allowed to do. Each scope is approved separately. */
@@ -774,7 +776,7 @@ export interface FunctionalDeps {
 	/** Client for the session's project, or a report explaining why not. */
 	client(exec?: unknown): { client: RpcLike | null; report: string; target?: string; environment?: TargetEnvironment };
 	/** Ask the human through the host's native approval seam. */
-	approve(exec: unknown, reason: string): Promise<"allowed-once" | "rejected" | "cancelled" | "unavailable">;
+	approve(exec: unknown, reason: ApprovalReason): Promise<"allowed-once" | "rejected" | "cancelled" | "unavailable">;
 	/** Declared `"model.method"` pairs a business action may use (empty = none). */
 	methodAllowlist?(exec?: unknown): readonly string[];
 	/** Hashes of the spec and design documents the approval is bound to. */
@@ -1048,10 +1050,16 @@ export function registerFunctionalTool(
 				});
 				const outcome = await deps.approve(
 					exec,
-					`Approve batch ${batch.id} (${batch.scope}) for spec ${specId}: ${batch.operations.length} operation(s) ` +
-						`against ${target ?? "the configured target"} in environment ${declared}` +
-						`${batch.highRisk === true ? " — HIGH RISK" : ""}` +
-						`${(batch.backupReference ?? "") === "" ? "" : `, backup: ${batch.backupReference}`}?`,
+					functionalBatchReason({
+						batchId: batch.id,
+						scope: batch.scope,
+						specId,
+						operations: batch.operations.length,
+						target: target ?? "the configured target",
+						environment: declared,
+						highRisk: batch.highRisk === true,
+						backupReference: batch.backupReference ?? "",
+					}),
 				);
 				if (outcome !== "allowed-once") {
 					return {

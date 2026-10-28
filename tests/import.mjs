@@ -232,7 +232,7 @@ console.log("== the session stays private ==");
 		check("the upload used the modern field and the session cookie", upload !== undefined && upload.method === "POST" && String(upload.headers.cookie).includes("SECRET-COOKIE"));
 		check("the CSRF token was fetched from /web first", requests.some((r) => r.url.endsWith("/web")));
 		check("the cookie never appears in the tool output", !JSON.stringify(prepared).includes("SECRET-COOKIE"));
-		check("the approval reason says what is being prepared", approvals.some((r) => /temporary importer/.test(r)));
+		check("the approval reason says what is being prepared", approvals.some((r) => /temporary importer/.test(typeof r === "string" ? r : String(r.en))));
 
 		const preview = await tool.execute({ use: "preview", spec_id: "001-imp", batch_id: "b1" });
 		check("preview reports the headers Odoo read", preview.ok === true && preview.headers.includes("vat"));

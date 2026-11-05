@@ -74,11 +74,11 @@ Odoo development pipeline. Two ideas hold it together:
 
 | Need | Why |
 |---|---|
-| **DSH ≥ 0.1.2-rc.1** on **Node ≥ 20** | the plugin mounts as a Cordis bundle and uses the `tools` service |
+| **DSH ≥ 0.2.2-rc.1** on **Node ≥ 20** | the plugin mounts as a Cordis bundle and uses the `tools` service; that host declares **Node ≥ 24.9.0** itself, so Node 24 is the practical floor for running it (the plugin's own code runs on 20) |
 | An **existing Odoo instance** reachable over HTTP(S) | the loop needs a real server to install into and read tracebacks from |
 | A **disposable dev/staging database** | verification installs modules and writes test data |
 | *(optional)* a **Playwright** browser tool | only for the UI layer of verification and for narrated-manual captures; without it those scenarios are marked for manual checking |
-| *(optional)* `playwright-core` ≥ 1.63.0 | ships with the plugin as an optional dependency; the capture motor drives Chromium, Chrome or Edge, and answers `NEEDS_BROWSER` with the one-line remedy when none is present |
+| *(optional)* `playwright-core` **1.63.0** (pinned) | ships with the plugin as an optional dependency; the capture motor drives Chromium, Chrome or Edge, and answers `NEEDS_BROWSER` with the one-line remedy when none is present |
 
 ---
 
@@ -160,6 +160,13 @@ autonomous mode.
   canon, captures annotated screenshots **read-only by default**, and renders a
   manual a person can follow — a labelled screenshot per instruction, with the
   recovery path when the canon says the button can raise.
+- 🎬 **Narrated video, same evidence.** `odoo_video` turns the same storyboard
+  into a narrated screencast: each step's procedure sentence becomes the voice
+  line (spoken by a TTS command **you** configure — offline piper-tts or cloud
+  edge-tts) and a caption, `capture` records the browser session with per-step
+  timestamps, and `assemble` cuts, freeze-frames and muxes `video/<flow>.mp4`
+  with ffmpeg. SRT/VTT captions always ship (the export path to any video
+  platform); the raw webm is kept so re-voicing never needs a re-capture.
 - 🧑⚖️ **Policy the model cannot relax.** Allowlist, guards and delegation mode
   all require native human approval to change.
 - 🤖 **Supervised or autonomous.** The same pipeline runs with a human answering
@@ -187,12 +194,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.18.0`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.20.0`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.18.0, published with a provenance attestation
+npm install dsh-odoo-sdd        # 0.20.0
 ```
 
 > [!IMPORTANT]
@@ -514,7 +521,7 @@ every tool result.
 
 ---
 
-## 🧰 The 18 tools
+## 🧰 The 19 tools
 
 | Tool | Purpose |
 |---|---|
@@ -522,7 +529,7 @@ every tool result.
 | `odoo_setup` | Onboarding: `check` (cascade + gitignore + delegation mode), `interactive` (secret-free chmod-600 scaffold), **`authorize`** (ask the DEVELOPER, through native approval, for a connection grant bound to the current url/db/user), **`revoke`** (drop the grants), **`purge`** (plan first, then — with `confirm_destructive=true` plus human approval — remove only the plugin's own state under `.sdd/`), `later`, `skip`, `reset`, `autonomy` (supervised \| autonomous, human-approved). Secrets are never accepted as parameters. |
 | `odoo_module` | `info` / `install` / `upgrade` on `ir.module.module` (`button_immediate_*`). Returns the server's own output or traceback, redacted — the closed feedback loop. |
 | `odoo_execute` | Generic RPC (`execute_kw`) against the instance: **any public method of any model is callable**, and what it needs is decided by what it is. READS (`search`, `search_read`, `search_count`, `read`, `read_group`, `fields_get`, `name_get`, `name_search`, `default_get`, `exists`, `check_access_rights`, `check_access_rule`) run freely, with `fields`/`limit`/`order`/`offset` for projection and paging (a fractional or negative `offset` is refused, never clamped); CRUD mutations (`create`/`write`/`unlink`) require `confirm_destructive=true` AND the model in `executeAllowlist`, and are journaled so the data undo can replay them; every **business action** (`action_*`, `button_*`, `do_*`…, e.g. confirming an order) runs with `confirm_destructive=true` and **no allowlist**, because the plugin cannot replay its effect — it is never journaled, no undo exists for it, and a timeout is reported as an **INDETERMINATE** outcome instead of a plain failure — the same rule now applies to CRUD, because a `create` whose answer never arrived may already have committed and reporting it as a retryable failure is how one effect becomes two. Declare `precondition`/`postcondition` (the same shape a batch uses: `{domain, expect, count}`) to carry a state guard before the call and a state proof after it: if the precondition fails, nothing is sent; if the postcondition fails, the answer says the call WAS sent and the instance may be half-changed, and the CRUD mutation keeps its journal receipt (created id + pre-image) so it can still be compensated; without one, `OK` only means the server accepted the call. A **private method** (`_name`) is refused, and that wall is Odoo's own: `execute_kw` dispatches through `get_public_method`, which answers `AccessError` for `_…`, `init`, `@api.private` and the internal attribute names — so read the model in the source (the native/custom repositories are reported by `odoo_config mode=read`) and call the public button or action that wraps it (`sale.order._create_invoices` is private; the `sale.advance.payment.inv` wizard exposes the public `create_invoices()`). For several operations, or when a human approval per run is wanted, use a functional batch with `kind: "method"`. `context` is forwarded verbatim — use `allowed_company_ids`/`company_id` on multi-company instances — and the server still applies its own ACL. A large answer is BOUNDED and the cut is MARKED: the text says how many characters were dropped, that what you see is the beginning (not a complete JSON document) and how to page with `fields`/`limit`/`offset` — and for a mutation it explicitly forbids repeating the call to get more text. |
-| `odoo_validate` | LOCAL, instance-free module structure check: `__manifest__.py` present + depends, declared data XML files exist, `security/ir.model.access.csv` when models are declared. Returns file:line findings plus the `module_dir` and project root it resolved (a relative path resolves against the session's folder, never the process cwd). |
+| `odoo_validate` | LOCAL, instance-free module structure check: `__manifest__.py` present + depends, declared data XML files exist (`views/*.xml` included), `security/ir.model.access.csv` when models are declared, and the OCA metadata the project's own `.pylintrc` requires (`manifest-required-keys`, `manifest-required-authors`, plus `license`/`version`, `website`, `README.rst`, `static/description/index.html`). View conventions: `position="replace"` without `priority`, `t-esc` (use `t-out`). Returns file:line findings plus the `module_dir` and project root it resolved (a relative path resolves against the session's folder, never the process cwd). |
 | `odoo_errors` | Reads recent `ir.logging` server errors — the remote equivalent of fetching environment logs. |
 | `odoo_session` | Mints a passwordless web session (the `connect_as_user` pattern) stored in `.sdd/session.json` (chmod 600) for Playwright UI tests. The cookie itself is never returned. |
 | `sdd_phase` | The phase state machine: `init`, `status` (logbook summary, spec directory and specs location), `mark_spec_loaded`, `advance` (fail-closed gates: the host is asked for approval natively and the `approval_marker`/`approval_source` stay as the documented backstop for hosts with no approval seam), `fail` (failure ladder + FAILED verdict), `succeed` (PASSED verdict; refused outside VERIFY/FIX_LOOP, and unless every AC the SPEC declares has a row in `test-plan.md` reading an explicit `pass` — an omitted criterion is not a passing one, and the verdict records the fingerprint of the evidence it used so `DONE` refuses a verdict made stale by an edit), `rollback` (restore a checkpoint OF THIS SPEC and return to the phase that mode works in — WRITE_CODE, or APPLY_CONFIG for a functional spec), `diagnose`, `waive` (record — with native approval — that THIS session may work without a spec: the developer's "leave it to your judgement", kept verbatim in `.sdd/waiver.json`, reported by `status` and by the handoff; `revoke: true` drops it and needs no approval). |
@@ -530,10 +537,11 @@ every tool result.
 | `odoo_docs` | Documentation for a module, usable **on its own** (no spec, phase, checkpoint or instance), so an existing module can simply be documented: `check` (OCA fragments mapped to Diátaxis, version scheme, changelog, `index.html`, docstrings, xpath comments, OWL directives → ERROR/WARN with `file:line`), `plan`, `scaffold` (create-only skeletons, never overwrites) and `report` (persists `docs-report.md`; APPROVED only when nothing is still a scaffold). The changelog entry is mandatory for any change to a released module. |
 | `odoo_security_scan` | Local static security review (no instance needed): raw SQL by concatenation, `eval`/`exec`/`pickle`, hardcoded secrets, unjustified `sudo()`, `auth="none"`, disabled CSRF, QWeb `t-raw`. Findings carry `file:line` + a fix hint; any ERROR blocks `DONE`. |
 | `odoo_manual` | Narrated user manuals built on evidence. **`canon`** reads the functional canon of a model from the instance (views, header buttons and the states that reveal them, required fields, notebook pages, actions, menus, access rules, groups, `raise UserError`/`ValidationError` and `_sql_constraints` sites) and persists it with a fingerprint: the manual may only describe what the canon says. **`plan`** turns the canon into a storyboard (flows, ordered steps, one sentence per step): re-running it MERGES, so the narration, captures and prose already written survive. **`lint`** checks the storyboard and the rendered prose against the canon (`CANON-STALE`, `TARGET-UNKNOWN`, `PLACEHOLDER-UNBOUND`, `ACTS-MISSING`, `RECOVERY-MISSING`, AI-tell patterns in Spanish and English → ERROR/WARN with the exact line). **`explore`** returns the ARIA snapshot of a real screen so no xml id or label is guessed. **`capture`** drives a browser: read-only steps always run, and action steps (`new`/`fill`/`select`/`press`/`click`) require `allow_actions=true` — which the guard treats as a mutation. **`render`** writes the manual and an Apps page (create-only unless `overwrite=true`). **`import`** turns a Playwright `codegen` recording into a flow and refuses any recording that carries credentials. Manuals live where Settings says (`manualsMode`: `specs` next to the spec, `docs` under `manualsDir`, `module` as OCA fragments under the module's `readme/manual/`); standalone work without a spec never blocks on one. **`canon`** takes the interview — `as_user` (who the manual is for), `admin`, `module`/`modules` and `groups` — and records it: the inventory then covers EVERY menu and EVERY action the module owns (the action a menu opens, even a native one), and every model arrives with its fields (label, type, required, relation/selection, groups), its form and list buttons, its statusbar states and its per-group access rows. **`plan`** opens one flow per menu and one per access-group walk, and seeds a `docs` checklist with one empty cell per field and per button. **`lint`** reports `MODULE-COVERAGE`, `INTERVIEW-MISSING`, `FIELD-COVERAGE`, `BUTTON-COVERAGE`, `WORKFLOW-COVERAGE` and `GROUP-COVERAGE` while a menu, an action, a field, a button, the workflow or a group is still uncovered — a `skip` with a reason is documented coverage, and `ROLE-UNVERIFIED` warns because a capture runs as the connected user. **`render`** adds a table per model (type, required, relation, groups, and your sentence) and a section per access group. `odoo_docs` adds a `## User manual` section to the documentation verdict as soon as a storyboard exists — and stays untouched when there is none. |
+| `odoo_video` | Narrated VIDEO documentation of flows, standalone beside `odoo_manual` (it never writes `MANUAL.md`). **`plan`** drafts the storyboard from the instance canon — or, with `from_manual=<slug>`, copies an existing manual's `canon.json` + `storyboard.json` so the narrated manual becomes the video script without re-reading the instance (import-once: it refuses to overwrite a video storyboard, because video-side edits would be lost). **`voice`** narrates each step's `procedure` sentence with a TTS command YOU configure (`ttsCommand`, run without a shell; placeholders `{text}`/`{textFile}`/`{voice}`/`{out}`), one `voice/<flow>/<step>.wav` per narrated step — idempotent: an existing `.wav` is never regenerated (delete it to redo), and `voice.json` records voice + language. **`capture`** runs the flow in a real browser with the recording ALWAYS on: `video/raw/<flow>.webm` + per-step `startMs`/`endMs` timestamps + PNG stills, same gates as the manual (action steps need `allow_actions=true` AND `confirm_destructive=true` on a disposable database; `from_step` resumes after a failure). **`assemble`** cuts the webm by step, freeze-frames (tpad) to fit the narration, muxes `video/<flow>.mp4` (h264 + aac, faststart) with ffmpeg, and ALWAYS ships `.srt` + `.vtt` — the export path to external video platforms; optional `captions=true` burns them in (drawtext). The raw webm is kept: re-assembly with another voice or timing never needs a re-capture. Language is fixed at `plan` time (param > manual > `documentationLanguage` > `en_US`); no TTS configured → `NEEDS_TTS` with per-language example voices (piper-tts offline, edge-tts cloud — a cloud TTS sends the narration text to its provider, an explicit developer decision). |
 | `odoo_tests` | The testing half of the pipeline, usable **on its own** (no spec, phase, checkpoint or instance): `check` scans the Python tests for what an install log cannot show — a `tests/*.py` that `tests/__init__.py` never imports (Odoo only loads what is imported, so the test never runs), a class that is not an Odoo test case, a `test_*` that asserts nothing or asserts something trivially true, a swallowed exception, `time.sleep`, explicit skips, `cr.commit()` inside a test (it breaks the per-test rollback), `SavepointCase` on 17+, an `HttpCase` without `start_tour` — with assertion density as an informational metric. `plan` maps every acceptance criterion of the spec to the test that mentions it (by AC id or by the `REQ-<AREA>-NN` id of its requirement) and lists the criteria with no test. `scaffold` writes one **RED stub per uncovered criterion** (body raises `NotImplementedError`, never a vacuous pass), create-only and idempotent, adding the import so the file actually loads. |
-| `sdd_handoff` | Writes `specs/<id>/handoff.md` (final phase, verdict, decisions, blockers, checkpoints, the COMPLETE per-spec data journal, effective config, next steps) when the run closes. |
+| `sdd_handoff` | Writes `specs/<id>/handoff.md` (final phase, verdict, decisions, blockers, checkpoints, the COMPLETE per-spec data journal, effective config, next steps) when the run closes. Only THIS spec's checkpoints are listed (other specs sharing the container are counted, not named) and the project-wide mutation allowlist is summarized instead of pasted. |
 | `odoo_config` | Reads or updates the persistent configuration and answers **"which project am I in?"**: the resolved root, its provenance (session cwd / configured / process cwd), the specs base, the effective spec directory and the config file in use. |
-| `odoo_i18n` | Translations through **Odoo's own models**: `base.language.export` supplies the translatable terms and `base.language.install` activates the language. `export` writes `<module>/i18n/<lang>.po` (creating the `i18n/` folder when missing) and MERGES with the file already there — a written translation is never replaced by what the export says, new terms are added, and terms the module dropped are kept as `#~` instead of deleted. `status` reports what each language covers, `check` fails while an entry still awaits its text. It does not translate: the export gives the message IDs and a person writes the text. Version-aware (Odoo 16 is the boundary, the same one that removed `ir.translation`). |
+| `odoo_i18n` | Translations through **Odoo's own models**: `base.language.export` supplies the translatable terms and `base.language.install` activates the language. `export` writes `<module>/i18n/<lang>.po` (creating the `i18n/` folder when missing) and MERGES with the file already there — a written translation is never replaced by what the export says, new terms are added, and terms the module dropped are kept as `#~` instead of deleted. `status` reports what each language covers, `check` fails while an entry still awaits its text or lacks the `#. module: <name>` comment OCA's `oca-checks-po` requires (the export writes it; Odoo's own POT does not). It does not translate: the export gives the message IDs and a person writes the text. Version-aware (Odoo 16 is the boundary, the same one that removed `ir.translation`). |
 | `odoo_import` | Preparation of a CSV/XLS/XLSX import through Odoo's OWN importer (`base_import`), never through a parser of this plugin: `prepare` uploads the authorised file with the web session and its own approval, `preview` reports what Odoo reads (sheets, headers, a bounded sample, the importable fields), `map` records a decision per column, `plan` turns it into an `apply` batch — and `odoo_functional` approves and executes it like any other, so this tool never applies an import on its own. A JSONP answer is parsed as data (never executed), the session cookie never leaves the plugin, and a version outside the verified families is refused with what to investigate. |
 | `odoo_functional` | The batch executor of the functional path: `plan` (validate and store a batch fail-closed), `approve` (native human approval bound to the spec, design, plan and batch hashes), `apply` (execute it one operation at a time, persisting each state before and after the call, and record it as **applied only after reading back the state the operation declared** — a call that answers but leaves the records untouched is a failure, not a success), `inspect` (read-only discovery under its own scope), `status`, `reconcile` (decide an outcome that came back as unknown), `verify` (evidence per acceptance criterion) and `compensate` (build the undo batch from the journal). The declared environment gates the run and production additionally needs a declared backup; while a batch runs, every other mutation path is denied. |
 
@@ -568,7 +576,7 @@ project with `odoo_setup mode=autonomy decision=...`:
 | **knowledge** | version-pinned Odoo pattern skills (delegated, verified by the skill) |
 | **skills** | `skills/*/SKILL.md` — the 5-phase development flow and the functional flow, auto-registered with the host on `apply()`. The body is the ROUTE (phases, owners, gates, exits); the per-phase WORK lives in `resources/roles/` and `resources/references/`, loaded on demand. Measured budgets keep the selected load from creeping back |
 | **logbook** | `kb.json` — decisions, discarded options, blockers; read before proposing |
-| **audit** | `.sdd/audit.jsonl` — sanitized append-only tool-activity log, written by a global `tools/result` listener (not just the Odoo tools) |
+| **audit** | `.sdd/audit.jsonl` — sanitized append-only tool-activity log written by a global `tools/result` listener: this plugin's tools and every policy denial always, plus every other tool call when `auditAllTools` is on. A file-writing tool is recorded as path + size + sha256, and the file rotates at 16 MB keeping one generation |
 | **rollback** | `.sdd/checkpoints/<id>/` — manifest + file snapshot + data journal, restorable per spec |
 | **security** | `odoo_security_scan` rules + the `security-reviewer` role + the mandatory security interview in CLARIFY |
 | **test** | `tests/smoke.mjs` — instance-free invariant suite (state machine, security, policy guard, RPC shapes, root/specs layout, real-Cordis host contract) + `tests/client.mjs` — browser bundle contract and settings-panel render |
@@ -702,9 +710,11 @@ has a way back and a way to prove what happened.
 - **Durable state.** Pipeline state, KB, verdicts, grants and the journal are
   written with an atomic replace, and a corrupt file is quarantined next to the
   original instead of being overwritten: `sdd_phase status` reports the recovery.
-- **Traceability.** `.sdd/audit.jsonl` records every tool call with outcome
+- **Traceability.** `.sdd/audit.jsonl` records each call with outcome
   (`ok` / `error` / `denied`), duration and phase; `sdd_phase status` prints the
-  logbook; `sdd_handoff` freezes the whole run into `handoff.md`.
+  logbook; `sdd_handoff` freezes the whole run into `handoff.md`. A file body is
+  not copied into the log — it is recorded as `{bytes, sha256}` — and `bash`,
+  `write` and `edit` are only logged when `auditAllTools` is on.
 - **Emergency brakes.** `stop.md` (at `.sdd/stop.md` or `specs/<active>/stop.md`)
   halts every tool; iteration ceilings and the diagnosis ladder route to
   `BLOCKED` instead of looping forever.
@@ -776,7 +786,7 @@ has a way back and a way to prove what happened.
 
 The plugin runs wherever DSH does and claims **Linux, macOS and Windows** — a
 claim the CI matrix tests rather than asserts (`ubuntu-latest` **and**
-`windows-latest`, on Node 20 and 22).
+`windows-latest`, on Node 20, 22 and 24).
 
 | Concern | Behaviour |
 |---|---|
@@ -809,7 +819,7 @@ name — a foreign folder is never adopted. `.sdd/` always stays with the projec
 │   ├── config.json             # project configuration
 │   ├── grants.json             # human authorization receipts
 │   ├── session.json            # Playwright cookie
-│   ├── audit.jsonl             # every tool call, sanitized
+│   ├── audit.jsonl             # tool activity, sanitized (digests for file bodies)
 │   ├── setup-state.json        # onboarding + delegation decision
 │   ├── active/<sessionId>.json  # THIS session's pointer (spec, phase, checkpoint)
 │   ├── active.json             # the project's last spec (a hint for new sessions)
@@ -829,7 +839,9 @@ name — a foreign folder is never adopted. `.sdd/` always stays with the projec
 Open **Settings → Odoo SDD** in the Web UI. Everything is editable there, plus a
 few copy-paste presets where you need them.
 
-> **Host requirement:** the Settings panel needs **dsh >= 0.2.0-rc.1**. That host
+> **Host requirement:** the plugin mounts only on **dsh >= 0.2.2-rc.1** (that is
+> `engines.dsh`, and it is the only version field the host enforces). The Settings
+> panel itself has needed **dsh >= 0.2.0-rc.1**: that host
 > removed the `settingsScope` service this panel used to bind to, and it now
 > renders the form from the plugin's own `Config` schema (entry `odoo-sdd`). On an
 > older host the section is absent and the plugin says so in the console; the tools
@@ -865,12 +877,19 @@ few copy-paste presets where you need them.
         specPolicyScope: odoo           # odoo (only where Odoo work is detected) | everywhere
         securityReviewRequired: true
         securityInterviewRequired: true
-        auditAllTools: true
+        auditAllTools: false    # also log every OTHER tool call (file bodies as a digest)
         maxCheckpoints: 5
         documentationPolicy: required   # required | optional | off
         documentationLanguage: ''       # empty = English unless the project says otherwise
         manualsMode: specs              # specs (next to the spec) | docs (under manualsDir) | module (readme/manual/)
         manualsDir: docs/manuals        # used only when manualsMode is docs
+        videosDir: docs/videos          # where odoo_video writes <slug>/ workspaces (inside the project root)
+        ttsCommand: ''                  # narrated video ONLY. External TTS, no shell; placeholders
+                                        #   {text} {textFile} {voice} {out}. Examples:
+                                        #   edge-tts (cloud): edge-tts --voice {voice} --text {text} --write-media {out}
+                                        #   piper  (offline): piper --model {voice} --output_file {out}   (uses {textFile})
+        ttsVoice: ''                    # passed as {voice}; example voices: es-ES-ÁlvaroNeural (edge) / es_ES-sharvard-medium (piper)
+        ffmpegPath: ffmpeg              # video assembly (system ffmpeg, 4.x+; 7.x verified) and ffprobe next to it
 ```
 
 > [!IMPORTANT]
@@ -884,7 +903,7 @@ few copy-paste presets where you need them.
 
 ## 🤖 Model experience
 
-The agent sees 18 tools with self-contained descriptions. Typical flow:
+The agent sees 19 tools with self-contained descriptions. Typical flow:
 `sdd_phase init` → security interview + `odoo_connect` → gated phases with
 `APPROVED` → `sdd_checkpoint create` → code → `odoo_security_scan` →
 `odoo_module install` → on traceback, `odoo_errors` + `sdd_phase fail` (which may
@@ -959,10 +978,19 @@ when the model selects it (the catalog is summaries only) or when you type
 | A spec directory "cannot be found" | you are in a different project folder | open that project's folder in a session |
 | `NEEDS_BROWSER` from `odoo_manual capture` | no Chromium/Chrome/Edge was found | `npx playwright-core install chromium`, or pass `browser: "chrome"` |
 | `NEEDS_WEB_SESSION` from `odoo_manual capture` | the target only has an API key, and Odoo refuses one on interactive logins | put an account password in `.env`, or create `.sdd/session.json` with `odoo_session` |
+| `NEEDS_TTS` from `odoo_video voice` | no `ttsCommand` is configured (or the template needs `{voice}` and none is set) | configure `ttsCommand` (example voices per language are in the message: piper-tts offline, edge-tts cloud) and `ttsVoice` |
+| `NEEDS_FFMPEG` from `odoo_video assemble` | the system `ffmpeg` (config `ffmpegPath`) is missing or fails to run | install ffmpeg 4.x+ (7.x verified) or point `ffmpegPath` at its absolute path |
+| `NEEDS_VIDEO_CAPTURE` from `odoo_video assemble` | no `capture.json` with a video entry for that flow (capture ran without recording, another flow, or never ran) | run `odoo_video operation=capture flow=<id>` first — assembly always reads the recorded webm |
+| `no view rendered within 30s` from `odoo_video capture` | the URL is not a webclient action, or the instance is unreachable from the browser | open the action once with `odoo_manual operation=explore` or fix the target xmlid; capture waits for the view AND its records, never for `load` alone |
+| A video that starts on a blank/white screen | playback of a capture taken before this check existed, or the webm cut by hand | re-capture: assembly keeps only the tail of a `goto` window and records any lead-in as `captureOffsetSeconds` in `video/video.json` |
+| video capture fails asking for Playwright's ffmpeg | recording uses Playwright's BUNDLED ffmpeg, a download separate from chromium | `npx playwright install ffmpeg` (or `npx playwright-core install ffmpeg`) once |
 | The captured screen is in the wrong language | the browser follows the login user's language, and the plugin never writes to `res.users` | capture with a user whose language matches the manual |
 | `allow_actions=true` is refused | the guard classifies it as a mutation | move the spec into a writing phase, or record a waiver — and use a disposable database |
 | A capture stops midway | the first failing step aborts the run and writes what it got | fix the storyboard, then re-run with `from_step: "<the failing step id>"` |
 | `odoo_docs` says `NEEDS_CONTENT` with no fragment missing | a manual ERROR (a screenshot without its image, a stale canon) or a scaffold left in place | read the `## User manual` section of the report |
+| `dsh: pnpm was not found` on install | `dsh plugin` delegates to pnpm, which is not bundled with Node | `npm i -g pnpm` (Node 25 removed `corepack`), then retry `dsh plugin add` |
+| `Unsupported engine` or `plugin … is not compatible` | the host enforces `engines.dsh` alone: a DSH older than **0.2.2-rc.1** is refused; pnpm also enforces that host's own `node >= 24.9.0` | upgrade DSH (and Node) — the plugin never runs on a host it was not tested against |
+| `ERR_MODULE_NOT_FOUND … scripts/prepare.mjs` during `npm rebuild` | a tarball shipped before 0.19.0 packed no build hook, while `npm rebuild` runs `prepare` | reinstall the package (the hook now ships and is a no-op when `lib/` is prebuilt) |
 
 ---
 
@@ -983,7 +1011,7 @@ settings section.
 
 | File | Role |
 |---|---|
-| `src/index.ts` | Plugin entry: registration of the 18 tools, config resolution and the policy guard |
+| `src/index.ts` | Plugin entry: registration of the 19 tools, config resolution and the policy guard |
 | `src/types.ts` | Public payload types (never contain secret material) |
 | `src/credentials.ts` | Credential cascade, `.env` load/validation, permission verification, `redact()`, fail-closed |
 | `src/odoo-client.ts` | JSON-RPC client: `common.version`, `authenticate`, `execute_kw`, `button_immediate_*`, `ir.logging`, `/web/session/authenticate` |
@@ -1009,6 +1037,10 @@ settings section.
 | `src/manual-model.ts` | Manual workspace resolution (3 modes, containment-checked), storyboard read/write with stable ids, plan from the canon, canon-rule validation, step safety classes |
 | `src/manual-canon.ts` | The functional canon: XML arch tokenizer (17 `invisible=` expressions, 14–16 `attrs`/`states`, statusbar states), module error scan, per-version read list (`load_views` ≤15, `get_views` 16+, `groups_id`→`group_ids` in 19) and a stable fingerprint |
 | `src/manual-tool.ts` | The `odoo_manual` tool: canon / plan / lint / render / explore / capture / import, with the create-only policy and the resume-after-failure path |
+| `src/video-model.ts` | Video workspace resolution (`videosDir`, containment-checked), the lighter storyboard validation video needs (canon staleness, empty flows, unknown targets, silent steps), and `from_manual` import (copies canon + storyboard, never touches the manual) |
+| `src/video-voice.ts` | Narration: template split with quoting, TTS spawn without a shell, idempotent per-step `.wav` files, `voice.json` with probed durations, per-language example voices for the `NEEDS_TTS` remediation |
+| `src/video-assemble.ts` | ffmpeg assembly: per-step cut + freeze-frame (tpad) to the narration length, concat demuxer, faststart mux, always-shipped SRT/VTT, optional burned-in captions, `video.json` report |
+| `src/video-tool.ts` | The `odoo_video` tool: plan (instance or `from_manual`) / voice / capture (recording always on, same gates as the manual) / assemble |
 | `src/prose-lint.ts` | Advisory prose rules in Spanish and English (AI-tell patterns, sentence length, readability) plus the two structural ERROR rules the OCA format depends on |
 | `src/manual-render.ts` | Deterministic Markdown + Apps-page rendering, per-file `sha256`, and a hand-edited file that is never overwritten unless `overwrite=true` |
 | `src/manual-capture.ts` | The browser motor: origin lock, read-only-first step gating, annotated PNGs (1440×900, overlay removed), ARIA snapshots, `capture.json` |

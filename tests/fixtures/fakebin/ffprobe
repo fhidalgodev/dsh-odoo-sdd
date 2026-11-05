@@ -1,0 +1,3 @@
+#!/usr/bin/env node
+/** Fake ffprobe (POSIX only, spawned directly): always reports 3.500000s. */
+process.stdout.write("3.500000\n");

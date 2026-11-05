@@ -32,6 +32,7 @@ import {
 } from "./manual-canon.js";
 import { renderManual, collectProseFindings } from "./manual-render.js";
 import { captureFlow, exploreScreen, familyFor, loadPlaywright, resolveBrowser } from "./manual-capture.js";
+import { presentCall } from "./present.js";
 
 export interface ManualToolDeps {
 	projectRoot: (exec?: unknown) => string;
@@ -70,6 +71,7 @@ export function registerManualTool(
 	ctx.tools.register(
 		defineTool({
 			name: "odoo_manual",
+						presentCall: (args: unknown) => presentCall("odoo_manual", args),
 			description:
 				"Narrated user manuals built ON EVIDENCE: the functional canon of a model is read " +
 				"from the instance (views, buttons, states, fields, groups, errors), the story is " +

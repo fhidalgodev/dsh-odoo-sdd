@@ -68,17 +68,24 @@ function sourceModules(dir = join(root, "src")) {
  * @returns true when `lib/` can be trusted for the current sources.
  */
 function compiledIsFresh() {
-	const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-	const declaredTypes = typeof manifest.types === "string" ? join(root, manifest.types) : null;
-	if (declaredTypes !== null && !existsSync(declaredTypes)) return false;
-	const inputs = [...sourceModules(), join(root, "tsconfig.json")];
-	const newestInput = Math.max(...inputs.map((file) => statSync(file).mtimeMs));
-	for (const source of sourceModules()) {
-		const compiled = join(root, "lib", relative(join(root, "src"), source).replace(/\.ts$/, ".js"));
-		if (!existsSync(compiled)) return false;
-		if (statSync(compiled).mtimeMs < newestInput) return false;
+	try {
+		const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+		const declaredTypes = typeof manifest.types === "string" ? join(root, manifest.types) : null;
+		if (declaredTypes !== null && !existsSync(declaredTypes)) return false;
+		const inputs = [...sourceModules(), join(root, "tsconfig.json")];
+		const newestInput = Math.max(...inputs.map((file) => statSync(file).mtimeMs));
+		for (const source of sourceModules()) {
+			const compiled = join(root, "lib", relative(join(root, "src"), source).replace(/\.ts$/, ".js"));
+			if (!existsSync(compiled)) return false;
+			if (statSync(compiled).mtimeMs < newestInput) return false;
+		}
+		return true;
+	} catch {
+		// An installed copy may lack one of the inputs (a packer that stripped
+		// `tsconfig.json`, a vendored tree): freshness is then unknowable, and a
+		// lifecycle hook must never turn that into a stack trace.
+		return false;
 	}
-	return true;
 }
 
 /** The compiler shipped beside the project, if it was installed. */
@@ -128,6 +135,17 @@ function build(extra = []) {
 
 if (!force && compiledIsFresh()) {
 	log("lib/ is up to date; nothing to build.");
+	process.exit(0);
+}
+
+// A REGISTRY TARBALL IS ALREADY BUILT. It ships `lib/` and has no
+// devDependencies, and `npm rebuild` — the first thing anyone is told to run
+// when an install misbehaves, on Windows especially — executes `prepare`. So
+// this hook has to be a NO-OP SUCCESS there: nothing is installable to build,
+// and printing "lib/ was NOT built" on every rebuild reads like a broken
+// package. `--force` (prepack) still demands the compiler below.
+if (!force && existsSync(join(root, "lib", "index.js")) && compiler() === null) {
+	log("lib/ is prebuilt and no compiler is installed; nothing to build.");
 	process.exit(0);
 }
 

@@ -1086,8 +1086,33 @@ const expectedTools = [
 	"odoo_security_scan", "sdd_handoff", "odoo_docs", "odoo_tests", "odoo_functional", "odoo_import",
 	"odoo_i18n",
 	"odoo_manual",
+	"odoo_video",
 ];
 check(`registers exactly the ${expectedTools.length} documented tools`, registered.size === expectedTools.length);
+
+// --- presentation: each tool says what its pending call is ------------------
+// A tool with no presenter renders as raw argument JSON in a UI, so the
+// registry contract is that every tool has one.
+const unPresented = [...registered].filter(([, def]) => typeof def.presentCall !== "function").map(([n]) => n);
+check("every tool presents its pending call", unPresented.length === 0, unPresented.join(","));
+const execCard = registered.get("odoo_execute").presentCall({ model: "sale.order", method: "search_read" });
+check("odoo_execute's card names model.method", execCard.card === "generic" && execCard.title === "sale.order.search_read");
+check(
+	"the card of a call with no salient field still has a title",
+	typeof registered.get("odoo_connect").presentCall({}).title === "string",
+);
+check(
+	"odoo_validate's card names the module, not the whole path",
+	registered.get("odoo_validate").presentCall({ module_dir: "/tmp/proj/acme_module" }).title === "Validate acme_module",
+);
+// A read RPC shares a parallel group; a mutation never does.
+const execTool = registered.get("odoo_execute");
+check("a read RPC is concurrency-safe", execTool.isConcurrencySafe({ model: "sale.order", method: "search_read" }) === true);
+check("a mutation is not concurrency-safe", execTool.isConcurrencySafe({ model: "sale.order", method: "write" }) !== true);
+check(
+	"a read-only static check is concurrency-safe",
+	registered.get("odoo_validate").isConcurrencySafe({ module_dir: "/tmp/x" }) === true,
+);
 check(
 	"registered tool names match the documented set",
 	expectedTools.every((n) => registered.has(n)),
@@ -1392,7 +1417,11 @@ const modValid = join(dir, "mod_valid");
 mkdirSync(modValid, { recursive: true });
 mkdirSync(join(modValid, "security"), { recursive: true });
 mkdirSync(join(modValid, "views"), { recursive: true });
-writeFileSync(join(modValid, "__manifest__.py"), "{'name':'test','version':'1.0','depends':['base'],'data':['views/x.xml']}", { mode: 0o600 });
+writeFileSync(
+	join(modValid, "__manifest__.py"),
+	"{'name':'test','version':'1.0','license':'AGPL-3','author':'Acme','website':'https://example.com','depends':['base'],'data':['views/x.xml']}",
+	{ mode: 0o600 },
+);
 writeFileSync(join(modValid, "views", "x.xml"), "<odoo></odoo>", { mode: 0o600 });
 writeFileSync(join(modValid, "security", "ir.model.access.csv"), "id,name\\n", { mode: 0o600 });
 let v = await validateD.execute({ module_dir: modValid });
@@ -1415,7 +1444,7 @@ writeFileSync(
 );
 const modCov = join(dir, "mod_cov");
 mkdirSync(join(modCov, "models"), { recursive: true });
-writeFileSync(join(modCov, "__manifest__.py"), "{'name':'cov','depends':['base'],'data':[]}", { mode: 0o600 });
+writeFileSync(join(modCov, "__manifest__.py"), "{'name':'cov','version':'1.0','license':'AGPL-3','depends':['base'],'data':[]}", { mode: 0o600 });
 writeFileSync(join(modCov, "models", "m.py"), "# REQ-SECURITY-01: enforced\n", { mode: 0o600 });
 const covOk = await validateD.execute({ module_dir: modCov, spec_dir: join("specs", "030-cov") });
 check(
@@ -1463,7 +1492,7 @@ mkdirSync(join(modClean, "demo"), { recursive: true });
 mkdirSync(join(modClean, "static", "tests", "tours"), { recursive: true });
 writeFileSync(
 	join(modClean, "__manifest__.py"),
-	"{'name':'t','depends':['base'],'assets':{'web.assets_tests':['static/tests/tours/t.js']},'demo':['demo/a.xml']}",
+	"{'name':'t','version':'1.0','license':'AGPL-3','author':'Acme','website':'https://example.com','depends':['base'],'assets':{'web.assets_tests':['static/tests/tours/t.js']},'demo':['demo/a.xml']}",
 	{ mode: 0o600 },
 );
 writeFileSync(
@@ -1471,13 +1500,17 @@ writeFileSync(
 	'<odoo>\n  <record id="partner_demo" model="res.partner">\n    <field name="name" eval="\'x\'"/>\n  </record>\n</odoo>',
 	{ mode: 0o600 },
 );
+// The two files the OCA toolchain regenerates are part of a complete module.
+mkdirSync(join(modClean, "static", "description"), { recursive: true });
+writeFileSync(join(modClean, "README.rst"), "Test\n=====\n", { mode: 0o600 });
+writeFileSync(join(modClean, "static", "description", "index.html"), "<h1>Test</h1>", { mode: 0o600 });
 const cv = await validateD.execute({ module_dir: modClean });
 check("a bundled tour and a declared demo file produce no findings", cv.findings.length === 0, JSON.stringify(cv.findings));
 
 // Each mechanical OCA rule, on its own violation.
 const modOca = join(dir, "mod_oca");
 mkdirSync(join(modOca, "demo"), { recursive: true });
-writeFileSync(join(modOca, "__manifest__.py"), "{'name':'t','depends':['base'],'demo':['demo/bad.xml']}", { mode: 0o600 });
+writeFileSync(join(modOca, "__manifest__.py"), "{'name':'t','version':'1.0','license':'AGPL-3','depends':['base'],'demo':['demo/bad.xml']}", { mode: 0o600 });
 writeFileSync(
 	join(modOca, "demo", "bad.xml"),
 	'<odoo>\n  <record model="res.partner" id="mod_oca.p1"/>\n  <record id="p2" model="res.partner">\n    <field eval="1" name="x"/>\n  </record>\n</odoo>',
@@ -2218,6 +2251,37 @@ console.log("== audit trail (correlation, duration, domain failures) ==");
 	);
 	check("audit entry carries kind/callId/ms", entry.kind === "rpc" && entry.callId === "c1" && entry.ms === 7);
 	check("audit entry sanitizes the reason", typeof entry.reason === "string" && entry.reason.includes("boom"));
+
+	// A file-writing tool is recorded as a DIGEST, never as the bytes: the log is a
+	// ledger (what path, how many bytes, which hash), and 20 MB of a project's log
+	// was nothing but file bodies the agent could already read from disk.
+	const bigBody = "x".repeat(5000);
+	const wrote = auditMod.recordAudit(sink, { tool: "write", args: { file_path: "mod/models/a.py", content: bigBody } }, null);
+	check("a write is audited by path and size", wrote.args.includes("mod/models/a.py") && wrote.args.includes('"bytes":5000'), wrote.args);
+	check("a write's content is NOT in the audit log", !wrote.args.includes(bigBody.slice(0, 200)));
+	check("a write's content is identified by a sha256 prefix", /"sha256":"[0-9a-f]{16}"/.test(wrote.args), wrote.args);
+	const sameBody = auditMod.recordAudit(sink, { tool: "write", args: { file_path: "b.py", content: bigBody } }, null);
+	check(
+		"the same bytes hash the same, so two writes are comparable",
+		JSON.parse(sameBody.args).content.sha256 === JSON.parse(wrote.args).content.sha256,
+	);
+	const edited = auditMod.recordAudit(sink, { tool: "edit", args: { file_path: "c.py", old_string: "a", new_string: "bb" } }, null);
+	check(
+		"an edit records both sides as digests",
+		JSON.parse(edited.args).old_string.bytes === 1 && JSON.parse(edited.args).new_string.bytes === 2,
+		edited.args,
+	);
+	check("a non-content tool keeps its arguments verbatim", JSON.parse(auditMod.recordAudit(sink, { tool: "bash", args: { command: "ls -la" } }, null).args).command === "ls -la");
+
+	// One generation of rotation, so the ledger cannot grow without bound.
+	const rotating = join(dir, "projAuditRotate");
+	mkdirSync(join(rotating, ".sdd"), { recursive: true });
+	writeFileSync(join(rotating, ".sdd", "audit.jsonl"), "x".repeat(auditMod.MAX_AUDIT_BYTES + 1));
+	auditMod.recordAudit(rotating, { tool: "odoo_connect", op: "connect" }, null);
+	check("the audit log rotates at the size cap", existsSync(join(rotating, ".sdd", "audit.jsonl.1")));
+	const afterRotate = readFileSync(join(rotating, ".sdd", "audit.jsonl"), "utf8").trim().split("\n");
+	check("the rotated log starts fresh with the new entry", afterRotate.length === 1 && afterRotate[0].includes("odoo_connect"), String(afterRotate.length));
+	check("the previous generation is kept (bounded, not unbounded)", existsSync(join(rotating, ".sdd", "audit.jsonl.1")));
 
 	// The live listener correlates the call and measures the elapsed time.
 	const handlers = new Map();
@@ -3065,7 +3129,7 @@ console.log("== business actions over the RPC (no allowlist, explicit confirmati
 const aclMod = join(dir, "mod_acl");
 mkdirSync(join(aclMod, "models"), { recursive: true });
 mkdirSync(join(aclMod, "security"), { recursive: true });
-writeFileSync(join(aclMod, "__manifest__.py"), "{'name':'a','depends':['base'],'data':['security/ir.model.access.csv','views/v.xml']}", { mode: 0o600 });
+writeFileSync(join(aclMod, "__manifest__.py"), "{'name':'a','version':'1.0','license':'AGPL-3','depends':['base'],'data':['security/ir.model.access.csv','views/v.xml']}", { mode: 0o600 });
 mkdirSync(join(aclMod, "views"), { recursive: true });
 writeFileSync(join(aclMod, "views", "v.xml"), "<odoo></odoo>", { mode: 0o600 });
 writeFileSync(join(aclMod, "models", "m.py"), "from odoo import models\nclass A(models.Model):\n    _name = 'x.acl'\n", { mode: 0o600 });
@@ -4010,7 +4074,7 @@ console.log("== real cordis host: optional services ==");
 		// is awaited (or the fiber is otherwise activated).
 		await ctx.plugin({ name: plugin.name, inject: plugin.inject, apply: (c, cfg) => plugin.apply(c, cfg) }, { projectRoot: hostRoot });
 
-		check("the plugin mounts on a real cordis host", tools.size === 18, `${tools.size} tool(s)`);
+		check("the plugin mounts on a real cordis host", tools.size === 19, `${tools.size} tool(s)`);
 
 		// The premise: inside a plugin that did NOT inject the service, the
 		// property read throws (this is what silently disabled the session root).
@@ -4669,6 +4733,23 @@ msgstr[1] "varios"
 	check("coverage counts only live entries", poMod.poCoverage(parsed).total === 3 && poMod.poCoverage(parsed).translated === 3);
 	const withPending = poMod.parsePo(String.raw`msgid ""` + "\n" + String.raw`msgstr ""` + "\n\n" + String.raw`msgid "Untranslated"` + "\n" + String.raw`msgstr ""` + "\n");
 	check("...and reports the ones still awaiting text", poMod.poCoverage(withPending).pending.length === 1);
+
+	// ---- `#. module:` on every entry: what oca-checks-po requires ----------
+	const tagged = poMod.withModuleComment(withPending, "acme_module");
+	const live = tagged.entries.filter((entry) => entry.obsolete !== true);
+	check(
+		"every live entry carries the module comment oca-checks-po requires",
+		live.length === 1 && live.every((entry) => entry.flags.includes("#. module: acme_module")),
+		JSON.stringify(tagged.entries.map((entry) => entry.flags)),
+	);
+	check(
+		"...it is serialized as an extracted comment, not a translator one",
+		poMod.serializePo(tagged).includes("\n#. module: acme_module\n"),
+	);
+	check(
+		"applying it twice does not duplicate the line",
+		poMod.withModuleComment(tagged, "acme_module").entries.filter((entry) => entry.obsolete !== true)[0].flags.filter((flag) => flag.startsWith("#. module:")).length === 1,
+	);
 
 	// ---- the merge: human work survives the refresh ----------------------
 	const existing = poMod.parsePo(String.raw`msgid ""

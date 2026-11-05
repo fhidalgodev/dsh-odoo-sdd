@@ -20,6 +20,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { writeFileAtomic } from "./atomic.js";
+import { posixPath } from "./paths.js";
 import type { Flow } from "./manual-model.js";
 import type { CaptureReport } from "./manual-capture.js";
 import type { RpcResult } from "./manual-capture.js";
@@ -331,7 +332,7 @@ export async function assembleVideo(opts: AssembleOptions): Promise<RpcResult<Vi
 		if (!c.ok) return { ok: false, error: `audio concat: ${c.error}` };
 
 		const langTag = (opts.language ?? "en").split(/[-_]/)[0]?.toLowerCase() ?? "en";
-		const finalFile = join("video", `${opts.flow.id}.mp4`);
+		const finalFile = posixPath("video", `${opts.flow.id}.mp4`);
 		const m = await runFfmpeg(opts.ffmpegPath, [
 			"-y", "-loglevel", "error",
 			"-i", videoOnly, "-i", audioOnly,

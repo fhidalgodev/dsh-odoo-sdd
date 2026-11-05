@@ -74,11 +74,11 @@ guiado por especificación (SDD). Dos ideas lo sostienen:
 
 | Necesitás | Para qué |
 |---|---|
-| **DSH ≥ 0.1.2-rc.1** sobre **Node ≥ 20** | el plugin se monta como bundle de Cordis y usa el servicio `tools` |
+| **DSH ≥ 0.2.2-rc.1** sobre **Node ≥ 20** | el plugin se monta como bundle de Cordis y usa el servicio `tools`; ese host declara **Node ≥ 24.9.0**, así que Node 24 es el piso real para ejecutarlo (el código del plugin funciona en 20) |
 | Una **instancia Odoo existente** accesible por HTTP(S) | el bucle necesita un servidor real donde instalar y del que leer tracebacks |
 | Una **base de datos desechable** (dev/staging) | la verificación instala módulos y escribe datos de prueba |
 | *(opcional)* una herramienta de navegador **Playwright** | solo para la capa UI de la verificación y para las capturas de manuales narrados; sin ella esos escenarios quedan marcados para revisión manual |
-| *(opcional)* `playwright-core` ≥ 1.63.0 | viene con el plugin como dependencia opcional; el motor de captura maneja Chromium, Chrome o Edge, y responde `NEEDS_BROWSER` con el remedio en una línea cuando no hay ninguno presente |
+| *(opcional)* `playwright-core` **1.63.0** (fijada) | viene con el plugin como dependencia opcional; el motor de captura maneja Chromium, Chrome o Edge, y responde `NEEDS_BROWSER` con el remedio en una línea cuando no hay ninguno presente |
 
 ---
 
@@ -162,6 +162,14 @@ defecto, y se pueden delegar a un agente proxy humano si elegís el modo autóno
   **solo-lectura por defecto**, y renderiza un manual que una persona puede
   seguir — una captura etiquetada por instrucción, con la ruta de recuperación
   cuando el canon dice que el botón puede lanzar error.
+- 🎬 **Video narrado, la misma evidencia.** `odoo_video` convierte el mismo
+  storyboard en un screencast narrado: la frase `procedure` de cada paso se
+  vuelve la línea de voz (la habla un comando TTS que **tú** configuras —
+  piper-tts offline o edge-tts en la nube) y el subtítulo, `capture` graba la
+  sesión del navegador con marcas de tiempo por paso, y `assemble` corta,
+  congela el último frame y muxa `video/<flow>.mp4` con ffmpeg. Los subtítulos
+  SRT/VTT siempre se entregan (la vía de exportación a cualquier plataforma de
+  video); el webm crudo se conserva para re-voicer sin re-capturar.
 - 🧑⚖️ **Política que el modelo no puede relajar.** Allowlist, guardas y modo de
   delegación exigen aprobación humana nativa para cambiar.
 - 🤖 **Supervisado o autónomo.** El mismo pipeline corre con un humano
@@ -189,12 +197,12 @@ bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
 
 - **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
 - Acepta cualquier spec de pnpm, así que podés fijar una versión:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.18.0`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.20.0`.
 
 ¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.18.0, publicada con attestation de provenance
+npm install dsh-odoo-sdd        # 0.20.0
 ```
 
 > [!IMPORTANT]
@@ -519,7 +527,7 @@ filas que contó no se reenvían. La cookie de sesión queda en `.sdd/session.js
 
 ---
 
-## 🧰 Las 18 tools
+## 🧰 Las 19 tools
 
 | Tool | Propósito |
 |---|---|
@@ -527,7 +535,7 @@ filas que contó no se reenvían. La cookie de sesión queda en `.sdd/session.js
 | `odoo_setup` | Onboarding: `check` (cascada + gitignore + modo de delegación), `interactive` (scaffold chmod 600 sin secreto), **`authorize`** (pide al DESARROLLADOR, vía aprobación nativa, un grant de conexión atado al url/db/usuario actual), **`revoke`** (elimina los grants), **`purge`** (primero muestra el plan y, con `confirm_destructive=true` + aprobación humana, borra solo el estado propio del plugin bajo `.sdd/`), `later`, `skip`, `reset`, `autonomy` (supervised \| autonomous, aprobado por un humano). Los secretos nunca se aceptan como parámetros. |
 | `odoo_module` | `info` / `install` / `upgrade` sobre `ir.module.module` (`button_immediate_*`). Devuelve la salida o el traceback del servidor, redactado — el bucle de feedback cerrado. |
 | `odoo_execute` | RPC genérico (`execute_kw`) contra la instancia: **cualquier método público de cualquier modelo se puede llamar**, y lo que necesita lo decide qué es. Las LECTURAS (`search`, `search_read`, `search_count`, `read`, `read_group`, `fields_get`, `name_get`, `name_search`, `default_get`, `exists`, `check_access_rights`, `check_access_rule`) corren libremente, con `fields`/`limit`/`order`/`offset` para proyección y paginado (un `offset` decimal o negativo se rechaza, nunca se recorta); las mutaciones CRUD (`create`/`write`/`unlink`) exigen `confirm_destructive=true` Y el modelo en `executeAllowlist`, y se journalizan para que el undo de datos pueda replicarlas; cada **acción de negocio** (`action_*`, `button_*`, `do_*`…, por ejemplo confirmar una orden) corre con `confirm_destructive=true` y **sin allowlist**, porque el plugin no puede replicar su efecto — nunca se journaliza, no existe undo para ella, y un timeout se reporta como un desenlace **INDETERMINATE** en vez de un fallo simple — la misma regla se aplica ahora a CRUD: un `create` cuya respuesta nunca llegó puede haberse confirmado ya, y reportarlo como un fallo reintentable es cómo un efecto se convierte en dos. Declará `precondition`/`postcondition` (la misma forma que usa un lote: `{domain, expect, count}`) para llevar una guarda de estado antes de la llamada y una prueba de estado después: si la precondition falla, no se envía nada; si la postcondition falla, la respuesta dice que la llamada SÍ se envió y que la instancia puede haber quedado a medio cambiar, y la mutación CRUD conserva su recibo del journal (id creado + preimagen) para que siga siendo compensable; sin ninguna, `OK` solo significa que el servidor aceptó la llamada. Un **método privado** (`_name`) se rechaza, y ese muro es de Odoo: `execute_kw` despacha por `get_public_method`, que responde `AccessError` para `_…`, `init`, `@api.private` y los nombres de atributos internos — así que leé el modelo en el código fuente (los repositorios nativo/custom los reporta `odoo_config mode=read`) y llamá al botón o la acción pública que lo envuelve (`sale.order._create_invoices` es privado; el wizard `sale.advance.payment.inv` expone el `create_invoices()` público). Para varias operaciones, o cuando se quiere una aprobación humana por corrida, usá un lote funcional con `kind: "method"`. `context` se reenvía tal cual — usalo para `allowed_company_ids`/`company_id` en instancias multi-company — y el servidor sigue aplicando su propia ACL. |
-| `odoo_validate` | Validación LOCAL del módulo sin instancia: `__manifest__.py` + depends, los XML declarados existen, `security/ir.model.access.csv` cuando hay modelos. Devuelve findings file:line, más el `module_dir` y la raíz del proyecto que resolvió (una ruta relativa se resuelve contra la carpeta de la sesión, nunca contra el cwd del proceso). |
+| `odoo_validate` | Validación LOCAL del módulo sin instancia: `__manifest__.py` + depends, los XML declarados existen (`views/*.xml` incluidos), `security/ir.model.access.csv` cuando hay modelos, y la metadata OCA que exige el `.pylintrc` del propio proyecto (`manifest-required-keys`, `manifest-required-authors`, más `license`/`version`, `website`, `README.rst`, `static/description/index.html`). Convenciones de vista: `position="replace"` sin `priority`, `t-esc` (usar `t-out`). Devuelve findings file:line, más el `module_dir` y la raíz del proyecto que resolvió (una ruta relativa se resuelve contra la carpeta de la sesión, nunca contra el cwd del proceso). |
 | `odoo_errors` | Lee errores recientes del servidor (`ir.logging`) — el equivalente remoto de obtener los logs del entorno. |
 | `odoo_session` | Mintea una sesión web sin contraseña (patrón `connect_as_user`) guardada en `.sdd/session.json` (chmod 600) para pruebas UI con Playwright. La cookie nunca se devuelve. |
 | `sdd_phase` | Máquina de fases: `init`, `clarify`, `status` (resumen del logbook, directorio del spec y ubicación de los specs), `mark_spec_loaded`, `advance` (gates fail-closed + provenance `approval_source`), `fail` (escalera de fallos + veredicto FAILED), `succeed` (veredicto PASSED; se rechaza fuera de VERIFY/FIX_LOOP y salvo que cada AC que la SPEC declara tenga fila en `test-plan.md` con un `pass` explícito — un criterio omitido no es un criterio que pasa, y el veredicto guarda la huella de la evidencia que usó para que `DONE` rechace un veredicto que una edición dejó obsoleto), `rollback` (restaura un checkpoint DE ESTA SPEC y vuelve a la fase en la que trabaja su modalidad — WRITE_CODE, o APPLY_CONFIG en una spec funcional), `diagnose`, `waive` (registra — con aprobación nativa — que ESTA sesión puede trabajar sin spec: el "dejalo a tu criterio" del desarrollador, guardado textual en `.sdd/waiver.json`, reportado por `status` y por el handoff; `revoke: true` lo elimina y no necesita aprobación). |
@@ -535,10 +543,11 @@ filas que contó no se reenvían. La cookie de sesión queda en `.sdd/session.js
 | `odoo_docs` | Documentación de un módulo, usable **por sí sola** (sin spec, fase, checkpoint ni instancia), así que un módulo existente se puede documentar sin más: `check` (fragmentos OCA mapeados a Diátaxis, esquema de versión, changelog, `index.html`, docstrings, comentarios xpath, directiva OWL → ERROR/WARN con `file:line`), `plan`, `scaffold` (esqueletos create-only, nunca sobrescribe) y `report` (persiste `docs-report.md`; APPROVED solo si nada quedó en esqueleto). La entrada de changelog es obligatoria para cualquier cambio a un módulo ya publicado. |
 | `odoo_security_scan` | Revisión de seguridad estática local (sin instancia): SQL concatenado, `eval`/`exec`/`pickle`, secretos hardcodeados, `sudo()` sin justificar, `auth="none"`, CSRF desactivado, `t-raw` en QWeb. Hallazgos con `file:line` + sugerencia; cualquier ERROR bloquea `DONE`. |
 | `odoo_manual` | Manuales de usuario narrados y construidos sobre evidencia. **`canon`** lee de la instancia el canon funcional de un modelo (vistas, botones del header y los estados que los revelan, campos requeridos, páginas del notebook, acciones, menús, reglas de acceso, grupos, sitios de `raise UserError`/`ValidationError` y de `_sql_constraints`) y lo persiste con una huella: el manual solo puede describir lo que el canon dice. **`plan`** convierte el canon en un storyboard (flujos, pasos ordenados, una frase por paso): volver a ejecutarlo FUSIONA, así la narración, las capturas y la prosa ya escritas sobreviven. **`lint`** contrasta el storyboard y la prosa renderizada contra el canon (`CANON-STALE`, `TARGET-UNKNOWN`, `PLACEHOLDER-UNBOUND`, `ACTS-MISSING`, `RECOVERY-MISSING`, patrones que delatan IA en español e inglés → ERROR/WARN con la línea exacta). **`explore`** devuelve el snapshot ARIA de una pantalla real, así no se adivina ningún xml id ni etiqueta. **`capture`** maneja un navegador: los pasos de solo lectura siempre corren, y los pasos de acción (`new`/`fill`/`select`/`press`/`click`) exigen `allow_actions=true` — que el guard trata como una mutación. **`render`** escribe el manual y una página de Apps (create-only salvo `overwrite=true`). **`import`** convierte una grabación `codegen` de Playwright en un flujo y rechaza cualquier grabación que lleve credenciales. Los manuales viven donde diga Ajustes (`manualsMode`: `specs` junto al spec (por defecto), `docs` bajo `manualsDir`, `module` como fragmentos OCA bajo el `readme/manual/` del módulo); el trabajo standalone sin spec nunca se bloquea por eso. **`canon`** recibe la entrevista — `as_user` (para quién es el manual), `admin`, `module`/`modules` y `groups` — y la registra: el inventario cubre además TODOS los menús y TODAS las acciones del módulo (la acción que abre un menú, aunque sea nativa), y cada modelo llega con sus campos (etiqueta, tipo, obligatorio, relación/selección, grupos), sus botones de formulario y de lista, los estados del statusbar y sus filas de acceso por grupo. **`plan`** abre un flujo por menú y uno por cada recorrido de grupo, y siembra una lista `docs` con una celda vacía por campo y por botón. **`lint`** reporta `MODULE-COVERAGE`, `INTERVIEW-MISSING`, `FIELD-COVERAGE`, `BUTTON-COVERAGE`, `WORKFLOW-COVERAGE` y `GROUP-COVERAGE` mientras quede sin cubrir un menú, una acción, un campo, un botón, el workflow o un grupo — un `skip` con motivo es cobertura documentada, y `ROLE-UNVERIFIED` avisa porque una captura corre como el usuario conectado. **`render`** añade una tabla por modelo (tipo, obligatorio, relación, grupos y tu frase) y una sección por grupo de acceso. `odoo_docs` añade una sección `## User manual` al veredicto de documentación en cuanto existe un storyboard — y no la toca cuando no hay ninguno. |
+| `odoo_video` | Documentación en VIDEO narrado de flujos, standalone junto a `odoo_manual` (nunca escribe `MANUAL.md`). **`plan`** redacta el storyboard desde el canon de la instancia — o, con `from_manual=<slug>`, copia el `canon.json` + `storyboard.json` de un manual existente, así el manual narrado se vuelve el guion del video sin releer la instancia (import-once: se niega a pisar un storyboard de video, porque las ediciones del lado del video se perderían). **`voice`** narra la frase `procedure` de cada paso con un comando TTS que TÚ configuras (`ttsCommand`, ejecutado sin shell; placeholders `{text}`/`{textFile}`/`{voice}`/`{out}`), un `voice/<flow>/<step>.wav` por paso narrado — idempotente: un `.wav` existente jamás se regenera (bórralo para rehacerlo), y `voice.json` registra voz + idioma. **`capture`** corre el flujo en un navegador real con la grabación SIEMPRE activa: `video/raw/<flow>.webm` + marcas de tiempo `startMs`/`endMs` por paso + PNG fijos, mismas compuertas que el manual (los pasos de acción exigen `allow_actions=true` Y `confirm_destructive=true` sobre una base desechable; `from_step` reanuda tras un fallo). **`assemble`** corta el webm por paso, congela el frame (tpad) hasta la duración de la narración, muxa `video/<flow>.mp4` (h264 + aac, faststart) con ffmpeg, y SIEMPRE entrega `.srt` + `.vtt` — la vía de exportación a plataformas de video externas; `captions=true` opcional los quema en pantalla (drawtext). El webm crudo se conserva: re-ensamblar con otra voz u otro ritmo jamás exige re-capturar. El idioma se fija en `plan` (param > manual > `documentationLanguage` > `en_US`); sin TTS configurado → `NEEDS_TTS` con voces de ejemplo por idioma (piper-tts offline, edge-tts en la nube — un TTS en la nube envía el texto de la narración a su proveedor, decisión explícita del desarrollador). |
 | `odoo_tests` | La mitad de pruebas del pipeline, usable **por sí sola** (sin spec, fase, checkpoint ni instancia): `check` escanea las pruebas Python por lo que un log de instalación no puede mostrar — un `tests/*.py` que `tests/__init__.py` nunca importa (Odoo solo carga lo importado, así que la prueba nunca corre), una clase que no es un caso de test de Odoo, un `test_*` que no afirma nada o afirma algo trivialmente verdadero, una excepción tragada, `time.sleep`, skips explícitos, `cr.commit()` dentro de una prueba (rompe el rollback por prueba), `SavepointCase` en 17+, un `HttpCase` sin `start_tour` — con la densidad de aserciones como métrica informativa. `plan` mapea cada criterio de aceptación de la spec a la prueba que lo menciona (por AC id o por el `REQ-<AREA>-NN` de su requisito) y lista los criterios sin prueba. `scaffold` escribe un **stub RED por criterio sin cubrir** (el cuerpo lanza `NotImplementedError`, nunca un pass vacío), create-only e idempotente, agregando el import para que el archivo realmente cargue. |
-| `sdd_handoff` | Escribe `specs/<id>/handoff.md` (fase final, veredicto, decisiones, blockers, checkpoints, el journal de datos **completo** de la spec, config efectiva, próximos pasos) al cerrar la ejecución. |
+| `sdd_handoff` | Escribe `specs/<id>/handoff.md` (fase final, veredicto, decisiones, blockers, checkpoints, el journal de datos **completo** de la spec, config efectiva, próximos pasos) al cerrar la ejecución. Solo lista los checkpoints de ESTA spec (los de otras specs que comparten el contenedor se cuentan, no se nombran) y resume la allowlist global de mutaciones en vez de volcarla. |
 | `odoo_config` | Lee o actualiza la configuración persistente y responde **"¿en qué proyecto estoy?"**: la raíz resuelta, su procedencia (cwd de la sesión / configurada / cwd del proceso), la base de specs, el directorio de spec efectivo y el archivo de configuración en uso. |
-| `odoo_i18n` | Traducciones con los **modelos propios de Odoo**: `base.language.export` aporta los términos traducibles y `base.language.install` activa el idioma. `export` escribe `<módulo>/i18n/<lang>.po` (creando la carpeta `i18n/` si falta) y **fusiona** con el fichero existente — una traducción escrita nunca se reemplaza por lo que diga el export, los términos nuevos se añaden y los que el módulo ya no tiene se conservan como `#~` en vez de borrarse. `status` informa la cobertura de cada idioma y `check` falla mientras quede una entrada sin texto. No traduce: el export da los identificadores y el texto lo escribe una persona. Consciente de la versión (Odoo 16 es el corte, el mismo que eliminó `ir.translation`). |
+| `odoo_i18n` | Traducciones con los **modelos propios de Odoo**: `base.language.export` aporta los términos traducibles y `base.language.install` activa el idioma. `export` escribe `<módulo>/i18n/<lang>.po` (creando la carpeta `i18n/` si falta) y **fusiona** con el fichero existente — una traducción escrita nunca se reemplaza por lo que diga el export, los términos nuevos se añaden y los que el módulo ya no tiene se conservan como `#~` en vez de borrarse. `status` informa la cobertura de cada idioma y `check` falla mientras quede una entrada sin texto o sin el comentario `#. module: <nombre>` que exige `oca-checks-po` de OCA (lo escribe el export; el POT de Odoo no). No traduce: el export da los identificadores y el texto lo escribe una persona. Consciente de la versión (Odoo 16 es el corte, el mismo que eliminó `ir.translation`). |
 | `odoo_import` | Preparación de una importación CSV/XLS/XLSX por el importador **propio de Odoo** (`base_import`), nunca con un parser de este plugin: `prepare` sube el archivo autorizado con la sesión web y su propia aprobación, `preview` informa lo que Odoo lee (hojas, encabezados, una muestra acotada, los campos importables), `map` registra una decisión por columna y `plan` lo convierte en un lote `apply` — que `odoo_functional` aprueba y ejecuta como cualquier otro, así que esta tool nunca aplica una importación por sí sola. Una respuesta JSONP se parsea como dato (jamás se ejecuta), la cookie de sesión no sale del plugin, y una versión fuera de las familias verificadas se rechaza indicando qué investigar. |
 | `odoo_functional` | El ejecutor de lotes del camino funcional: `plan` (valida y guarda un lote fail-closed), `approve` (aprobación humana nativa atada a los hashes de spec, diseño, plan y lote), `apply` (lo ejecuta operación por operación, persistiendo cada estado antes y después de la llamada, y lo registra como **aplicado sólo después de releer el estado que la operación declaró** — una llamada que responde pero deja los registros intactos es un fallo, no un éxito), `inspect` (descubrimiento solo-lectura bajo su propio alcance), `status`, `reconcile` (decide un resultado que volvió desconocido), `verify` (evidencia por criterio de aceptación) y `compensate` (arma el lote de deshacer desde el journal). El entorno declarado condiciona la corrida y producción exige además un respaldo declarado; mientras un lote corre, toda otra vía de mutación queda denegada. |
 
@@ -573,7 +582,7 @@ con `odoo_setup mode=autonomy decision=...`:
 | **knowledge** | skills de patrones Odoo pinneados por versión (delegados, verificados por el skill) |
 | **skills** | `SKILL.md` — el flujo de orquestación en 5 fases, auto-registrado con el host en `apply()` |
 | **logbook** | `kb.json` — decisiones, descartadas, blockers; se lee antes de proponer |
-| **audit** | `.sdd/audit.jsonl` — log de actividad append-only sanitizado, escrito por un listener global `tools/result` (no solo por las tools de Odoo) |
+| **audit** | `.sdd/audit.jsonl` — log de actividad append-only sanitizado, escrito por un listener global `tools/result`: siempre las tools de este plugin y todo rechazo de política; con `auditAllTools` encendido, además cada llamada de cualquier otra tool. Una tool que escribe archivos se registra con ruta + tamaño + sha256, y el archivo rota a los 16 MB conservando una generación |
 | **rollback** | `.sdd/checkpoints/<id>/` — manifest + snapshot de archivos + journal de datos, restaurable por spec |
 | **security** | reglas de `odoo_security_scan` + el rol `security-reviewer` + la entrevista de seguridad obligatoria en CLARIFY |
 | **test** | `tests/smoke.mjs` — suite de invariantes sin instancia (máquina de estados, seguridad, guard de política, formas RPC, raíz/disposición de specs, contrato de host con Cordis real) + `tests/client.mjs` — contrato del bundle de navegador y render del panel de ajustes |
@@ -699,7 +708,9 @@ camino de mutación tiene vuelta atrás y forma de probar qué pasó.
   reporta la recuperación.
 - **Trazabilidad.** `.sdd/audit.jsonl` registra cada llamada con resultado
   (`ok` / `error` / `denied`), duración y fase; `sdd_phase status` imprime el
-  logbook; `sdd_handoff` congela la ejecución completa en `handoff.md`.
+  logbook; `sdd_handoff` congela la ejecución completa en `handoff.md`. El cuerpo
+  de un archivo no se copia al log: se registra como `{bytes, sha256}`, y `bash`,
+  `write` y `edit` solo se registran con `auditAllTools` encendido.
 - **Frenos de emergencia.** `stop.md` (en `.sdd/stop.md` o
   `specs/<activa>/stop.md`) detiene todas las tools; los techos de iteración y la
   escalera de diagnóstico llevan a `BLOCKED` en vez de iterar sin fin.
@@ -763,7 +774,7 @@ camino de mutación tiene vuelta atrás y forma de probar qué pasó.
 
 El plugin corre donde corre DSH y declara soporte para **Linux, macOS y
 Windows** — una afirmación que la matriz de CI verifica en lugar de asumir
-(`ubuntu-latest` **y** `windows-latest`, en Node 20 y 22).
+(`ubuntu-latest` **y** `windows-latest`, en Node 20, 22 y 24).
 
 | Aspecto | Comportamiento |
 |---|---|
@@ -794,7 +805,7 @@ carpeta — una carpeta ajena nunca se adopta. `.sdd/` siempre queda en el proye
 │   ├── config.json             # configuración del proyecto
 │   ├── grants.json             # recibos de autorización humana
 │   ├── session.json            # cookie de Playwright
-│   ├── audit.jsonl             # cada llamada, sanitizada
+│   ├── audit.jsonl             # actividad de tools, sanitizada (digests para cuerpos)
 │   ├── setup-state.json        # decisión de onboarding + delegación
 │   ├── active/<sessionId>.json # puntero de ESTA sesión (spec, fase, checkpoint)
 │   ├── active.json             # última spec del proyecto (pista; ver adoptProjectPointerHint)
@@ -826,7 +837,9 @@ punteros que la tenían.
 Abrí **Ajustes → Odoo SDD** en la Web UI. Todo es editable ahí, más algunos
 presets para copiar y pegar donde los necesites.
 
-> **Requisito del host:** el panel de Ajustes necesita **dsh >= 0.2.0-rc.1**. Ese host
+> **Requisito del host:** el plugin monta solo sobre **dsh >= 0.2.2-rc.1** (eso es
+> `engines.dsh`, el único campo de versión que el host aplica). El panel de Ajustes
+> necesita **dsh >= 0.2.0-rc.1**: ese host
 > eliminó el servicio `settingsScope` al que el panel se enlazaba, y ahora compone el
 > formulario a partir del propio esquema `Config` del plugin (entrada `odoo-sdd`). En un
 > host anterior la sección no aparece y el plugin lo dice en la consola; las tools y el
@@ -862,12 +875,19 @@ presets para copiar y pegar donde los necesites.
         specPolicyScope: odoo           # odoo (solo donde se detecta trabajo Odoo) | everywhere
         securityReviewRequired: true
         securityInterviewRequired: true
-        auditAllTools: true
+        auditAllTools: false    # registra además TODA otra llamada (cuerpos como digest)
         maxCheckpoints: 5
         documentationPolicy: required   # required | optional | off
         documentationLanguage: ''       # vacío = inglés salvo que el proyecto diga otra cosa
         manualsMode: specs              # specs (junto al spec) | docs (bajo manualsDir) | module (readme/manual/)
         manualsDir: docs/manuals        # se usa solo cuando manualsMode es docs
+        videosDir: docs/videos          # donde odoo_video escribe los workspaces <slug>/ (dentro de la raíz del proyecto)
+        ttsCommand: ''                  # SOLO video narrado. TTS externo, sin shell; placeholders
+                                        #   {text} {textFile} {voice} {out}. Ejemplos:
+                                        #   edge-tts (nube): edge-tts --voice {voice} --text {text} --write-media {out}
+                                        #   piper  (offline): piper --model {voice} --output_file {out}   (usa {textFile})
+        ttsVoice: ''                    # se pasa como {voice}; voces ejemplo: es-ES-ÁlvaroNeural (edge) / es_ES-sharvard-medium (piper)
+        ffmpegPath: ffmpeg              # ensamblado de video (ffmpeg del sistema, 4.x+; 7.x verificado) y ffprobe junto a él
 ```
 
 > [!IMPORTANT]
@@ -881,7 +901,7 @@ presets para copiar y pegar donde los necesites.
 
 ## 🤖 Experiencia del modelo
 
-El agente ve 18 tools con descripciones autocontenidas. El flujo típico:
+El agente ve 19 tools con descripciones autocontenidas. El flujo típico:
 `sdd_phase init` → entrevista de seguridad + `odoo_connect` → fases con compuerta
 mediante `APPROVED` → `sdd_checkpoint create` → código → `odoo_security_scan` →
 `odoo_module install` → si hay traceback, `odoo_errors` + `sdd_phase fail` (puede
@@ -960,11 +980,20 @@ solo resúmenes) o cuando escribís `/odoo-sdd-workflow`.
 | Un cambio del panel parece ignorado | el `.sdd/config.json` del proyecto manda sobre la capa global de Ajustes | `odoo_config mode=read` muestra los valores efectivos |
 | Un directorio de spec "no aparece" | estás en otra carpeta de proyecto | abrí la carpeta de ese proyecto en una sesión |
 | `NEEDS_BROWSER` de `odoo_manual capture` | no se encontró Chromium/Chrome/Edge | `npx playwright-core install chromium`, o pasá `browser: "chrome"` |
+| `NEEDS_TTS` de `odoo_video voice` | no hay `ttsCommand` configurado (o la plantilla usa `{voice}` y no hay voz) | configura `ttsCommand` (el mensaje trae voces ejemplo por idioma: piper-tts offline, edge-tts nube) y `ttsVoice` |
+| `NEEDS_FFMPEG` de `odoo_video assemble` | falta el `ffmpeg` del sistema (config `ffmpegPath`) o no corre | instala ffmpeg 4.x+ (7.x verificado) o apunta `ffmpegPath` a su ruta absoluta |
+| `NEEDS_VIDEO_CAPTURE` de `odoo_video assemble` | no hay `capture.json` con entrada de video para ese flujo (la captura corrió sin grabar, es otro flujo, o nunca corrió) | corre primero `odoo_video operation=capture flow=<id>` — el ensamblado siempre lee el webm grabado |
+| `no view rendered within 30s` de `odoo_video capture` | la URL no es una acción del webclient, o la instancia no es alcanzable desde el navegador | abre la acción una vez con `odoo_manual operation=explore` o corrige el xmlid del target; la captura espera la vista Y sus registros, nunca solo `load` |
+| Un vídeo que empieza en pantalla en blanco | reproducción de una captura anterior a esta comprobación, o un webm cortado a mano | vuelve a capturar: el ensamblado conserva solo el final de la ventana de cada `goto` y registra el adelanto como `captureOffsetSeconds` en `video/video.json` |
+| la captura de video pide el ffmpeg de Playwright | la grabación usa el ffmpeg EMPAQUETADO de Playwright, una descarga separada del chromium | `npx playwright install ffmpeg` (o `npx playwright-core install ffmpeg`) una sola vez |
 | `NEEDS_WEB_SESSION` de `odoo_manual capture` | el destino solo tiene una API key, y Odoo la rechaza en los logins interactivos | poné una contraseña de cuenta en `.env`, o creá `.sdd/session.json` con `odoo_session` |
 | La pantalla capturada está en el idioma equivocado | el navegador sigue el idioma del usuario que hace login, y el plugin nunca escribe en `res.users` | capturá con un usuario cuyo idioma coincida con el del manual |
 | Se rechaza `allow_actions=true` | el guard lo clasifica como mutación | pasá la spec a una fase de escritura, o registrá un waiver — y usá una base desechable |
 | Una captura se detiene a mitad | el primer paso que falla aborta la corrida y escribe lo que alcanzó | corregí el storyboard y volvé a correr con `from_step: "<el id del paso que falla>"` |
 | `odoo_docs` dice `NEEDS_CONTENT` sin que falte ningún fragmento | un ERROR de manual (una captura sin su imagen, un canon obsoleto) o un scaffold que quedó en su lugar | leé la sección `## User manual` del reporte |
+| `dsh: pnpm was not found` al instalar | `dsh plugin` delega en pnpm, que no viene con Node | `npm i -g pnpm` (Node 25 retiró `corepack`) y reintentá `dsh plugin add` |
+| `Unsupported engine` o `plugin … is not compatible` | el host aplica solo `engines.dsh`: un DSH anterior a **0.2.2-rc.1** se rechaza; pnpm además aplica el `node >= 24.9.0` de ese host | actualizá DSH (y Node): el plugin nunca corre sobre un host contra el que no se probó |
+| `ERR_MODULE_NOT_FOUND … scripts/prepare.mjs` durante `npm rebuild` | un tarball empaquetado antes de 0.19.0 no incluía el hook de build, y `npm rebuild` ejecuta `prepare` | reinstalá el paquete (el hook ahora viaja y es no-op cuando `lib/` ya está compilado) |
 
 ---
 
@@ -985,7 +1014,7 @@ ModuleLoader que aporta la sección **Odoo SDD** en Ajustes.
 
 | Archivo | Rol |
 |---|---|
-| `src/index.ts` | Entrada del plugin: registro de las 18 tools, resolución de configuración y el guard de política |
+| `src/index.ts` | Entrada del plugin: registro de las 19 tools, resolución de configuración y el guard de política |
 | `src/types.ts` | Tipos públicos de payload (nunca contienen material secreto) |
 | `src/credentials.ts` | Cascada de credenciales, carga/validación del `.env`, verificación de permisos, `redact()`, fail-closed |
 | `src/odoo-client.ts` | Cliente JSON-RPC: `common.version`, `authenticate`, `execute_kw`, `button_immediate_*`, `ir.logging`, `/web/session/authenticate` |
@@ -1011,6 +1040,10 @@ ModuleLoader que aporta la sección **Odoo SDD** en Ajustes.
 | `src/manual-model.ts` | Resolución del espacio de trabajo de manuales (3 modos, con verificación de contención), lectura/escritura del storyboard con ids estables, plan desde el canon, validación de las reglas del canon, clases de seguridad de los pasos |
 | `src/manual-canon.ts` | El canon funcional: tokenizador del arch XML (17 expresiones `invisible=`, `attrs`/`states` de 14–16, estados del statusbar), escaneo de errores del módulo, lista de lectura por versión (`load_views` ≤15, `get_views` 16+, `groups_id`→`group_ids` en 19) y una huella estable |
 | `src/manual-tool.ts` | La tool `odoo_manual`: canon / plan / lint / render / explore / capture / import, con la política create-only y la ruta de reanudación tras un fallo |
+| `src/video-model.ts` | Resolución del workspace de video (`videosDir`, con verificación de contención), la validación ligera del storyboard que el video necesita (canon obsoleto, flujos vacíos, targets desconocidos, pasos mudos) y el import `from_manual` (copia canon + storyboard, jamás toca el manual) |
+| `src/video-voice.ts` | Narración: split de la plantilla con comillas, spawn del TTS sin shell, `.wav` por paso idempotentes, `voice.json` con duraciones probadas, voces ejemplo por idioma para el remedio `NEEDS_TTS` |
+| `src/video-assemble.ts` | Ensamblado con ffmpeg: corte por paso + congelado de frame (tpad) a la duración de la narración, concat demuxer, mux faststart, SRT/VTT siempre, subtítulos quemados opcionales, reporte `video.json` |
+| `src/video-tool.ts` | La tool `odoo_video`: plan (instancia o `from_manual`) / voice / capture (grabación siempre activa, mismas compuertas que el manual) / assemble |
 | `src/prose-lint.ts` | Reglas de prosa advisory en español e inglés (patrones que delatan IA, longitud de frase, legibilidad) más las dos reglas estructurales ERROR de las que depende el formato OCA |
 | `src/manual-render.ts` | Render determinista de Markdown + página de Apps, `sha256` por archivo, y un archivo editado a mano que nunca se sobrescribe salvo `overwrite=true` |
 | `src/manual-capture.ts` | El motor de navegador: bloqueo de origen, gating de pasos con solo-lectura primero, PNG anotados (1440×900, overlay removido), snapshots ARIA, `capture.json` |

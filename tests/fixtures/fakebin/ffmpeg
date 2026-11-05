@@ -1,0 +1,20 @@
+#!/usr/bin/env node
+/**
+ * Fake ffmpeg for the assembler unit tests (NO media processing, POSIX only —
+ * spawned directly without a shell, hence the shebang and the executable bit).
+ *
+ * - `-version` succeeds (the assembler's availability probe).
+ * - Any other invocation writes FAKE bytes to the LAST positional argument
+ *   that looks like an output file (.mp4/.m4a/.wav), which is exactly what
+ *   the assembler checks on disk afterwards.
+ */
+import { writeFileSync } from "node:fs";
+
+const args = process.argv.slice(2);
+if (args.includes("-version")) {
+	process.stdout.write("ffmpeg version fake\n");
+	process.exit(0);
+}
+const out = [...args].reverse().find((a) => /\.(mp4|m4a|wav)$/.test(a));
+if (out) writeFileSync(out, Buffer.from("FAKE-FFMPEG-OUTPUT"));
+process.exit(0);

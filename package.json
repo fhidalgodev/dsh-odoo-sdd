@@ -92,6 +92,8 @@
     }
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1",
+    "@deepseek-ai/schemastery": ">=3.18.4 <4",
     "@types/node": ">=20",
     "typescript": ">=5.5"
   },

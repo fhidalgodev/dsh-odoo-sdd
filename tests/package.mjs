@@ -305,6 +305,20 @@ check(
 			`host:deps=${hostDeps}`,
 		);
 	}
+	// ...and the peers the SOURCE imports must also be devDependencies, so that
+	// a plain `npm install` puts them at the top of the tree. npm's own rule: a
+	// peer you import at build time has to be present at dev time too. Without
+	// this the hoisting of an ad-hoc `--no-save` install decides whether `tsc`
+	// sees the types or not — on Windows it decided differently between two jobs
+	// of the same matrix (schemastery resolved in one, TS2307 in the other).
+	const importedPeers = ["@deepseek-ai/dsh-tools", "@deepseek-ai/schemastery"];
+	for (const peer of importedPeers) {
+		check(
+			`${peer} is a devDependency, because the source imports it`,
+			Boolean(manifest?.devDependencies?.[peer]),
+			`devDependencies=${JSON.stringify(manifest?.devDependencies ?? {})}`,
+		);
+	}
 	const peerFloor = versionOf(manifest?.peerDependencies?.["@deepseek-ai/dsh-tools"]);
 	check("the dsh-tools peer declares a floor", peerFloor !== null, String(manifest?.peerDependencies?.["@deepseek-ai/dsh-tools"]));
 	/** Numeric comparison, prerelease ignored: enough to catch a peer that is newer than the host. */

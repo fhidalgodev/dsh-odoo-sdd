@@ -18,7 +18,7 @@
  *    returned to the model.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeFileAtomic } from "./atomic.js";
 import { stepSafety, type Flow, type Step } from "./manual-model.js";
@@ -27,6 +27,10 @@ import { stepSafety, type Flow, type Step } from "./manual-model.js";
 export const PLAYWRIGHT_CORE_VERSION = "1.63.0";
 
 /** Minimal structural types — no `any`, no full playwright type surface. */
+/** The recorder handle: `path()` resolves once the webm is written. */
+interface PwVideoHandle {
+	path(): Promise<string>;
+}
 interface PwPage {
 	goto(url: string, options?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
 	click(selector: string, options?: { timeout?: number }): Promise<void>;
@@ -35,10 +39,18 @@ interface PwPage {
 	keyboard: { press(key: string): Promise<void> };
 	evaluate<T>(fn: string | ((arg: unknown) => T), arg?: unknown): Promise<T>;
 	waitForSelector(selector: string, options?: { state?: string; timeout?: number }): Promise<unknown>;
+	/**
+	 * Presence probe that returns `null` instead of throwing, which is what the
+	 * header-button → notebook-tab fallback needs: `waitForSelector` would make
+	 * the FIRST selector's absence an error, not a branch.
+	 */
+	$(selector: string): Promise<unknown | null>;
 	waitForTimeout(ms: number): Promise<void>;
 	screenshot(options?: { path?: string; type?: string; fullPage?: boolean }): Promise<Buffer>;
 	ariaSnapshot(options?: { scope?: string }): Promise<string>;
 	on(event: string, handler: (info: { url: () => string }) => void): void;
+	/** Present only when the context was created with `recordVideo`. */
+	video?: PwVideoHandle | null | (() => PwVideoHandle | null);
 	close(): Promise<void>;
 }
 interface PwRouteRequest {
@@ -79,6 +91,15 @@ interface PwChromium {
 function readShaped<T>(value: T | (() => T), owner: unknown): T {
 	if (typeof value !== "function") return value;
 	return (value as () => T).call(owner);
+}
+
+/**
+ * The recorder handle, read from EITHER shape: playwright-core exposes
+ * `page.video()` (a method), while our structural type has to tolerate a
+ * plain property as well — same compat rule as `route.request`.
+ */
+function videoHandleOf(page: PwPage): PwVideoHandle | null {
+	return readShaped<PwVideoHandle | null>(page.video ?? null, page);
 }
 
 export type RpcResult<T> = { ok: true; value: T } | { ok: false; error: string; errorKind?: string };
@@ -139,6 +160,11 @@ export interface UiFamily {
 		notebookTab: (name: string) => string;
 		menuXmlid: string;
 		loading: string;
+		/** A rendered view: the webclient mounts its action AFTER `load`,
+		 *  so this is what "the page is ready" means (blank-shell trap). */
+		viewReady: string;
+		/** Records painted: a list mounts its table BEFORE its rows arrive. */
+		recordsReady: string;
 		modal: string;
 		many2oneDropdown: string;
 	};
@@ -154,6 +180,8 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			notebookTab: (name) => `.nav-link[data-bs-target*="${name}"], .nav-link[name="${name}"]`,
 			menuXmlid: `[data-menu-xmlid]`,
 			loading: ".o_loader, .o_wait",
+			viewReady: ".o_list_view, .o_form_view, .o_kanban_view, .o_dashboard, .o_pivot_view, .o_graph_view, .o_view_nocontent",
+			recordsReady: ".o_data_row, .o_kanban_record, .o_form_sheet, .o_view_nocontent, .o_dashboard",
 			modal: ".modal",
 			many2oneDropdown: ".o_field_many2one input, .ui-autocomplete input",
 		},
@@ -168,6 +196,8 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			notebookTab: (name) => `.nav-link[href*="${name}"], .nav-link[name="${name}"]`,
 			menuXmlid: `[data-menu-xmlid]`,
 			loading: ".o_loader, .o_wait",
+			viewReady: ".o_list_view, .o_form_view, .o_kanban_view, .o_dashboard, .o_pivot_view, .o_graph_view, .o_view_nocontent",
+			recordsReady: ".o_data_row, .o_kanban_record, .o_form_sheet, .o_view_nocontent, .o_dashboard",
 			modal: ".modal",
 			many2oneDropdown: ".o_field_many2one input, .ui-autocomplete input",
 		},
@@ -182,6 +212,8 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			notebookTab: (name) => `.nav-link[name="${name}"]`,
 			menuXmlid: `[data-menu-xmlid]`,
 			loading: ".o_loader, .o_wait",
+			viewReady: ".o_list_view, .o_form_view, .o_kanban_view, .o_dashboard, .o_pivot_view, .o_graph_view, .o_view_nocontent",
+			recordsReady: ".o_data_row, .o_kanban_record, .o_form_sheet, .o_view_nocontent, .o_dashboard",
 			modal: ".modal",
 			many2oneDropdown: ".o_field_many2one input, .ui-autocomplete input",
 		},
@@ -196,10 +228,14 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			notebookTab: (name) => `[data-tab-id="${name}"], .nav-link[name="${name}"]`,
 			menuXmlid: `[data-menu-xmlid]`,
 			loading: ".o_loader, .o_wait",
+			viewReady: ".o_list_view, .o_form_view, .o_kanban_view, .o_dashboard, .o_pivot_view, .o_graph_view, .o_view_nocontent",
+			recordsReady: ".o_data_row, .o_kanban_record, .o_form_sheet, .o_view_nocontent, .o_dashboard",
 			modal: ".modal",
 			many2oneDropdown: ".o_field_many2one input, .ui-autocomplete input",
 		},
-		verified: "Declared UNTESTED against a live 19 — verify on a dev instance before production captures.",
+		verified:
+			"E2E-verified against a live Odoo 19.0+e Enterprise instance (quotation list + order form, 1440x900, narrated video).",
+
 	},
 };
 
@@ -266,10 +302,14 @@ export interface CaptureStepResult {
 	error?: string;
 	screenshot?: { file: string; width: number; height: number; bytes: number };
 	aria?: string;
+	/** Wall-clock offset of the step inside the recording (schema /2, video only). */
+	startMs?: number;
+	endMs?: number;
 }
 
 export interface CaptureReport {
-	schema: "dsh-odoo-sdd/capture/1";
+	/** /1 = plain annotated screenshots (odoo_manual). /2 = adds the recording. */
+	schema: "dsh-odoo-sdd/capture/1" | "dsh-odoo-sdd/capture/2";
 	slug: string;
 	flow: string;
 	startedAt: string;
@@ -279,6 +319,8 @@ export interface CaptureReport {
 	originLocked: true;
 	steps: CaptureStepResult[];
 	overlaysRemoved: boolean;
+	/** Present only when the run recorded a video (schema /2). */
+	video?: { file: string; bytes: number };
 }
 
 export interface CaptureOptions {
@@ -293,6 +335,14 @@ export interface CaptureOptions {
 	zoom: number;
 	/** workspace directory: captures land in <workspace>/images, report in <workspace>/capture.json */
 	workspace: string;
+	/**
+	 * OPT-IN video recording (odoo_video). When true the context records a
+	 * 1440x900 webm (CSS pixels — `zoom` only affects PNG screenshots) into
+	 * <workspace>/video/raw/, each step gets startMs/endMs offsets and the
+	 * report is written as schema dsh-odoo-sdd/capture/2 with a `video` entry.
+	 * odoo_manual never passes it.
+	 */
+	video?: boolean;
 	/** default viewport */
 	viewport?: { width: number; height: number };
 	/** abort signal from the host */
@@ -300,6 +350,12 @@ export interface CaptureOptions {
 }
 
 const VIEWPORT = { width: 1440, height: 900 };
+/** Per-step hold while recording, so fast steps still show their screen. */
+const RECORD_DWELL_MS = 700;
+/** How long a goto may take to mount a view before it counts as a failure. */
+const READY_TIMEOUT_MS = 30_000;
+/** Small settle after a view mounted, so the first frame is not half-painted. */
+const READY_SETTLE_MS = 250;
 
 /**
  * Runs ONE flow and writes annotated PNGs + capture.json. Closes its context
@@ -317,7 +373,7 @@ export async function captureFlow(opts: CaptureOptions): Promise<RpcResult<Captu
 	}
 
 	const report: CaptureReport = {
-		schema: "dsh-odoo-sdd/capture/1",
+		schema: opts.video ? "dsh-odoo-sdd/capture/2" : "dsh-odoo-sdd/capture/1",
 		slug: "",
 		flow: opts.flow.id,
 		startedAt: new Date().toISOString(),
@@ -331,7 +387,31 @@ export async function captureFlow(opts: CaptureOptions): Promise<RpcResult<Captu
 
 	let context: PwContext | null = null;
 	try {
-		context = await opts.browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: opts.zoom });
+		const videoDir = opts.video ? join(opts.workspace, "video", "raw") : null;
+		if (videoDir) mkdirSync(videoDir, { recursive: true });
+		try {
+			context = await opts.browser.newContext({
+				viewport: VIEWPORT,
+				deviceScaleFactor: opts.zoom,
+				// Recording is 1440x900 CSS pixels regardless of `zoom` (Playwright
+				// limitation: only PNG screenshots honor deviceScaleFactor).
+				...(videoDir ? { recordVideo: { dir: videoDir, size: VIEWPORT } } : {}),
+			});
+		} catch (e) {
+			// Playwright records webm with its OWN bundled ffmpeg (not the
+			// system one, not the chromium download): recording on a machine
+			// without it fails here with a banner about "ffmpeg". Surface the
+			// one-line remedy instead of the banner.
+			const msg = e instanceof Error ? e.message : String(e);
+			if (videoDir && /ffmpeg/i.test(msg)) {
+				return { ok: false, error: "video recording needs Playwright's BUNDLED ffmpeg (separate from chromium): run 'npx playwright install ffmpeg' (or 'npx playwright-core install ffmpeg') once, or retry without video" };
+			}
+			throw e;
+		}
+		// Recording timeline zero: right after the context exists. The setup
+		// that follows (routes, cookies, first page) becomes the natural
+		// lead-in of the first segment cut by the video assembler.
+		const recordingStartedAt = Date.now();
 		const baseUrl = session.baseUrl.replace(/\/$/, "");
 		// ORIGIN LOCK: abort everything that leaves the Odoo base URL.
 		await context.route("**/*", (route) => {
@@ -342,7 +422,22 @@ export async function captureFlow(opts: CaptureOptions): Promise<RpcResult<Captu
 			if (url.startsWith(baseUrl)) return route.continue();
 			return route.abort();
 		});
-		const page = await context.newPage();
+		let page: PwPage;
+		try {
+			page = await context.newPage();
+		} catch (e) {
+			// Playwright validates the bundled ffmpeg when the FIRST page of a
+			// recording context opens, so the "Video rendering requires ffmpeg"
+			// banner lands here, not at newContext.
+			const msg = e instanceof Error ? e.message : String(e);
+			if (videoDir && /ffmpeg/i.test(msg)) {
+				return { ok: false, error: "video recording needs Playwright's BUNDLED ffmpeg (separate from chromium): run 'npx playwright install ffmpeg' (or 'npx playwright-core install ffmpeg') once, or retry without video" };
+			}
+			throw e;
+		}
+		if (videoDir && !videoHandleOf(page)) {
+			return { ok: false, error: "recording was requested but playwright-core exposed no video for the page — update playwright-core or drop video" };
+		}
 		const cookie = { name: "session_id", value: session.sessionId, url: baseUrl };
 		const ctxWithCookies = context as unknown as { addCookies(cookies: unknown[]): Promise<void> };
 		await ctxWithCookies.addCookies([cookie]);
@@ -355,13 +450,35 @@ export async function captureFlow(opts: CaptureOptions): Promise<RpcResult<Captu
 				report.steps.push({ id: step.id, kind: step.kind, status: "skipped", error: "aborted" });
 				break;
 			}
-			const result = await runStep(page, step, family, { baseUrl, imagesDir, slug: opts.flow.id, zoom: opts.zoom });
+			const startMs = Date.now() - recordingStartedAt;
+			const result = await runStep(page, step, family, { baseUrl, imagesDir, slug: opts.flow.id, zoom: opts.zoom, recording: Boolean(videoDir) });
+			if (videoDir) {
+				// A step can finish in 50 ms — faster than one frame. Hold the
+				// resulting screen for RECORD_DWELL_MS so the recording (and the
+				// frozen frame the assembler clones) shows the state the narration
+				// talks about, and so the screenshot overlay is gone before the
+				// encoder's next frame.
+				await page.waitForTimeout(RECORD_DWELL_MS).catch(() => {});
+				result.startMs = startMs;
+				result.endMs = Date.now() - recordingStartedAt;
+			}
 			report.steps.push(result);
 			if (result.status === "error") break;
 		}
 		// overlay hygiene: every data-dsh-step overlay must be gone after each screenshot
 		report.overlaysRemoved = Boolean(await page.evaluate("document.querySelectorAll('[data-dsh-step]').length === 0"));
+		const pageVideo = videoDir ? videoHandleOf(page) : null;
 		await page.close();
+		if (pageVideo) {
+			// path() resolves after the page closes; the file itself is only
+			// finalized when the CONTEXT closes — read the path, close, rename.
+			const rawPath = await pageVideo.path();
+			await context.close();
+			context = null;
+			const file = join("video", "raw", `${opts.flow.id}.webm`);
+			renameSync(rawPath, join(opts.workspace, file));
+			report.video = { file, bytes: statSync(join(opts.workspace, file)).size };
+		}
 		writeFileAtomic(join(opts.workspace, "capture.json"), JSON.stringify(report, null, 2) + "\n");
 		return { ok: true, value: report };
 	} catch (e) {
@@ -375,7 +492,7 @@ async function runStep(
 	page: PwPage,
 	step: Step,
 	family: UiFamily,
-	env: { baseUrl: string; imagesDir: string; slug: string; zoom: number },
+	env: { baseUrl: string; imagesDir: string; slug: string; zoom: number; recording: boolean },
 ): Promise<CaptureStepResult> {
 	const base: CaptureStepResult = { id: step.id, kind: step.kind, status: "ok" };
 	try {
@@ -398,6 +515,22 @@ async function runStep(
 				if (!url.startsWith(env.baseUrl)) return { ...base, status: "error", error: `origin lock: ${url} leaves ${env.baseUrl}` };
 				await page.goto(url, { waitUntil: "load", timeout: 30_000 });
 				await page.waitForSelector(family.selectors.loading, { state: "hidden", timeout: 15_000 }).catch(() => {});
+				// `load` fires on the HTML shell; the webclient then requests the
+				// action and mounts its view. Reporting the step OK before that is
+				// how a capture ends up with a blank page — and a blank video.
+				try {
+					await page.waitForSelector(family.selectors.viewReady, { timeout: READY_TIMEOUT_MS });
+				} catch {
+					return {
+						...base,
+						status: "error",
+						error: `no view rendered within ${READY_TIMEOUT_MS / 1000}s (${family.selectors.viewReady}) — is this URL a webclient action?`,
+					};
+				}
+				// The view mounts before its records arrive: waiting for the rows
+				// keeps an empty table out of the recording (and out of the PNG).
+				await page.waitForSelector(family.selectors.recordsReady, { timeout: 15_000 }).catch(() => {});
+				await page.waitForTimeout(READY_SETTLE_MS).catch(() => {});
 				break;
 			}
 			case "menu": {
@@ -432,7 +565,15 @@ async function runStep(
 				break;
 			}
 			case "click": {
-				await page.click(family.selectors.headerButton(step.field ?? step.target?.xmlid ?? ""), { timeout: 15_000 });
+				// A header button and a notebook tab can share one name: prefer the
+				// header button, then fall back to the notebook tab. Without the
+				// fallback the tab selector family was defined but unreachable, so
+				// a capture could never open the page its screenshot documents.
+				const name = step.field ?? step.target?.xmlid ?? "";
+				const headerSelector = family.selectors.headerButton(name);
+				const tabSelector = family.selectors.notebookTab(name);
+				const selector = (await page.$(headerSelector)) ? headerSelector : tabSelector;
+				await page.click(selector, { timeout: 15_000 });
 				await page.waitForSelector(family.selectors.loading, { state: "hidden", timeout: 20_000 }).catch(() => {});
 				break;
 			}
@@ -467,13 +608,15 @@ async function runStep(
 				// never typechecked) and use plain EXPRESSION strings for the rest —
 				// a string that looks like an arrow is evaluated as an expression,
 				// so "() => x" silently returns the function, not x.
-				const annotate = new Function(
+				// While recording, the annotation is skipped: a 50 ms overlay would
+				// still land on encoded frames and duplicate the burned caption.
+				const annotate = env.recording ? null : new Function(
 					"label",
 					"const d = document.createElement('div'); d.setAttribute('data-dsh-step', label || ''); " +
 						"d.style.cssText = 'position:fixed;bottom:12px;left:12px;z-index:99999;background:rgba(21,32,43,.85);color:#fff;padding:6px 10px;border-radius:6px;font:14px sans-serif;pointer-events:none'; " +
 						"d.textContent = label || ''; document.body.appendChild(d);",
 				) as unknown as (l: unknown) => void;
-				await page.evaluate(annotate, step.procedure ?? step.id);
+				if (annotate) await page.evaluate(annotate, step.procedure ?? step.id);
 				const buf = await page.screenshot({ type: "png" });
 				await page.evaluate("document.querySelectorAll('[data-dsh-step]').forEach((n) => n.remove())");
 				const dims = verifyPng(buf, VIEWPORT.width, VIEWPORT.height);
@@ -520,10 +663,10 @@ export async function exploreScreen(opts: ExploreOptions): Promise<RpcResult<{ a
 		const ctxWithCookies = context as unknown as { addCookies(cookies: unknown[]): Promise<void> };
 		await ctxWithCookies.addCookies([{ name: "session_id", value: opts.session.sessionId, url: baseUrl }]);
 		const nav: Step = { id: "explore", kind: "goto", target: opts.target, procedure: null };
-		const res = await runStep(page, nav, opts.family, { baseUrl, imagesDir: "", slug: "explore", zoom: opts.zoom });
+		const res = await runStep(page, nav, opts.family, { baseUrl, imagesDir: "", slug: "explore", zoom: opts.zoom, recording: false });
 		if (res.status === "error") return { ok: false, error: res.error ?? "navigation failed" };
 		const exp: Step = { id: "explore-aria", kind: "explore", procedure: null };
-		const aria = await runStep(page, exp, opts.family, { baseUrl, imagesDir: "", slug: "explore", zoom: opts.zoom });
+		const aria = await runStep(page, exp, opts.family, { baseUrl, imagesDir: "", slug: "explore", zoom: opts.zoom, recording: false });
 		return { ok: true, value: { aria: aria.aria ?? "" } };
 	} catch (e) {
 		return { ok: false, error: e instanceof Error ? e.message : String(e) };

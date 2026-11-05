@@ -70,7 +70,7 @@
 
 | 需求 | 原因 |
 |---|---|
-| **DSH ≥ 0.1.2-rc.1**，运行在 **Node ≥ 20** 上 | 插件以 Cordis bundle 的形式挂载，并使用 `tools` 服务 |
+| **DSH ≥ 0.2.2-rc.1**，运行在 **Node ≥ 20** 上 | 插件以 Cordis bundle 的形式挂载，并使用 `tools` 服务；该宿主自身要求 **Node ≥ 24.9.0**，因此实际运行时的下限是 Node 24（插件代码本身可在 20 上运行） |
 | 一个可通过 HTTP(S) 访问的**现有 Odoo 实例** | 闭环需要一台真实服务器来安装模块并读取 traceback |
 | 一个**可丢弃的 dev/staging 数据库** | 验证过程会安装模块并写入测试数据 |
 | *（可选）* 一个 **Playwright** 浏览器工具 | 仅用于验证的 UI 层以及叙述式手册的截图；没有它时，这些场景会被标记为需要人工检查 |
@@ -144,6 +144,12 @@ flowchart TD
   确切的 `raise UserError` 位置），规划出分镜，用 canon 校验散文，**默认只读**地
   截取带标注的截图，并渲染出一份人能照着走的手册 —— 每条指令配一张带标注的
   截图，并在 canon 表明该按钮可能报错时给出恢复路径。
+- 🎬 **同样证据的配音视频。** `odoo_video` 把同一份分镜变成一段配音 screencast：
+  每一步的 `procedure` 句子就是配音台词（由**你**配置的 TTS 命令朗读 —— 离线
+  piper-tts 或云端 edge-tts）和字幕，`capture` 录制浏览器会话并给每一步打上
+  时间戳，`assemble` 用 ffmpeg 剪辑、定格并封装出 `video/<flow>.mp4`。
+  SRT/VTT 字幕总是随片交付（通往任何视频平台的导出路径）；原始 webm 会被
+  保留，重新配音绝不需要重新录制。
 - 🧑⚖️ **模型无法自行放松的策略。** 白名单、守卫和委派模式，任何改动都需要
   原生人工批准。
 - 🤖 **受监督或自主。** 同一条流水线，可以由人逐个回答门禁，也可以由人工代理
@@ -169,12 +175,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.18.0`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.20.0`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.18.0，发布时带有 provenance 证明
+npm install dsh-odoo-sdd        # 0.20.0
 ```
 
 > [!IMPORTANT]
@@ -460,7 +466,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 
 ---
 
-## 🧰 18 个工具
+## 🧰 19 个工具
 
 | 工具 | 用途 |
 |---|---|
@@ -468,7 +474,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | `odoo_setup` | 上手引导：`check`（级联 + gitignore + 委派模式）、`interactive`（不含密钥的 chmod 600 脚手架）、**`authorize`**（通过原生审批向开发者本人索要一个绑定当前 url/db/user 的连接授权）、**`revoke`**（撤销授权）、**`purge`**（先给出计划，然后在 `confirm_destructive=true` 加人工批准的前提下，只删除插件自己在 `.sdd/` 下的状态）、`later`、`skip`、`reset`、`autonomy`（supervised \| autonomous，需人工批准）。密钥永远不会作为参数被接受。 |
 | `odoo_module` | 对 `ir.module.module` 执行 `info` / `install` / `upgrade`（`button_immediate_*`）。原样返回服务器自己的输出或 traceback，并做脱敏 —— 这就是闭环反馈。 |
 | `odoo_execute` | 针对实例的通用 RPC（`execute_kw`）：**任意模型的任何公共方法都可调用**，而它需要什么由它是什么决定。读操作（`search`、`search_read`、`search_count`、`read`、`read_group`、`fields_get`、`name_get`、`name_search`、`default_get`、`exists`、`check_access_rights`、`check_access_rule`）可自由执行，并可用 `fields`/`limit`/`order`/`offset` 做投影和分页（小数或负数的 `offset` 会被拒绝，绝不被截断）；CRUD 变更操作（`create`/`write`/`unlink`）需要 `confirm_destructive=true` **且**模型在 `executeAllowlist` 中，并且会被记入日志，以便数据撤销时重放它们；每一个**业务动作**（`action_*`、`button_*`、`do_*`……，例如确认一张订单）都需要 `confirm_destructive=true` 且**无需白名单**，因为插件无法重放它的效果 —— 它永远不会被记入日志，对它不存在撤销，而超时会报告为一个 **INDETERMINATE** 结果，而不是普通的失败 —— 同一条规则现在也适用于 CRUD：一个从未收到应答的 `create` 可能已经提交，把它报告成可重试的失败正是「一个效果变成两个」的方式。声明 `precondition`/`postcondition`（与批次使用的形状相同：`{domain, expect, count}`），在调用之前带上状态守卫、在调用之后带上状态证明：如果前置条件失败，什么都不会发出；如果后置条件失败，应答会说明调用**确实已发出**、实例可能只改了一半，而 CRUD 变更会保留它的日志回执（新建 id + 前像），因此仍然可以被补偿；没有它们时，`OK` 只意味着服务器接受了这次调用。**私有方法**（`_name`）会被拒绝，而这堵墙是 Odoo 自己的：`execute_kw` 通过 `get_public_method` 分发，后者对 `_…`、`init`、`@api.private` 和内部属性名会回答 `AccessError` —— 所以要在源码里读该模型（原生/自定义仓库由 `odoo_config mode=read` 报告），并调用包装它的公共按钮或动作（`sale.order._create_invoices` 是私有的；`sale.advance.payment.inv` 向导暴露了公共的 `create_invoices()`）。要执行多个操作，或者希望每次运行都有人工审批时，请使用带 `kind: "method"` 的功能批次。`context` 原样转发 —— 在多公司实例上用 `allowed_company_ids`/`company_id` —— 服务器仍然会应用它自己的 ACL。 |
-| `odoo_validate` | 本地、无需实例的模块结构检查：`__manifest__.py` 是否存在 + depends、声明的数据 XML 文件是否存在、有模型时是否有 `security/ir.model.access.csv`。返回 file:line 级别的发现，以及它解析出的 `module_dir` 和项目根目录（相对路径按会话所在文件夹解析，绝不按进程 cwd 解析）。 |
+| `odoo_validate` | 本地、无需实例的模块结构检查：`__manifest__.py` 是否存在 + depends、声明的数据 XML 文件是否存在（含 `views/*.xml`）、有模型时是否有 `security/ir.model.access.csv`，以及项目自身 `.pylintrc` 要求的 OCA 元数据（`manifest-required-keys`、`manifest-required-authors`，外加入 `license`/`version`、`website`、`README.rst`、`static/description/index.html`）。视图约定：`position="replace"` 缺少 `priority`、使用 `t-esc`（应改为 `t-out`）。返回 file:line 级别的发现，以及它解析出的 `module_dir` 和项目根目录（相对路径按会话所在文件夹解析，绝不按进程 cwd 解析）。 |
 | `odoo_errors` | 读取最近的 `ir.logging` 服务器错误 —— 相当于远程拉取环境日志。 |
 | `odoo_session` | 铸造一个无密码的 web 会话（`connect_as_user` 模式），存放在 `.sdd/session.json`（chmod 600），供 Playwright UI 测试使用。cookie 本身永远不会被返回。 |
 | `sdd_phase` | 阶段状态机：`init`、`status`（logbook 摘要、spec 目录和 specs 位置）、`mark_spec_loaded`、`advance`（fail-closed 门禁：原生审批由宿主询问人类，`approval_marker`/`approval_source` 保留为没有审批接口的宿主所记录的兜底路径）、`fail`（失败阶梯 + FAILED 结论）、`succeed`（PASSED 结论；在 VERIFY/FIX_LOOP 之外会被拒绝，并且除非 SPEC 声明的每个 AC 在 `test-plan.md` 中都有一行明确写着 `pass` —— 被省略的标准不等于通过的标准；结论会记录所用证据的指纹，因此 `DONE` 会拒绝被编辑改旧的结论）、`rollback`（恢复**本 SPEC 的** checkpoint，并回到该模式实际工作的阶段 —— WRITE_CODE，或功能型 spec 的 APPLY_CONFIG）、`diagnose`、`waive`（记录 —— 在原生审批下 —— **本会话**可以在没有 spec 的情况下工作：开发者那句"你自己看着办"会原样保存在 `.sdd/waiver.json` 里，由 `status` 和 handoff 报告；`revoke: true` 会删除它，且不需要审批）。 |
@@ -476,10 +482,11 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | `odoo_docs` | 模块文档，可**独立使用**（不需要 spec、阶段、checkpoint 或实例），因此一个已有模块也能直接被文档化：`check`（把 OCA 片段映射到 Diátaxis、版本方案、changelog、`index.html`、docstring、xpath 注释、OWL 指令 → 带 `file:line` 的 ERROR/WARN）、`plan`、`scaffold`（只创建、绝不覆盖的骨架）和 `report`（持久化 `docs-report.md`；只有当不存在仍是骨架的片段时才是 APPROVED）。对已发布模块的任何改动都必须写 changelog 条目。 |
 | `odoo_security_scan` | 本地静态安全审查（不需要实例）：拼接式原生 SQL、`eval`/`exec`/`pickle`、硬编码密钥、没有理由的 `sudo()`、`auth="none"`、被关闭的 CSRF、QWeb `t-raw`。发现项带有 `file:line` + 修复提示；任何 ERROR 都会阻止 `DONE`。 |
 | `odoo_manual` | 基于证据的叙述式用户手册。**`canon`** 从实例读取一个模型的功能 canon（视图、header 按钮以及显示它们的状态、必填字段、notebook 页、动作、菜单、访问规则、用户组、`raise UserError`/`ValidationError` 与 `_sql_constraints` 位置）并连同指纹持久化：手册只能描述 canon 说过的话。**`plan`** 把 canon 变成一份分镜（流程、有序步骤、每步一句话）：再次运行会**合并**，已经写好的叙述、截图和散文都会保留。**`lint`** 用 canon 校验分镜和渲染后的散文（`CANON-STALE`、`TARGET-UNKNOWN`、`PLACEHOLDER-UNBOUND`、`ACTS-MISSING`、`RECOVERY-MISSING`、西语和英语的 AI 腔模式 → 带确切行号的 ERROR/WARN）。**`explore`** 返回真实屏幕的 ARIA 快照，因此不会去猜任何 xml id 或标签。**`capture`** 驱动浏览器：只读步骤总是执行，而动作步骤（`new`/`fill`/`select`/`press`/`click`）需要 `allow_actions=true` —— 守卫会把它当作一次变更。**`render`** 写出手册和一个 Apps 页面（只创建，除非 `overwrite=true`）。**`import`** 把 Playwright `codegen` 录制转换成一条流程，并拒绝任何携带凭据的录制。手册存放在「设置」指定的位置（`manualsMode`：`specs` 与 spec 同目录、`docs` 在 `manualsDir` 下、`module` 作为模块 `readme/manual/` 下的 OCA 片段）；没有 spec 的独立工作绝不会因此被阻塞。**`canon`** 接收访谈——`as_user`（手册写给谁）、`admin`、`module`/`modules` 与 `groups`——并把它记录下来：清单随即覆盖该模块拥有的**每一个菜单和每一个动作**（菜单打开的动作，即使是原生的），每个模型都会带上它的字段（标签、类型、必填、关联/选择、用户组）、表单和列表按钮、statusbar 状态以及按用户组的访问行。**`plan`** 为每个菜单开一条流程、为每个用户组的巡览开一条流程，并播种一份 `docs` 清单：每个字段、每个按钮一格空白。**`lint`** 在菜单、动作、字段、按钮、工作流或用户组仍未被覆盖时报告 `MODULE-COVERAGE`、`INTERVIEW-MISSING`、`FIELD-COVERAGE`、`BUTTON-COVERAGE`、`WORKFLOW-COVERAGE` 与 `GROUP-COVERAGE` —— 带理由的 `skip` 属于已记录的覆盖，而 `ROLE-UNVERIFIED` 只是警告，因为截图是以已连接用户的身份跑的。**`render`** 为每个模型加一张表（类型、必填、关联、用户组，以及你写的那句话）并为每个访问组加一节。只要分镜已存在，`odoo_docs` 就会在文档结论中加入 `## User manual` 一节 —— 没有分镜时则保持不变。 |
+| `odoo_video` | 流程的配音**视频**文档，与 `odoo_manual` 并列的独立工具（绝不写 `MANUAL.md`）。**`plan`** 从实例 canon 起草分镜 —— 或者用 `from_manual=<slug>` 复制既有手册的 `canon.json` + `storyboard.json`，让叙述式手册直接变成视频脚本而无需重读实例（import-once：拒绝覆盖已有的视频分镜，因为视频侧的编辑会丢失）。**`voice`** 用**你**配置的 TTS 命令朗读每一步的 `procedure` 句子（`ttsCommand`，无 shell 执行；占位符 `{text}`/`{textFile}`/`{voice}`/`{out}`），每个被叙述的步骤一个 `voice/<flow>/<step>.wav` —— 幂等：已存在的 `.wav` 绝不重新生成（删掉即可重做），`voice.json` 记录语音与语言。**`capture`** 在真实浏览器中执行流程，录制**始终开启**：`video/raw/<flow>.webm` + 每步 `startMs`/`endMs` 时间戳 + PNG 定格，与手册相同的门禁（动作步骤需要 `allow_actions=true` 且 `confirm_destructive=true`，且只在一次性数据库上；`from_step` 在失败后恢复）。**`assemble`** 按步剪辑 webm、按配音时长定格（tpad）、用 ffmpeg 封装 `video/<flow>.mp4`（h264 + aac、faststart），并且**总是**交付 `.srt` + `.vtt` —— 通往外部视频平台的导出路径；可选 `captions=true` 把字幕烧录进画面（drawtext）。原始 webm 会保留：换一种语音或节奏重新装配绝不需要重新录制。语言在 `plan` 时固定（参数 > 手册 > `documentationLanguage` > `en_US`）；未配置 TTS → `NEEDS_TTS` 并附按语言的示例语音（离线 piper-tts、云端 edge-tts —— 云端 TTS 会把配音文本发给其提供商，这是开发者的显式决定）。 |
 | `odoo_tests` | 管道的测试一侧，可**独立使用**（不需要 spec、阶段、checkpoint 或实例）：`check` 扫描 Python 测试中安装日志看不到的问题 —— `tests/__init__.py` 从未导入的 `tests/*.py`（Odoo 只加载被导入的模块，因此该测试从不运行）、不是 Odoo 测试用例的类、没有任何断言或断言恒真的 `test_*`、被吞掉的异常、`time.sleep`、显式 skip、测试内的 `cr.commit()`（破坏每个测试的回滚）、17+ 上的 `SavepointCase`、没有 `start_tour` 的 `HttpCase`，并以断言密度作为参考指标。`plan` 把 spec 的每个验收标准映射到提到它的测试（按 AC id 或按其需求的 `REQ-<AREA>-NN`），并列出没有任何测试的标准。`scaffold` 为每个未覆盖的标准写一个 **RED stub**（函数体抛出 `NotImplementedError`，绝不是空洞的通过），只创建且幂等，并追加 import 让文件真正被加载。 |
-| `sdd_handoff` | 在运行收尾时写入 `specs/<id>/handoff.md`（最终阶段、结论、决策、blockers、checkpoint、**完整的**按 spec 的数据日志、生效配置、下一步）。 |
+| `sdd_handoff` | 在运行收尾时写入 `specs/<id>/handoff.md`（最终阶段、结论、决策、blockers、checkpoint、**完整的**按 spec 的数据日志、生效配置、下一步）。只列出**本 spec** 的 checkpoint（同一容器中其他 spec 的只计数、不列举），并概括项目级的变更允许列表而不是整段粘贴。 |
 | `odoo_config` | 读取或更新持久化配置，并回答**"我现在在哪个项目里？"**：解析出的根目录、它的来源（会话 cwd / 已配置 / 进程 cwd）、specs 基础目录、生效的 spec 目录和正在使用的配置文件。 |
-| `odoo_i18n` | 使用 **Odoo 自身的模型** 处理翻译：`base.language.export` 提供可翻译术语，`base.language.install` 激活语言。`export` 写入 `<模块>/i18n/<lang>.po`（缺失时创建 `i18n/` 目录）并与已有文件**合并** —— 已写好的译文绝不会被导出的内容替换，新术语会被追加，模块已删除的术语保留为 `#~` 而不是删除。`status` 报告每种语言的覆盖率，`check` 在仍有条目缺少文本时失败。它不翻译：导出给出消息 ID，文本由人来写。感知版本（Odoo 16 是分界，也正是移除 `ir.translation` 的版本）。 |
+| `odoo_i18n` | 使用 **Odoo 自身的模型** 处理翻译：`base.language.export` 提供可翻译术语，`base.language.install` 激活语言。`export` 写入 `<模块>/i18n/<lang>.po`（缺失时创建 `i18n/` 目录）并与已有文件**合并** —— 已写好的译文绝不会被导出的内容替换，新术语会被追加，模块已删除的术语保留为 `#~` 而不是删除。`status` 报告每种语言的覆盖率，`check` 在仍有条目缺少文本、或缺少 OCA `oca-checks-po` 要求的 `#. module: <名称>` 注释时失败（导出会写入该注释，Odoo 自身的 POT 不会）。它不翻译：导出给出消息 ID，文本由人来写。感知版本（Odoo 16 是分界，也正是移除 `ir.translation` 的版本）。 |
 | `odoo_import` | 通过 Odoo **自己的**导入器（`base_import`）准备 CSV/XLS/XLSX 导入，绝不使用本插件自己的解析器：`prepare` 用 web 会话和它自己的审批上传被授权的文件，`preview` 报告 Odoo 读到了什么（工作表、表头、有界样本、可导入字段），`map` 为每一列记录一个决定，`plan` 把它变成一个 `apply` 批次 —— 再由 `odoo_functional` 像其他批次一样批准并执行，所以这个工具自己永远不会应用导入。JSONP 应答会作为数据解析（绝不执行），会话 cookie 永不离开插件，不在已验证版本族内的版本会被拒绝并告知该调查什么。 |
 | `odoo_functional` | 功能路径的批次执行器：`plan`（以 fail-closed 方式校验并存储一个批次）、`approve`（绑定 spec、设计、计划和批次哈希的原生人工审批）、`apply`（一次一个操作地执行，在调用前后持久化每个状态，并且**只有在回读该操作声明的状态之后**才记为已应用 —— 一个返回了应答却没有改变记录状态的调用是失败，不是成功）、`inspect`（在其自身范围内的只读发现）、`status`、`reconcile`（裁决返回为未知的结果）、`verify`（按验收标准给出证据）和 `compensate`（从日志构建撤销批次）。声明的环境会为运行设门禁，生产环境还需要一份声明的备份；批次运行期间，所有其他变更路径都会被拒绝。 |
 
@@ -513,7 +520,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | **knowledge** | 按版本固定的 Odoo 模式 skill（委派出去，由 skill 自身校验） |
 | **skills** | `SKILL.md` —— 5 阶段编排流程，在 `apply()` 时自动注册到宿主 |
 | **logbook** | `kb.json` —— 决策、被弃用的选项、blockers；提出方案前先读它 |
-| **audit** | `.sdd/audit.jsonl` —— 经过脱敏的追加式工具活动日志，由一个全局的 `tools/result` 监听器写入（不只是 Odoo 工具） |
+| **audit** | `.sdd/audit.jsonl` —— 经过脱敏的追加式工具活动日志，由全局 `tools/result` 监听器写入：本插件的工具与所有策略拒绝始终记录；开启 `auditAllTools` 时再记录其他每一次工具调用。写文件的工具按 路径 + 字节数 + sha256 记录，日志在 16 MB 时轮转并保留一代 |
 | **rollback** | `.sdd/checkpoints/<id>/` —— manifest + 文件快照 + 数据日志，可按 spec 恢复 |
 | **security** | `odoo_security_scan` 规则 + `security-reviewer` 人设 + CLARIFY 中强制的安全访谈 |
 | **test** | `tests/smoke.mjs` —— 无需实例的不变量套件（状态机、安全、策略守卫、RPC 形态、根/specs 布局、真实 Cordis 宿主契约）+ `tests/client.mjs` —— 浏览器 bundle 契约和设置面板渲染 |
@@ -602,7 +609,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
   （你的凭据）、`stop.md`（你的刹车）或 `specs/`（你的文档）。
 - **持久化状态。** 流水线状态、KB、结论、授权和日志都用原子替换写入，损坏的
   文件会被隔离在原文件旁边而不是被覆盖：`sdd_phase status` 会报告这次恢复。
-- **可追溯性。** `.sdd/audit.jsonl` 记录每一次工具调用及其结果
+- **可追溯性。** `.sdd/audit.jsonl` 记录每一次调用的结果
   （`ok` / `error` / `denied`）、耗时和阶段；`sdd_phase status` 打印 logbook；
   `sdd_handoff` 把整次运行冻结进 `handoff.md`。
 - **紧急刹车。** `stop.md`（位于 `.sdd/stop.md` 或 `specs/<active>/stop.md`）
@@ -660,8 +667,8 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 ## 🖥️ 平台支持
 
 DSH 能跑的地方插件就能跑，并声称支持 **Linux、macOS 和 Windows** —— 这个声明
-由 CI 矩阵来检验而不是断言（`ubuntu-latest` **和** `windows-latest`，Node 20
-和 22）。
+由 CI 矩阵来检验而不是断言（`ubuntu-latest` **和** `windows-latest`，Node 20、
+22 和 24）。
 
 | 关注点 | 行为 |
 |---|---|
@@ -692,7 +699,7 @@ DSH 能跑的地方插件就能跑，并声称支持 **Linux、macOS 和 Windows
 │   ├── grants.json             # 人工授权回执
 │   ├── instances/<name>.env    # 每个被命名目标的凭据（chmod 600）；一个是激活的
 │   ├── session.json            # Playwright cookie
-│   ├── audit.jsonl             # 每一次工具调用，已脱敏
+│   ├── audit.jsonl             # 工具活动，已脱敏（文件内容存为摘要）
 │   ├── setup-state.json        # 上手引导 + 委派决定
 │   ├── active/<sessionId>.json # 本会话的指针（spec、阶段、checkpoint）
 │   ├── active.json             # 项目最近使用的 spec（参考用；见 adoptProjectPointerHint）
@@ -721,7 +728,8 @@ spec*：没有自己指针的会话，在它足够新（< 12 小时）且该 spe
 在 Web UI 中打开 **Settings → Odoo SDD**。一切都可以在那里编辑，另外在你需要的
 地方还提供了几个可复制粘贴的预设。
 
-> **宿主要求：**设置面板需要 **dsh >= 0.2.0-rc.1**。该版本移除了面板原先绑定的
+> **宿主要求：**插件只在 **dsh >= 0.2.2-rc.1** 上挂载（即 `engines.dsh`，宿主唯一强制校验的
+> 版本字段）。设置面板需要 **dsh >= 0.2.0-rc.1**：该版本移除了面板原先绑定的
 > `settingsScope` 服务，改为根据插件自身的 `Config` schema 生成表单（条目 `odoo-sdd`）。
 > 在更旧的宿主上该分区不会出现，插件会在控制台说明原因；工具与流水线照常工作，
 > 可用 `odoo_config mode=read|set` 在对话中编辑同样的值。
@@ -754,12 +762,19 @@ spec*：没有自己指针的会话，在它足够新（< 12 小时）且该 spe
         specPolicyScope: odoo           # odoo（仅在检测到 Odoo 工作时）| everywhere
         securityReviewRequired: true
         securityInterviewRequired: true
-        auditAllTools: true
+        auditAllTools: false    # 额外记录其他每一次工具调用（文件内容存为摘要）
         maxCheckpoints: 5
         documentationPolicy: required   # required | optional | off
         documentationLanguage: ''       # 留空 = 英文，除非项目另有规定
         manualsMode: specs              # specs（spec 同目录）| docs（在 manualsDir 下）| module（readme/manual/）
         manualsDir: docs/manuals        # 仅当 manualsMode 为 docs 时使用
+        videosDir: docs/videos          # odoo_video 写入 <slug>/ 工作区的位置（项目根目录内）
+        ttsCommand: ''                  # 仅配音视频。外部 TTS，无 shell；占位符
+                                        #   {text} {textFile} {voice} {out}。示例：
+                                        #   edge-tts（云端）: edge-tts --voice {voice} --text {text} --write-media {out}
+                                        #   piper （离线）: piper --model {voice} --output_file {out}   （用 {textFile}）
+        ttsVoice: ''                    # 作为 {voice} 传入；示例语音: es-ES-ÁlvaroNeural（edge）/ es_ES-sharvard-medium（piper）
+        ffmpegPath: ffmpeg              # 视频装配（系统 ffmpeg，4.x+；已验证 7.x），ffprobe 在其旁边
 ```
 
 > [!IMPORTANT]
@@ -772,7 +787,7 @@ spec*：没有自己指针的会话，在它足够新（< 12 小时）且该 spe
 
 ## 🤖 模型体验
 
-agent 看到 18 个自包含描述的工具。典型流程：
+agent 看到 19 个自包含描述的工具。典型流程：
 `sdd_phase init` → 安全访谈 + `odoo_connect` → 带 `APPROVED` 的门禁阶段 →
 `sdd_checkpoint create` → 写代码 → `odoo_security_scan` →
 `odoo_module install` → 出现 traceback 时用 `odoo_errors` + `sdd_phase fail`
@@ -837,11 +852,20 @@ traceback、门禁拒绝理由和补救说明。
 | 面板改动似乎被忽略 | 项目的 `.sdd/config.json` 优先级高于全局 Settings 层 | `odoo_config mode=read` 显示生效值 |
 | 某个 spec 目录"找不到" | 你在另一个项目文件夹里 | 在会话中打开那个项目的文件夹 |
 | `odoo_manual capture` 返回 `NEEDS_BROWSER` | 找不到 Chromium/Chrome/Edge | `npx playwright-core install chromium`，或者传 `browser: "chrome"` |
+| `odoo_video voice` 返回 `NEEDS_TTS` | 未配置 `ttsCommand`（或模板需要 `{voice}` 而未设置语音） | 配置 `ttsCommand`（消息里带按语言的示例语音：离线 piper-tts、云端 edge-tts）和 `ttsVoice` |
+| `odoo_video assemble` 返回 `NEEDS_FFMPEG` | 系统 `ffmpeg`（配置 `ffmpegPath`）缺失或无法运行 | 安装 ffmpeg 4.x+（已验证 7.x），或把 `ffmpegPath` 指向其绝对路径 |
+| `odoo_video assemble` 返回 `NEEDS_VIDEO_CAPTURE` | 该流程没有带视频条目的 `capture.json`（截图时未录制、是另一条流程、或从未跑过） | 先运行 `odoo_video operation=capture flow=<id>` —— 装配总是读取录制的 webm |
+| `odoo_video capture` 返回 `no view rendered within 30s` | 该 URL 不是 webclient 动作，或浏览器无法访问该实例 | 先用 `odoo_manual operation=explore` 打开该动作一次，或修正 target 的 xmlid；截图会等待视图及其记录，绝不仅等待 `load` |
+| 视频以空白画面开场 | 播放的是此检查之前拍摄的截图，或手工裁切的 webm | 重新截图：装配只保留每个 `goto` 窗口的尾部，并把前导偏移记录在 `video/video.json` 的 `captureOffsetSeconds` 中 |
+| 视频截图要求 Playwright 的 ffmpeg | 录制使用 Playwright **自带**的 ffmpeg，是与 chromium 分开的一次下载 | 运行一次 `npx playwright install ffmpeg`（或 `npx playwright-core install ffmpeg`） |
 | `odoo_manual capture` 返回 `NEEDS_WEB_SESSION` | 目标只有 API key，而 Odoo 在交互式登录中拒绝它 | 在 `.env` 里放一个账号密码，或者用 `odoo_session` 创建 `.sdd/session.json` |
 | 截下来的屏幕语言不对 | 浏览器跟随登录用户的语言，而插件从不写 `res.users` | 用一个语言与手册一致的用户来截图 |
 | `allow_actions=true` 被拒绝 | 守卫把它归类为一次变更 | 把 spec 推进到写作阶段，或者登记一份 waiver —— 并使用可丢弃的数据库 |
 | 截图进行到一半就停了 | 第一个失败的步骤会中止运行并写下它已经拿到的内容 | 修好分镜，然后用 `from_step: "<失败步骤的 id>"` 重跑 |
 | `odoo_docs` 在没有片段缺失时仍报 `NEEDS_CONTENT` | 一条手册 ERROR（截图缺少对应图片、canon 已过期），或者有骨架还留在原地 | 读报告里的 `## User manual` 一节 |
+| 安装时报 `dsh: pnpm was not found` | `dsh plugin` 依赖 pnpm，而 pnpm 并不随 Node 分发 | 先执行 `npm i -g pnpm`（Node 25 已移除 `corepack`），再重试 `dsh plugin add` |
+| 报 `Unsupported engine` 或 `plugin … is not compatible` | 宿主只校验 `engines.dsh`：低于 **0.2.2-rc.1** 的 DSH 会被拒绝；pnpm 还会校验该宿主自带的 `node >= 24.9.0` | 升级 DSH（以及 Node）—— 插件不会运行在未经测试的宿主上 |
+| `npm rebuild` 报 `ERR_MODULE_NOT_FOUND … scripts/prepare.mjs` | 0.19.0 之前打包的 tarball 未包含构建钩子，而 `npm rebuild` 会执行 `prepare` | 重新安装该包（钩子现已随包发布，且在 `lib/` 已编译时为空操作） |
 
 ---
 
@@ -861,7 +885,7 @@ JS ModuleLoader bundle，它贡献 **Odoo SDD** 设置区块。
 
 | 文件 | 作用 |
 |---|---|
-| `src/index.ts` | 插件入口：注册 18 个工具、解析配置和策略守卫 |
+| `src/index.ts` | 插件入口：注册 19 个工具、解析配置和策略守卫 |
 | `src/types.ts` | 公开的 payload 类型（绝不包含密钥材料） |
 | `src/credentials.ts` | 凭据级联、`.env` 加载/校验、权限验证、`redact()`、fail-closed |
 | `src/odoo-client.ts` | JSON-RPC 客户端：`common.version`、`authenticate`、`execute_kw`、`button_immediate_*`、`ir.logging`、`/web/session/authenticate` |
@@ -883,6 +907,10 @@ JS ModuleLoader bundle，它贡献 **Odoo SDD** 设置区块。
 | `src/manual-model.ts` | 手册工作区解析（3 种模式，带包含性检查）、带稳定 id 的分镜读写、从 canon 出计划、canon 规则校验、步骤安全分级 |
 | `src/manual-canon.ts` | 功能 canon：XML arch 分词器（17 的 `invisible=` 表达式、14–16 的 `attrs`/`states`、statusbar 状态）、模块错误扫描、按版本区分的读取清单（≤15 用 `load_views`，16+ 用 `get_views`，19 中 `groups_id`→`group_ids`）以及一枚稳定的指纹 |
 | `src/manual-tool.ts` | `odoo_manual` 工具：canon / plan / lint / render / explore / capture / import，带只创建策略和失败后恢复的路径 |
+| `src/video-model.ts` | 视频工作区解析（`videosDir`，含包含性检查）、视频所需的轻量分镜校验（canon 过期、空流程、未知目标、静音步骤），以及 `from_manual` 导入（复制 canon + 分镜，绝不碰手册） |
+| `src/video-voice.ts` | 配音：带引号的模板拆分、无 shell 的 TTS spawn、按步骤幂等的 `.wav`、带实测时长的 `voice.json`、`NEEDS_TTS` 补救用的按语言示例语音 |
+| `src/video-assemble.ts` | ffmpeg 装配：按步骤剪辑 + 按配音时长定格（tpad）、concat demuxer、faststart 封装、总是交付的 SRT/VTT、可选烧录字幕、`video.json` 报告 |
+| `src/video-tool.ts` | `odoo_video` 工具：plan（实例或 `from_manual`）/ voice / capture（录制始终开启，与手册相同的门禁）/ assemble |
 | `src/prose-lint.ts` | 西语和英语的建议性散文规则（AI 腔模式、句子长度、可读性）以及 OCA 格式所依赖的两条结构性 ERROR 规则 |
 | `src/manual-render.ts` | 确定性的 Markdown + Apps 页面渲染、逐文件 `sha256`，以及一个绝不会被覆盖（除非 `overwrite=true`）的手工编辑文件 |
 | `src/manual-capture.ts` | 浏览器引擎：源锁定、只读优先的步骤门禁、带标注的 PNG（1440×900，标注层已移除）、ARIA 快照、`capture.json` |

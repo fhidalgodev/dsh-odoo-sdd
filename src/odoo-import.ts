@@ -33,6 +33,7 @@ import {
 import { writeState, isSafeSegment, readPlan } from "./functional.js";
 import { importPrepareReason } from "./approval-i18n.js";
 import type { ApprovalReason } from "./approval-i18n.js";
+import { presentCall } from "./present.js";
 
 /** The web session of a target, read from the private session file. */
 export interface WebSession {
@@ -410,6 +411,7 @@ export interface ImportDeps {
 export function registerImportTool(ctx: { tools: { register(tool: unknown): void } }, deps: ImportDeps): void {
 	ctx.tools.register(defineTool({
 		name: "odoo_import",
+				presentCall: (args: unknown) => presentCall("odoo_import", args),
 		description:
 			"Prepare a CSV/XLS/XLSX import through Odoo's OWN importer (base_import), never through a parser of " +
 			"this plugin. use=prepare uploads the authorised file to a temporary importer record (multipart, web " +

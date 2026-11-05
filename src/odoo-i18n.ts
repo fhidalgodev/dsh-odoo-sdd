@@ -34,12 +34,14 @@ import type { RpcErrorKind } from "./odoo-client.js";
 import {
 	isLanguageCode,
 	mergePo,
+	withModuleComment,
 	parsePo,
 	poCoverage,
 	serializePo,
 	type PoFile,
 	type PoMergeResult,
 } from "./po.js";
+import { presentCall } from "./present.js";
 
 /**
  * First Odoo major whose `base.language.install` wizard takes `lang_ids` instead
@@ -273,6 +275,7 @@ interface I18nResult {
 export function registerI18nTools(ctx: { tools: { register(tool: unknown): void } }, deps: I18nDeps): void {
 	ctx.tools.register(defineTool({
 		name: "odoo_i18n",
+				presentCall: (args: unknown) => presentCall("odoo_i18n", args),
 		description:
 			"Generate and maintain a module's translations using ODDO'S OWN MODELS: `base.language.export` supplies " +
 			"the translatable terms (message IDs) and `base.language.install` activates the language. " +
@@ -405,7 +408,20 @@ export function registerI18nTools(ctx: { tools: { register(tool: unknown): void 
 						lines.push(`- ${lang}: MISSING`);
 						continue;
 					}
-					const coverage = poCoverage(parsePo(readFileSync(file, "utf8")));
+					const prepared = parsePo(readFileSync(file, "utf8"));
+					const coverage = poCoverage(prepared);
+					// OCA's `oca-checks-po` requires `#. module: <name>` on every entry; a
+					// file exported before that rule existed fails the hook silently.
+					const untagged = prepared.entries.filter(
+						(entry) => entry.obsolete !== true && !entry.flags.some((flag) => flag.trim() === `#. module: ${module}`),
+					).length;
+					if (untagged > 0) {
+						bad += 1;
+						lines.push(
+							`- ${lang}: ${untagged} entr(y/ies) lack \`#. module: ${module}\` — oca-checks-po fails on them. ` +
+								"Re-run operation=export to tag them.",
+						);
+					}
 					if (coverage.pending.length > 0) {
 						bad += 1;
 						const sample = coverage.pending.slice(0, 5).map((id) => `    ${JSON.stringify(id.slice(0, 60))}`).join("\n");
@@ -464,6 +480,9 @@ export function registerI18nTools(ctx: { tools: { register(tool: unknown): void 
 			let merged: PoMergeResult;
 			try {
 				merged = mergePo(existing, parsePo(exported.content), lang);
+				// OCA's oca-checks-po requires `#. module: <name>` on every entry, which
+				// Odoo's own export does not write.
+				merged = { ...merged, file: withModuleComment(merged.file, module) };
 			} catch (err) {
 				return {
 					operation, ok: false, module, lang,

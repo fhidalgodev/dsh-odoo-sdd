@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { writeFileAtomic } from "./atomic.js";
+import { posixPath } from "./paths.js";
 import type { Flow } from "./manual-model.js";
 import type { RpcResult } from "./manual-capture.js";
 
@@ -190,7 +191,7 @@ export async function voiceFlow(opts: VoiceOptions): Promise<RpcResult<VoiceRepo
 	for (const step of opts.flow.steps) {
 		const sentence = step.procedure;
 		if (sentence === null || sentence === undefined || sentence.trim() === "") continue;
-		const file = join("voice", opts.flow.id, `${step.id}.wav`);
+		const file = posixPath("voice", opts.flow.id, `${step.id}.wav`);
 		const abs = join(opts.workspace, file);
 		if (existsSync(abs)) {
 			// Idempotent resume: an existing .wav is kept (delete it to redo).

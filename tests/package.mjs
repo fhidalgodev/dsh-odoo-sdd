@@ -150,6 +150,8 @@ const required = [
 	".env.example",
 	"cordis.patch.yml",
 	"client/client.js",
+	"scripts/prepare.mjs",
+	"tsconfig.json",
 	"skills/odoo-sdd-workflow/SKILL.md",
 	"resources/references/tours-and-demo.md",
 	"lib/index.js",
@@ -271,6 +273,57 @@ check(
 );
 
 // ---------------------------------------------------------------------------
+// ONE HOST FLOOR, STATED THE SAME WAY EVERYWHERE
+//
+// The host enforces `engines.dsh` and IGNORES peerDependencies, so that field is
+// the source of truth: the CI install command and the three READMEs have to name
+// the same version, or the plugin is tested against a host it refuses to load
+// on — which is how it shipped 0.19.0 (engines >= 0.2.0-rc.1, READMEs claiming
+// >= 0.1.2-rc.1, and CI installing exactly 0.1.2-rc.1).
+// ---------------------------------------------------------------------------
+{
+	/** First semver-looking version inside a string. */
+	const versionOf = (text) => /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/.exec(String(text ?? ""))?.[1] ?? null;
+	const hostFloor = versionOf(manifest?.engines?.dsh);
+	check("engines.dsh declares a floor", hostFloor !== null, `engines.dsh=${String(manifest?.engines?.dsh)}`);
+	const ciFloor = versionOf(/@deepseek-ai\/dsh@(\S+)/.exec(String(manifest?.scripts?.["host:deps"] ?? ""))?.[1]);
+	check(
+		"the CI host install asks for the floor engines.dsh enforces",
+		ciFloor === hostFloor,
+		`host:deps=${String(ciFloor)} engines=${String(hostFloor)}`,
+	);
+	const peerFloor = versionOf(manifest?.peerDependencies?.["@deepseek-ai/dsh-tools"]);
+	check("the dsh-tools peer declares a floor", peerFloor !== null, String(manifest?.peerDependencies?.["@deepseek-ai/dsh-tools"]));
+	/** Numeric comparison, prerelease ignored: enough to catch a peer that is newer than the host. */
+	const notNewer = (older, newer) => {
+		if (older === null || newer === null) return false;
+		const [a, b] = [older, newer].map((version) => version.split("-")[0].split(".").map((part) => Number.parseInt(part, 10)));
+		for (let index = 0; index < 3; index += 1) {
+			if (a[index] !== b[index]) return a[index] < b[index];
+		}
+		return true;
+	};
+	check(
+		"the dsh-tools peer floor is not newer than the DSH floor (it ships with the host)",
+		notNewer(peerFloor, hostFloor),
+		`peer=${String(peerFloor)} host=${String(hostFloor)}`,
+	);
+	for (const doc of ["README.md", "README.es.md", "README.zh-CN.md"]) {
+		if (!existsSync(join(root, doc))) continue;
+		const text = readFileSync(join(root, doc), "utf8");
+		check(`${doc} states the enforced host floor`, hostFloor !== null && text.includes(hostFloor), `expected ${String(hostFloor)}`);
+		check(`${doc} does not still advertise a floor the plugin refuses`, !text.includes("0.1.2-rc.1"));
+	}
+	const pin = manifest?.optionalDependencies?.["playwright-core"];
+	const expectedPin = /PLAYWRIGHT_CORE_VERSION\s*=\s*"([^"]+)"/.exec(readFileSync(join(root, "src", "manual-capture.ts"), "utf8"))?.[1] ?? null;
+	check(
+		"the playwright-core pin matches the version the capture motor expects",
+		pin === expectedPin,
+		`pin=${String(pin)} expected=${String(expectedPin)}`,
+	);
+}
+
+// ---------------------------------------------------------------------------
 // PROVENANCE NEEDS THE REPOSITORY DECLARED
 //
 // The first automated release reached the registry, signed its provenance, and
@@ -358,13 +411,39 @@ check("the publish simulation kept the roles and skills", staged.has("resources/
 {
 	const pluginMod = await import(new URL("../lib/index.js", import.meta.url).href);
 	const registered = [];
+	const mounted = [];
 	const ctx = {
-		tools: { register: () => {}, guard: () => () => {} },
+		tools: { register: (tool) => mounted.push(tool), guard: () => () => {} },
 		on: () => () => {},
 		skills: { register: (def) => registered.push(def) },
 	};
 	pluginMod.apply(ctx, { projectRoot: process.cwd() });
-	check("all three bundled skills register with a resource base", registered.length === 3 && registered.map((s) => s.name).join() === "odoo-sdd-workflow,odoo-functional-sdd,odoo-user-manual" && registered.every((s) => s.resourceBase?.kind === "directory"));
+	// EVERY tool's schema rides in every request. This is a budget, not a target:
+	// 19 tools measured 41k characters (roughly 10k tokens) once the Odoo surface
+	// was complete, which is a real cost on a long session. Growing past this
+	// ceiling is a decision someone has to take on purpose.
+	{
+		const weight = mounted.reduce(
+			(sum, tool) => sum + tool.name.length + (tool.description?.length ?? 0) + JSON.stringify(tool.parameters ?? {}).length,
+			0,
+		);
+		const ceiling = 46000;
+		check(
+			`the whole tool surface stays under ${ceiling} characters (it is ${weight})`,
+			weight <= ceiling,
+			`every request carries all ${mounted.length} schemas; trim descriptions or move detail into the tool's output text`,
+		);
+	}
+	// The expected set is EXPLICIT on purpose: a new skill is a new prompt surface,
+	// so it has to be added here (and to `files`) deliberately, never by accident.
+	const EXPECTED_SKILLS = "odoo-sdd-workflow,odoo-functional-sdd,odoo-user-manual,odoo-video";
+	check(
+		"every bundled skill registers with a resource base",
+		registered.length === EXPECTED_SKILLS.split(",").length &&
+			registered.map((s) => s.name).join() === EXPECTED_SKILLS &&
+			registered.every((s) => s.resourceBase?.kind === "directory"),
+		registered.map((s) => `${s.name}:${s.resourceBase?.kind ?? "none"}`).join(),
+	);
 	let refs = 0;
 	let unresolvable = 0;
 	for (const skill of registered) {
@@ -461,8 +540,17 @@ check("the publish simulation kept the roles and skills", staged.has("resources/
 	}
 }
 
-// The hook must build, not smuggle: a build helper is never part of the tarball.
-check("the build helper itself is not shipped", !staged.has("scripts/prepare.mjs"));
+// The hook must SHIP. `npm rebuild` — the first thing anyone is told to run when
+// an install misbehaves, on Windows especially — executes `prepare`, so a tarball
+// without `scripts/prepare.mjs` turns that command into ERR_MODULE_NOT_FOUND and
+// the tsconfig-less tarball made its freshness probe throw ENOENT. Shipping the
+// helper and its inputs is what makes the hook runnable where it actually runs.
+check("the install hook ships, because `npm rebuild` runs it", shipped.has("scripts/prepare.mjs"));
+check(
+	"the hook ships its build inputs too",
+	shipped.has("tsconfig.json") && shipped.has("src/index.ts"),
+	`tsconfig=${shipped.has("tsconfig.json")} src=${shipped.has("src/index.ts")}`,
+);
 
 // Unlink the junction FIRST and by itself: a recursive delete that follows it
 // would take the real node_modules with it.
@@ -511,6 +599,47 @@ try {
 	// The symlinks go first, and never through a recursive delete.
 	for (const name of ["node_modules", "lib"]) rmSync(join(installStage, name), { recursive: true, force: true });
 	rmSync(installStage, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// THE INSTALLED COPY MUST SURVIVE `npm rebuild`
+//
+// `npm rebuild` runs `prepare`, and a tarball ships no devDependencies, so the
+// hook lands in a tree with `lib/`, `src/`, `scripts/prepare.mjs` and — from this
+// version on — `tsconfig.json`, but no compiler: it must exit 0 and leave the
+// prebuilt entry point alone. The second case is the older tarball shape, where
+// the freshness probe hit a missing `tsconfig.json` and threw ENOENT, which is
+// precisely the command Windows users are told to run first.
+// ---------------------------------------------------------------------------
+for (const [label, withTsconfig] of [
+	["a registry tarball", true],
+	["a tarball without tsconfig.json", false],
+]) {
+	const rebuildStage = mkdtempSync(join(tmpdir(), "dsh-odoo-sdd-rebuild-"));
+	try {
+		for (const name of ["lib", "src", "package.json", ...(withTsconfig ? ["tsconfig.json"] : [])]) {
+			cpSync(join(root, name), join(rebuildStage, name), { recursive: true });
+		}
+		mkdirSync(join(rebuildStage, "scripts"), { recursive: true });
+		cpSync(join(root, "scripts", "prepare.mjs"), join(rebuildStage, "scripts", "prepare.mjs"));
+		const status = (() => {
+			try {
+				execFileSync(process.execPath, [join(rebuildStage, "scripts", "prepare.mjs")], {
+					cwd: rebuildStage,
+					stdio: ["ignore", "ignore", "pipe"],
+				});
+				return 0;
+			} catch (err) {
+				return typeof err?.status === "number" ? err.status : 1;
+			}
+		})();
+		check(`prepare exits 0 on ${label} (that is what npm rebuild runs)`, status === 0, `exit ${status}`);
+		check(`prepare leaves the prebuilt lib/ alone (${label})`, existsSync(join(rebuildStage, "lib", "index.js")));
+	} catch (err) {
+		check(`the rebuild simulation could not run (${label})`, false, err instanceof Error ? err.message : String(err));
+	} finally {
+		rmSync(rebuildStage, { recursive: true, force: true });
+	}
 }
 
 // CI runs the suites as separate steps (a failing step names the suite), so the

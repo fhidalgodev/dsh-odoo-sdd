@@ -292,6 +292,19 @@ check(
 		ciFloor === hostFloor,
 		`host:deps=${String(ciFloor)} engines=${String(hostFloor)}`,
 	);
+	// Every peer the plugin imports must be named in host:deps. The 0.2.x
+	// launcher nests its whole closure under its own node_modules, so a package
+	// that only arrives transitively is invisible to `tsc` from src/ and the
+	// typecheck dies with TS2307 on the imports — which is exactly how 0.20.0
+	// shipped a red CI while every local run was green on a leftover 0.1.x tree.
+	const hostDeps = String(manifest?.scripts?.["host:deps"] ?? "");
+	for (const peer of Object.keys(manifest?.peerDependencies ?? {})) {
+		check(
+			`host:deps installs the ${peer} peer itself, not only transitively`,
+			hostDeps.includes(`${peer}@`),
+			`host:deps=${hostDeps}`,
+		);
+	}
 	const peerFloor = versionOf(manifest?.peerDependencies?.["@deepseek-ai/dsh-tools"]);
 	check("the dsh-tools peer declares a floor", peerFloor !== null, String(manifest?.peerDependencies?.["@deepseek-ai/dsh-tools"]));
 	/** Numeric comparison, prerelease ignored: enough to catch a peer that is newer than the host. */

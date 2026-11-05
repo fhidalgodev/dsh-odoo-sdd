@@ -179,7 +179,9 @@ jobs:
           fi
           command -v ffmpeg
           ffmpeg -version | head -1
-          ODOO_SDD_FFMPEG="$(command -v ffmpeg)" ODOO_SDD_REQUIRE_FFMPEG=1 node tests/video.mjs
+          # Through ci-test.sh so a failing check is NAMED in the annotations:
+          # the job log needs a token to read, the check run does not.
+          ODOO_SDD_FFMPEG="$(command -v ffmpeg)" ODOO_SDD_REQUIRE_FFMPEG=1 bash scripts/ci-test.sh tests/video.mjs
 
   # Windows really assembles a video
   #
@@ -212,9 +214,10 @@ jobs:
       # bash, because `VAR=1 node …` is not PowerShell syntax and Git Bash ships
       # on the Windows runner. The binary is left to PATH ("ffmpeg"): a POSIX
       # path from `command -v` is not what a Windows child process resolves, so
-      # only the version is printed for the log.
+      # only the version is printed for the log. ci-test.sh names the failing
+      # check in an annotation, which is readable without a token.
       - name: Video E2E on Windows (ffmpeg required)
         shell: bash
         run: |
           ffmpeg -version | head -1
-          ODOO_SDD_REQUIRE_FFMPEG=1 node tests/video.mjs
+          ODOO_SDD_REQUIRE_FFMPEG=1 bash scripts/ci-test.sh tests/video.mjs

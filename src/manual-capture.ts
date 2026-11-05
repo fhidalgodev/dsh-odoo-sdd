@@ -21,6 +21,7 @@
 import { mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeFileAtomic } from "./atomic.js";
+import { posixPath } from "./paths.js";
 import { stepSafety, type Flow, type Step } from "./manual-model.js";
 
 /** The ONLY playwright-core line this plugin is tested against. */
@@ -475,7 +476,7 @@ export async function captureFlow(opts: CaptureOptions): Promise<RpcResult<Captu
 			const rawPath = await pageVideo.path();
 			await context.close();
 			context = null;
-			const file = join("video", "raw", `${opts.flow.id}.webm`);
+			const file = posixPath("video", "raw", `${opts.flow.id}.webm`);
 			renameSync(rawPath, join(opts.workspace, file));
 			report.video = { file, bytes: statSync(join(opts.workspace, file)).size };
 		}

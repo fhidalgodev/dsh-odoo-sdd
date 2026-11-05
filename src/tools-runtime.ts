@@ -102,6 +102,7 @@ import {
 	isIndeterminateFor,
 } from "./method-classification.js";
 import { checkCondition } from "./functional.js";
+import { presentCall } from "./present.js";
 
 /** Build and register `odoo_execute` and `odoo_validate`. */
 export function registerRuntimeTools(
@@ -113,6 +114,12 @@ export function registerRuntimeTools(
 	// -----------------------------------------------------------------
 	ctx.tools.register(defineTool({
 		name: "odoo_execute",
+				presentCall: (args: unknown) => presentCall("odoo_execute", args),
+			// A read RPC holds no plugin state and mutates no row, so it may share a
+			// parallel group. Anything else is exclusive: the allowlist/journal
+			// bookkeeping around a mutation assumes one writer.
+			isConcurrencySafe: (args: unknown) =>
+				isReadMethod(String((args as { method?: unknown }).method ?? "")),
 		description:
 			"Execute a JSON-RPC call (execute_kw) against the connected instance. ANY public method of the model is " +
 			"callable, and what it needs is decided by what it is. " +
@@ -566,11 +573,18 @@ export function registerRuntimeTools(
 	// -----------------------------------------------------------------
 	ctx.tools.register(defineTool({
 		name: "odoo_validate",
+				presentCall: (args: unknown) => presentCall("odoo_validate", args),
+			// Reads the module tree and returns findings — no writes, no instance.
+			isConcurrencySafe: () => true,
 		description:
 			"Validate a module directory WITHOUT a running instance: __manifest__.py present, declared data " +
-			"XML files exist, and the SECURITY model is coherent — every new model (models/*.py `_name`) must " +
-			"have a line in security/ir.model.access.csv, and referenced group xmlids must resolve inside the " +
-			"module (or be base.* groups). Returns file:line findings (ERROR/WARN). NO server required.",
+			"XML files exist (and every views/*.xml is declared), and the SECURITY model is coherent — every new " +
+			"model (models/*.py `_name`) must have a line in security/ir.model.access.csv, and referenced group " +
+			"xmlids must resolve inside the module (or be base.* groups). Also checks the OCA metadata the project " +
+			"itself requires: manifest keys named by `<projectRoot>/.pylintrc` (`manifest-required-keys`, " +
+			"`manifest-required-authors`) plus `license`/`version`, `website`, README.rst and " +
+			"static/description/index.html. View conventions: `position=\"replace\"` without `priority`, and `t-esc` " +
+			"(superseded by `t-out`). Returns file:line findings (ERROR/WARN). NO server required.",
 		parameters: {
 			module_dir: { type: "string", required: true, description: "Absolute path to the module directory (must contain __manifest__.py)." },
 			spec_dir: {
@@ -629,6 +643,22 @@ export function registerRuntimeTools(
 			 * exist and look like Odoo XML. `label` says which key declared it, so
 			 * a missing demo file does not read as a missing view.
 			 */
+			const viewConventions = (rel: string, xml: string): void => {
+				for (const m of xml.matchAll(/<[a-zA-Z][^>]*\bposition=(["'])replace\1[^>]*>/g)) {
+					if (!/\bpriority\s*=/.test(m[0])) {
+						findings.push({
+							severity: "WARN",
+							file: rel,
+							message: "OCA: `position=\"replace\"` without `priority` — the replacement order is then declaration luck; add priority=\"99\".",
+						});
+						break;
+					}
+				}
+				if (/\st-esc=/.test(xml)) {
+					findings.push({ severity: "WARN", file: rel, message: "OCA: `t-esc` is superseded by `t-out` — the OCA hooks rewrite it; write `t-out`." });
+				}
+			};
+
 			const checkDeclaredFiles = (key: string, label: string): string[] => {
 				const match = new RegExp(`['"]${key}['"]\\s*:\\s*\\[([^\\]]*)\\]`).exec(manifestText);
 				const found: string[] = [];
@@ -657,6 +687,7 @@ export function registerRuntimeTools(
 						findings.push({ severity: "WARN", file: rel, message: `XML root not recognized (declared as ${label}).` });
 					}
 					ocaXmlRules(rel, xmlText);
+					viewConventions(rel, xmlText);
 				}
 				return found;
 			};
@@ -775,6 +806,78 @@ export function registerRuntimeTools(
 							`${tourFiles.length} JS file(s) under static/ (e.g. ${tourFiles[0]}) but the manifest declares no ` +
 							'asset bundle — a tour outside "web.assets_tests" is never loaded by the test runner.',
 					});
+				}
+			}
+
+			// ---- OCA module metadata, from the project's own rules -----------
+			/**
+			 * The PROJECT is authoritative about which manifest keys it requires:
+			 * pylint-odoo's `manifest-required-keys` / `manifest-required-authors`
+			 * in the root `.pylintrc` are what `pre-commit run --all-files` enforces,
+			 * so hard-coding one list here would report a rule the CI does not have
+			 * (and stay silent about one it does). `license` and `version` are added
+			 * unconditionally: OCA requires them of every module, pylintrc or not.
+			 */
+			const requiredKeys = new Set<string>(["license", "version"]);
+			let requiredAuthors: string | null = null;
+			const pylintrcPath = join(projectRoot, ".pylintrc");
+			if (existsSync(pylintrcPath)) {
+				let pylintrcText = "";
+				try {
+					pylintrcText = readFileSync(pylintrcPath, "utf8");
+				} catch {
+					pylintrcText = "";
+				}
+				const declaredKeys = /^\s*manifest-required-keys\s*=\s*(.+)$/m.exec(pylintrcText)?.[1] ?? "";
+				for (const key of declaredKeys.split(/[,\s]+/)) if (key.trim() !== "") requiredKeys.add(key.trim());
+				const authors = /^\s*manifest-required-authors\s*=\s*(.+)$/m.exec(pylintrcText)?.[1]?.trim();
+				if (authors !== undefined && authors !== "") requiredAuthors = authors;
+			}
+			for (const key of requiredKeys) {
+				if (!new RegExp(`['"]${key}['"]\\s*:`).test(manifestText)) {
+					findings.push({
+						severity: "ERROR",
+						file: "__manifest__.py",
+						message: `Missing manifest key "${key}"${existsSync(pylintrcPath) ? ` — required by ${deps.display(pylintrcPath)}` : " (OCA)"}.`,
+					});
+				}
+			}
+			if (requiredAuthors !== null) {
+				const authors = /['"]authors['"]\s*:\s*(.+)/.exec(manifestText)?.[1] ?? "";
+				if (!authors.includes(requiredAuthors)) {
+					findings.push({
+						severity: "WARN",
+						file: "__manifest__.py",
+						message: `\`authors\` does not name "${requiredAuthors}", which ${deps.display(pylintrcPath)} requires.`,
+					});
+				}
+			}
+			if (!/['"]website['"]\s*:/.test(manifestText)) {
+				findings.push({ severity: "WARN", file: "__manifest__.py", message: "No `website` key — OCA's manifest hook rewrites it, and an absent one ships a manifest the CI will change." });
+			}
+			// The two files the OCA README/ocapkg toolchain regenerates. Their absence
+			// is the difference between a module a shop can adopt and one it cannot.
+			if (!existsSync(join(moduleDir, "README.rst"))) {
+				findings.push({ severity: "WARN", file: "README.rst", message: "No README.rst — OCA modules ship one (generated from readme/ fragments); the store listing has nothing to show." });
+			}
+			if (!existsSync(join(moduleDir, "static", "description", "index.html"))) {
+				findings.push({ severity: "WARN", file: "static/description/index.html", message: "No static/description/index.html — Odoo's Apps list shows no icon/description." });
+			}
+
+			const viewsDir = join(moduleDir, "views");
+			if (existsSync(viewsDir)) {
+				let viewFiles: string[] = [];
+				try {
+					viewFiles = readdirSync(viewsDir).filter((f) => f.endsWith(".xml"));
+				} catch {
+					viewFiles = [];
+				}
+				const declaredRel = new Set(declaredXml.map((rel) => rel.replace(/^\.\//, "")));
+				for (const fileName of viewFiles) {
+					const rel = `views/${fileName}`;
+					if (!declaredRel.has(rel)) {
+						findings.push({ severity: "ERROR", file: rel, message: "View file is not declared in the manifest's `data` — nothing loads it." });
+					}
 				}
 			}
 

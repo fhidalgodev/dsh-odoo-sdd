@@ -209,6 +209,10 @@ try {
 		} else {
 			check("video:true records a webm under video/raw", vres.ok === true && vres.value.schema === "dsh-odoo-sdd/capture/2" && existsSync(join(outDir, "video", "raw", "f-vid.webm")) && statSync(join(outDir, "video", "raw", "f-vid.webm")).size > 0, vres.ok ? JSON.stringify(vres.value.video) : vres.error);
 			check("every recorded step carries startMs/endMs offsets", vres.ok === true && vres.value.steps.every((s) => typeof s.startMs === "number" && typeof s.endMs === "number" && s.endMs >= s.startMs));
+			// Stored paths are part of the JSON contract the model reads and the
+			// docs quote, so they are POSIX on every OS: `path.join` would write
+			// `video\raw\…` on Windows and only a Windows run would notice.
+			check("the capture report stores POSIX paths", vres.ok === true && /^video\/raw\/[^\\]+\.webm$/.test(vres.value.video.file), vres.ok ? JSON.stringify(vres.value.video) : vres.error);
 		}
 		rmSync(outDir, { recursive: true, force: true });
 	}

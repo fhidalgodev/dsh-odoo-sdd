@@ -164,9 +164,19 @@ jobs:
 
       # The video assembly is verified against the runner's REAL ffmpeg
       # (synthetic testsrc webm → narrated mp4): the unit layer fakes ffmpeg,
-      # this step proves the actual flag/filter pipeline still works.
+      # this step proves the actual flag/filter pipeline still works. The
+      # binary is installed explicitly and named through ODOO_SDD_FFMPEG, so a
+      # failure is never "the image happened to ship a different ffmpeg": the
+      # version that ran is printed in the log either way.
       - name: Video E2E (ffmpeg required)
-        run: ODOO_SDD_REQUIRE_FFMPEG=1 node tests/video.mjs
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq ffmpeg
+          fi
+          command -v ffmpeg
+          ffmpeg -version | head -1
+          ODOO_SDD_FFMPEG="$(command -v ffmpeg)" ODOO_SDD_REQUIRE_FFMPEG=1 node tests/video.mjs
 
   # Windows really assembles a video
   #
@@ -200,7 +210,11 @@ jobs:
         run: choco install ffmpeg -y --no-progress
 
       # bash, because `VAR=1 node …` is not PowerShell syntax and Git Bash ships
-      # on the Windows runner.
+      # on the Windows runner. The binary is left to PATH ("ffmpeg"): a POSIX
+      # path from `command -v` is not what a Windows child process resolves, so
+      # only the version is printed for the log.
       - name: Video E2E on Windows (ffmpeg required)
         shell: bash
-        run: ODOO_SDD_REQUIRE_FFMPEG=1 node tests/video.mjs
+        run: |
+          ffmpeg -version | head -1
+          ODOO_SDD_REQUIRE_FFMPEG=1 node tests/video.mjs

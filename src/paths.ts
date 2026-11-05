@@ -26,3 +26,19 @@ export function resolveModuleDir(raw: string, projectRoot: string): string {
 	if (value === "") return resolve(projectRoot);
 	return isAbsolute(value) ? resolve(value) : resolve(projectRoot, value);
 }
+
+/**
+ * Join the segments of a STORED relative path with forward slashes.
+ *
+ * Every report the tools persist (capture.json, voice.json, the video report)
+ * carries paths the model and the docs read as `video/f1.mp4`. `path.join`
+ * would write `video\f1.mp4` on Windows, which is neither portable in the JSON
+ * nor equal to what the documentation promises — and only a Windows run of the
+ * REAL assembly could reveal it. Filesystem access still goes through
+ * `node:path`, which accepts "/" on every platform.
+ * @param segments - path segments, already validated as safe (no separators).
+ * @returns the relative path, POSIX-separated.
+ */
+export function posixPath(...segments: string[]): string {
+	return segments.filter((segment) => segment !== "").join("/");
+}

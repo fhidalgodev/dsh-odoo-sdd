@@ -17,6 +17,7 @@ import { resolveModuleDir } from "./paths.js";
 import { scanModuleTests, type TestFinding } from "./test-scan.js";
 import { parseRequirements, type Requirement } from "./spec-reqs.js";
 import { declaredAcIds } from "./sdd-state.js";
+import { presentCall } from "./present.js";
 
 /** Live dependencies provided by the registrant. */
 export interface TestsToolDeps {
@@ -142,6 +143,7 @@ export function registerTestsTool(
 ): void {
 	ctx.tools.register(defineTool({
 		name: "odoo_tests",
+				presentCall: (args: unknown) => presentCall("odoo_tests", args),
 		description:
 			"Tests for an Odoo module, usable ON ITS OWN (no spec, phase or connected instance). operation=check " +
 			"scans the Python tests for the failures an install log cannot show: a tests/*.py that tests/__init__.py " +

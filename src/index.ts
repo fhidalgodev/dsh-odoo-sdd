@@ -84,7 +84,8 @@ import { withAudit } from "./audit.js";
 import { registerRuntimeTools } from "./tools-runtime.js";
 import { isReadMethod, isCallableMethodName } from "./method-classification.js";
 import { registerDocsTool } from "./docs-tool.js";
-import { registerManualTool } from "./manual-tool.js";
+import { registerManualTool, type WebSessionResult } from "./manual-tool.js";
+import { registerVideoTool } from "./video-tool.js";
 import { registerTestsTool } from "./tests-tool.js";
 import { registerI18nTools } from "./odoo-i18n.js";
 import { isLanguageCode } from "./po.js";
@@ -168,6 +169,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { presentCall } from "./present.js";
 
 /** Cordis plugin name. */
 export const name = "odoo-sdd";
@@ -250,6 +252,10 @@ export const Config = z.object({
 	documentationLanguage: markVolatile(z.string()),
 	manualsMode: markVolatile(z.string()),
 	manualsDir: markVolatile(z.string()),
+	videosDir: markVolatile(z.string()),
+	ttsCommand: markVolatile(z.string()),
+	ttsVoice: markVolatile(z.string()),
+	ffmpegPath: markVolatile(z.string()),
 });
 
 /** Effective deployment configuration after validation. */
@@ -332,6 +338,17 @@ interface OdooSddConfig {
 	manualsMode?: string;
 	/** Folder for manuals in docs mode, relative to the project root. */
 	manualsDir?: string;
+	/** Folder for odoo_video workspaces, relative to the project root (default docs/videos). */
+	videosDir?: string;
+	/**
+	 * The TTS command odoo_video narrates with, argv-split (no shell), with the
+	 * placeholders {text}/{textFile}/{voice}/{out}. Empty → NEEDS_TTS.
+	 */
+	ttsCommand?: string;
+	/** Engine-specific voice string passed as {voice} (e.g. es-ES-AlvaroNeural). */
+	ttsVoice?: string;
+	/** ffmpeg binary for odoo_video assembly (default "ffmpeg"). */
+	ffmpegPath?: string;
 }
 
 /** Minimal structural view of the host tool registry. */
@@ -877,6 +894,14 @@ const ODOO_SDD_SKILLS: Array<{ dir: string; resourceBase: string; fallbackDescri
 			"Narrated Odoo user manuals built on evidence: odoo_manual reads the functional canon, " +
 			"plans the storyboard against it, narrates in 3 acts, captures screens and compiles with lint.",
 	},
+	{
+		dir: "odoo-video",
+		resourceBase: "resources",
+		fallbackDescription:
+			"Narrated VIDEO documentation of Odoo flows: odoo_video plans the storyboard (own canon " +
+			"or imported from a manual), narrates it with a configured TTS command, records the browser " +
+			"session and assembles video/<flow>.mp4 with ffmpeg — SRT/VTT captions always ship.",
+	},
 ];
 
 /**
@@ -1058,12 +1083,16 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		requireInstanceChoice: pickBool(config.requireInstanceChoice, true),
 		securityReviewRequired: pickBool(config.securityReviewRequired, true),
 		securityInterviewRequired: pickBool(config.securityInterviewRequired, true),
-		auditAllTools: pickBool(config.auditAllTools, true),
+		auditAllTools: pickBool(config.auditAllTools, false),
 		maxCheckpoints: pickNum(config.maxCheckpoints, 5),
 		documentationPolicy: pickString(config.documentationPolicy, "required"),
 		documentationLanguage: pickString(config.documentationLanguage, ""),
 		manualsMode: pickString(config.manualsMode, "specs"),
 		manualsDir: pickString(config.manualsDir, "docs/manuals"),
+		videosDir: pickString(config.videosDir, "docs/videos"),
+		ttsCommand: pickString(config.ttsCommand, ""),
+		ttsVoice: pickString(config.ttsVoice, ""),
+		ffmpegPath: pickString(config.ffmpegPath, "ffmpeg"),
 	};
 	// Live source of the Settings section. The host hands us a THUNK returning
 	// the currently authoritative value (the resolved user scope while attached,
@@ -1099,6 +1128,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// ---------------------------------------------------------------------
 	ctx.tools.register(defineTool({
 		name: "odoo_connect",
+				presentCall: (args: unknown) => presentCall("odoo_connect", args),
 		description:
 			"Probe the developer-provided Odoo instance: load credentials from the gitignored .env, " +
 			"query the server version and authenticate. Returns a masked report — secrets are never " +
@@ -1207,6 +1237,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// ---------------------------------------------------------------------
 	ctx.tools.register(defineTool({
 		name: "odoo_setup",
+				presentCall: (args: unknown) => presentCall("odoo_setup", args),
 		description:
 			"Onboarding for the Odoo instance connection. mode=check (default) reports the credential " +
 			"cascade state (.sdd/.env → user config → legacy .env), the persisted setup decision, and " +
@@ -2103,6 +2134,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// ---------------------------------------------------------------------
 	ctx.tools.register(defineTool({
 		name: "odoo_module",
+				presentCall: (args: unknown) => presentCall("odoo_module", args),
 		description:
 			"Operate Odoo modules on the connected instance over JSON-RPC. " +
 			"operation=info returns lifecycle state; operation=install / upgrade execute the immediate " +
@@ -2179,6 +2211,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// ---------------------------------------------------------------------
 	ctx.tools.register(defineTool({
 		name: "odoo_errors",
+				presentCall: (args: unknown) => presentCall("odoo_errors", args),
+			isConcurrencySafe: () => true,
 		description:
 			"Read recent server-side ERROR/CRITICAL logs (ir.logging) from the connected instance, " +
 			"redacted. Use after a failed install/upgrade or a UI error to obtain the Python traceback " +
@@ -2227,6 +2261,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// ---------------------------------------------------------------------
 	ctx.tools.register(defineTool({
 		name: "odoo_session",
+				presentCall: (args: unknown) => presentCall("odoo_session", args),
 		description:
 			"Mint a passwordless web session on the connected instance (the connect_as_user pattern) and " +
 			"store the cookie in .sdd/session.json (chmod 600, gitignored) for Playwright UI tests. The " +
@@ -2265,6 +2300,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// ---------------------------------------------------------------------
 	ctx.tools.register(defineTool({
 		name: "sdd_phase",
+				presentCall: (args: unknown) => presentCall("sdd_phase", args),
 		description:
 			"Drive the SDD pipeline state machine for one spec directory. Operations: init (create " +
 			"specs/<id>/ skeleton), status (snapshot), mark_spec_loaded (spec.md assimilated), preview " +
@@ -3024,6 +3060,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 
 	ctx.tools.register(defineTool({
 		name: "odoo_config",
+				presentCall: (args: unknown) => presentCall("odoo_config", args),
 		description:
 			"Read or update the persistent plugin configuration stored in <projectRoot>/.sdd/config.json. " +
 			"mode=read returns the current values (community/enterprise repository URL + OS path, specs layout, " +
@@ -3085,11 +3122,15 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			},
 			securityReviewRequired: { type: "boolean", description: "Require a clean security review before DONE." },
 			securityInterviewRequired: { type: "boolean", description: "Require the security interview (groups/ACL/rules) before ARCHITECTURE." },
-			auditAllTools: { type: "boolean", description: "Record every tool call of the run in .sdd/audit.jsonl." },
+			auditAllTools: { type: "boolean", description: "Record EVERY tool call of the run (not only this plugin's) in .sdd/audit.jsonl. Default false: the plugin's own tools and every policy denial are always recorded; this switch adds bash/write/edit, whose file bodies are stored as a size+hash digest." },
 			documentationPolicy: { type: "string", enum: ["required", "optional", "off"], description: "Whether documentation blocks DONE." },
 			documentationLanguage: { type: "string", description: "Documentation language; empty resolves from the project's own rules, then English." },
 			manualsMode: { type: "string", enum: ["specs", "docs", "module"], description: "Where odoo_manual keeps the manuals: specs (default, next to the spec), docs (a documentation tree under manualsDir) or module (OCA fragments under the module's readme/manual/)." },
 			manualsDir: { type: "string", description: "Folder for the manuals in docs mode, relative to the project root (default docs/manuals)." },
+			videosDir: { type: "string", description: "Folder for odoo_video workspaces, relative to the project root (default docs/videos)." },
+			ttsCommand: { type: "string", description: "The TTS command odoo_video narrates with, argv-split (no shell), placeholders {text}/{textFile}/{voice}/{out}. Example (cloud): edge-tts --voice {voice} --text {text} --write-media {out}. Example (offline): piper --model {voice} --output_file {out} (uses {textFile})." },
+			ttsVoice: { type: "string", description: "Engine-specific voice string passed as {voice} (e.g. es-ES-AlvaroNeural for edge-tts, es_ES-sharvard-medium for piper)." },
+			ffmpegPath: { type: "string", description: "ffmpeg binary for the video assembly (default ffmpeg)." },
 			maxCheckpoints: { type: "number", description: "How many checkpoints to retain." },
 		},
 		output: {
@@ -3132,6 +3173,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					documentationLanguage: { type: "string", required: true },
 					manualsMode: { type: "string", required: true },
 					manualsDir: { type: "string", required: true },
+					videosDir: { type: "string", required: true },
+					ttsCommand: { type: "string", required: true },
+					ttsVoice: { type: "string", required: true },
+					ffmpegPath: { type: "string", required: true },
 							maxCheckpoints: { type: "number", required: true },
 						},
 					},
@@ -3197,6 +3242,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			documentationLanguage?: string;
 			manualsMode?: string;
 			manualsDir?: string;
+			videosDir?: string;
+			ttsCommand?: string;
+			ttsVoice?: string;
+			ffmpegPath?: string;
 		}, exec?: unknown) {
 			/** Project the stored JSON onto the known, typed configuration shape. */
 			const normalize = (data: Record<string, unknown>) => {
@@ -3230,7 +3279,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						typeof data["requireInstanceChoice"] === "boolean" ? data["requireInstanceChoice"] : true,
 					securityReviewRequired: typeof data["securityReviewRequired"] === "boolean" ? data["securityReviewRequired"] : true,
 					securityInterviewRequired: typeof data["securityInterviewRequired"] === "boolean" ? data["securityInterviewRequired"] : true,
-					auditAllTools: typeof data["auditAllTools"] === "boolean" ? data["auditAllTools"] : true,
+					auditAllTools: typeof data["auditAllTools"] === "boolean" ? data["auditAllTools"] : false,
 					documentationPolicy: (() => {
 						const v = asString(data["documentationPolicy"], "required");
 						return v === "optional" || v === "off" ? v : "required";
@@ -3242,6 +3291,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 						return v === "docs" || v === "module" ? v : "specs";
 					})(),
 					manualsDir: asString(data["manualsDir"], "docs/manuals"),
+					videosDir: asString(data["videosDir"], "docs/videos"),
+					ttsCommand: asString(data["ttsCommand"], ""),
+					ttsVoice: asString(data["ttsVoice"], ""),
+					ffmpegPath: asString(data["ffmpegPath"], "ffmpeg"),
 				};
 			};
 
@@ -3390,6 +3443,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.documentationLanguage !== undefined) updates["documentationLanguage"] = args.documentationLanguage;
 			if (args.manualsMode !== undefined) updates["manualsMode"] = args.manualsMode;
 			if (args.manualsDir !== undefined) updates["manualsDir"] = args.manualsDir;
+			if (args.videosDir !== undefined) updates["videosDir"] = args.videosDir;
+			if (args.ttsCommand !== undefined) updates["ttsCommand"] = args.ttsCommand;
+			if (args.ttsVoice !== undefined) updates["ttsVoice"] = args.ttsVoice;
+			if (args.ffmpegPath !== undefined) updates["ffmpegPath"] = args.ffmpegPath;
 			if (args.maxCheckpoints !== undefined) updates["maxCheckpoints"] = args.maxCheckpoints;
 			if (Object.keys(updates).length === 0) {
 				return {
@@ -3524,7 +3581,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			requireInstanceChoice: cfgBool("requireInstanceChoice", true),
 			securityReviewRequired: cfgBool("securityReviewRequired", true),
 			securityInterviewRequired: cfgBool("securityInterviewRequired", true),
-			auditAllTools: cfgBool("auditAllTools", true),
+			auditAllTools: cfgBool("auditAllTools", false),
 			maxCheckpoints: cfgNum("maxCheckpoints", 5),
 			documentationPolicy: cfgString("documentationPolicy", "required"),
 			documentationLanguage: cfgString("documentationLanguage", ""),
@@ -3533,6 +3590,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				return v === "docs" || v === "module" ? v : "specs";
 			})(),
 			manualsDir: cfgString("manualsDir", "docs/manuals"),
+			videosDir: cfgString("videosDir", "docs/videos"),
+			ttsCommand: cfgString("ttsCommand", ""),
+			ttsVoice: cfgString("ttsVoice", ""),
+			ffmpegPath: cfgString("ffmpegPath", "ffmpeg"),
 		};
 	};
 
@@ -3706,6 +3767,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 
 	ctx.tools.register(defineTool({
 		name: "sdd_checkpoint",
+				presentCall: (args: unknown) => presentCall("sdd_checkpoint", args),
 		description:
 			"Snapshot and restore the work. operation=create copies the given directories into " +
 			".sdd/checkpoints/<id>/ and makes that checkpoint ACTIVE (mutations are refused until one " +
@@ -3898,6 +3960,8 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// ---------------------------------------------------------------------
 	ctx.tools.register(defineTool({
 		name: "odoo_security_scan",
+				presentCall: (args: unknown) => presentCall("odoo_security_scan", args),
+			isConcurrencySafe: () => true,
 		description:
 			"Static security review of an Odoo module directory, WITHOUT an instance. Flags raw SQL built " +
 			"by concatenation, dynamic execution/deserialization, hardcoded secrets, unjustified sudo(), " +
@@ -3947,6 +4011,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 	// ---------------------------------------------------------------------
 	ctx.tools.register(defineTool({
 		name: "sdd_handoff",
+				presentCall: (args: unknown) => presentCall("sdd_handoff", args),
 		description:
 			"Write the closing handoff for a spec: final phase, honest verdict, KB decisions/blockers, " +
 			"checkpoints, journaled data operations, effective configuration and next steps, into " +
@@ -4174,7 +4239,15 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				`- requireSpecForChanges=${cfg.requireSpecForChanges} ` +
 					`adoptProjectPointerHint=${cfg.adoptProjectPointerHint}`,
 			);
-			lines.push(`- allowlist=${JSON.stringify(cfg.executeAllowlist)}`);
+			// The allowlist is PROJECT-wide: pasting twenty models from other specs
+			// into one spec's handoff reads as if this spec may mutate them.
+			{
+				const models = cfg.executeAllowlist;
+				const shown = models.slice(0, 6).map((m) => `\`${m}\``).join(", ");
+				lines.push(
+					`- allowlist: ${models.length === 0 ? "(empty — no mutation is possible)" : models.length <= 6 ? shown : `${shown} and ${models.length - 6} more (see odoo_config mode=read)`}`,
+				);
+			}
 			if (cfg.methodAllowlist.length > 0) lines.push(`- method allowlist=${JSON.stringify(cfg.methodAllowlist)}`);
 			lines.push(`- communityRepo=${cfg.communityRepoPath || cfg.communityRepoUrl}`);
 			lines.push(`- enterpriseRepo=${cfg.enterpriseRepoPath || cfg.enterpriseRepoUrl}`);
@@ -4193,7 +4266,22 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 				lines.push("");
 			}
 			lines.push("## Checkpoints");
-			lines.push(checkpoints.length === 0 ? "- (none)" : checkpoints.map((c) => `- ${c.id} — ${c.label} (${c.files.length} file(s))`).join("\n"));
+			{
+				// Only this spec's checkpoints, plus the ACTIVE one (whose journal is in
+				// this report). The rest belong to other specs in the same container:
+				// listing them suggests this spec created them.
+				const mine = checkpoints.filter((c) => c.specId === args.spec_id);
+				const others = checkpoints.length - mine.length;
+				const rows = mine.map((c) => `- ${c.id} — ${c.label} (${c.files.length} file(s))`);
+				const active = activeFor(cfg, exec).state.checkpointId ?? projectCheckpoint(cfg.projectRoot);
+				const activeRow = checkpoints.find((c) => c.id === active);
+				if (activeRow !== undefined && !mine.some((c) => c.id === activeRow.id)) {
+					rows.push(`- ${activeRow.id} — ${activeRow.label} (${activeRow.files.length} file(s)) [ACTIVE, belongs to ${activeRow.specId ?? "the project"}]`);
+				}
+				if (rows.length === 0) rows.push("- (none)");
+				if (others > 0) rows.push(`- ${others} more checkpoint(s) in .sdd/checkpoints belong to other specs and are not listed here.`);
+				lines.push(rows.join("\n"));
+			}
 			lines.push("");
 			lines.push("## Journaled data operations");
 			if (specJournal.length === 0) {
@@ -4337,6 +4425,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			// browser really clicks/fills Odoo (business-action contract: the UI
 			// effect is not journalable). The tool ALSO refuses those flows without
 			// confirm_destructive — the guard and the tool are independent fences.
+			return String(args["operation"] ?? "") === "capture" && args["allow_actions"] === true;
+		}
+		if (name === "odoo_video") {
+			// Same contract as odoo_manual capture: the recording itself is
+			// read-only, but with allow_actions=true the browser really
+			// clicks/fills Odoo and that is not journalable.
 			return String(args["operation"] ?? "") === "capture" && args["allow_actions"] === true;
 		}
 		return false;
@@ -4807,7 +4901,13 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					// the audit early-return, because it is a policy input, not a log.
 					const ranName = String(execution.name ?? "");
 					if (ranName.startsWith("odoo_")) odooWorkRoots.add(cfg.projectRoot);
-					if (!cfg.auditAllTools) return;
+					// This plugin's own tools are ALWAYS recorded: they are the ones whose
+					// arguments explain a functional or data decision. Everything else is
+					// opt-in, because a full-history log of bash/write/edit is mostly file
+					// bodies (one project reached 72 MB, 25 MB of it bash) and the policy
+					// denials — the entries an auditor actually needs — are recorded by the
+					// guard on their own path, not here.
+					if (!cfg.auditAllTools && !ranName.startsWith("odoo_") && !ranName.startsWith("sdd_")) return;
 					const result = (eventArgs[1] ?? {}) as { isError?: unknown; error?: unknown };
 					const active = activeFor(cfg, execution).state;
 					const failed = Boolean(result.isError) || result.error !== undefined;
@@ -4904,6 +5004,39 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		display: (v) => displayPath(v),
 	});
 
+	// Shared browser-session dependency (odoo_manual + odoo_video capture):
+	// in-memory FIRST — the cookie never touches the disk on this path — with
+	// the persisted .sdd/session.json (odoo_session / mintSession) as the
+	// fallback, so a session minted earlier still works.
+	const webSessionDep = async (exec?: unknown): Promise<WebSessionResult> => {
+		const cfg = effectiveConfig(exec);
+		const entry = clientForExec(exec);
+		const client = entry.client;
+		let loginError = "";
+		if (client) {
+			const login = await client.webLogin();
+			if (login.ok) {
+				return { ok: true, value: { baseUrl: entry.credentials?.url ?? "", sessionId: login.value.sessionId, uid: login.value.uid } };
+			}
+			if (login.errorKind === "needs_password") {
+				return { ok: false, errorKind: "needs_session", error: login.error };
+			}
+			// password auth failed — fall through to the persisted session
+			loginError = login.error;
+		}
+		const persisted = readWebSession(cfg.projectRoot);
+		if (persisted && persisted.url) {
+			return { ok: true, value: { baseUrl: persisted.url, sessionId: persisted.sessionId, uid: -1 } };
+		}
+		return {
+			ok: false,
+			errorKind: "needs_session",
+			error:
+				(loginError ? `Web login failed (${loginError}) and ` : "") +
+				"no persisted web session exists (.sdd/session.json): run odoo_session (needs an account PASSWORD — an API key cannot open a web session) or create the session file by hand.",
+		};
+	};
+
 	// odoo_manual — narrated user manuals. The canon is read from the connected
 	// instance (like the JSON-RPC surface above); the manuals live where
 	// Settings says (manualsMode/manualsDir), and standalone work without a
@@ -4932,37 +5065,43 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			const cfg = effectiveConfig(exec);
 			return { communityPath: cfg.communityRepoPath || undefined, enterprisePath: cfg.enterpriseRepoPath || undefined };
 		},
-		webSession: async (exec) => {
-			// In-memory FIRST: the cookie never touches the disk on this path.
-			// The persisted .sdd/session.json (odoo_session / mintSession) is the
-			// fallback, so a session minted earlier still works.
+		webSession: webSessionDep,
+	});
+
+	// odoo_video — narrated video documentation of flows, standalone beside
+	// odoo_manual (it never writes MANUAL.md). Same evidence motor (canon,
+	// storyboard, capture engine — always recording), voice via the configured
+	// TTS command, assembly via ffmpeg. The TTS/ffmpeg keys resolve from
+	// Settings/config first, then the ODOO_SDD_* environment.
+	registerVideoTool(ctx, {
+		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
+		specDir: (specId, exec) => {
 			const cfg = effectiveConfig(exec);
-			const entry = clientForExec(exec);
-			const client = entry.client;
-			let loginError = "";
-			if (client) {
-				const login = await client.webLogin();
-				if (login.ok) {
-					return { ok: true, value: { baseUrl: entry.credentials?.url ?? "", sessionId: login.value.sessionId, uid: login.value.uid } };
-				}
-				if (login.errorKind === "needs_password") {
-					return { ok: false, errorKind: "needs_session", error: login.error };
-				}
-				// password auth failed — fall through to the persisted session
-				loginError = login.error;
-			}
-			const persisted = readWebSession(cfg.projectRoot);
-			if (persisted && persisted.url) {
-				return { ok: true, value: { baseUrl: persisted.url, sessionId: persisted.sessionId, uid: -1 } };
-			}
+			return specDirOf(cfg.projectRoot, cfg.specsDir, specId ?? "", {
+				specsMode: cfg.specsMode,
+				specsRoot: cfg.specsRoot,
+			});
+		},
+		specsBase: (exec) => specsBaseFor(effectiveConfig(exec)),
+		manuals: (exec) => {
+			const cfg = effectiveConfig(exec);
 			return {
-				ok: false,
-				errorKind: "needs_session",
-				error:
-					(loginError ? `Web login failed (${loginError}) and ` : "") +
-					"no persisted web session exists (.sdd/session.json): run odoo_session (needs an account PASSWORD — an API key cannot open a web session) or create the session file by hand.",
+				mode: (cfg.manualsMode === "docs" || cfg.manualsMode === "module" ? cfg.manualsMode : "specs") as "docs" | "module" | "specs",
+				dir: cfg.manualsDir,
 			};
 		},
+		configuredLanguage: (exec) => effectiveConfig(exec).documentationLanguage || undefined,
+		client: (exec) => clientForExec(exec).client ?? undefined,
+		display: (v) => displayPath(v),
+		repos: (exec) => {
+			const cfg = effectiveConfig(exec);
+			return { communityPath: cfg.communityRepoPath || undefined, enterprisePath: cfg.enterpriseRepoPath || undefined };
+		},
+		webSession: webSessionDep,
+		videosDir: (exec) => effectiveConfig(exec).videosDir,
+		ttsCommand: (exec) => effectiveConfig(exec).ttsCommand || process.env["ODOO_SDD_TTS_CMD"] || null,
+		ttsVoice: (exec) => effectiveConfig(exec).ttsVoice || process.env["ODOO_SDD_TTS_VOICE"] || null,
+		ffmpegPath: (exec) => effectiveConfig(exec).ffmpegPath || process.env["ODOO_SDD_FFMPEG"] || "ffmpeg",
 	});
 
 	/**

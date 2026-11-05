@@ -61,7 +61,7 @@
     "prepare": "node scripts/prepare.mjs",
     "prepack": "node scripts/prepare.mjs --force",
     "test": "node tests/smoke.mjs && node tests/spec-reqs.mjs && node tests/test-scan.mjs && node tests/client.mjs && node tests/readme.mjs && node tests/functional.mjs && node tests/import.mjs && node tests/manual.mjs && node tests/capture.mjs && node tests/video.mjs && node tests/package.mjs",
-    "host:deps": "npm install --no-save --no-audit --no-fund @deepseek-ai/dsh@^0.2.2-rc.1",
+    "host:deps": "npm install --no-save --no-audit --no-fund @deepseek-ai/dsh@^0.2.2-rc.1 @deepseek-ai/dsh-tools@^0.2.2-rc.1 @deepseek-ai/schemastery@^3.18.4 @deepseek-ai/cordis@^4.0.0",
     "test:package": "node tests/package.mjs",
     "test:client": "node tests/client.mjs",
     "test:readme": "node tests/readme.mjs",
@@ -77,7 +77,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0 <5",
-    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1",
     "@deepseek-ai/schemastery": ">=3.18.4 <4"
   },
   "peerDependenciesMeta": {

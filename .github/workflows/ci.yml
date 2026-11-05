@@ -37,21 +37,16 @@ jobs:
           # no `npm ci` and no `npm audit` (SCA needs a lockfile to resolve).
           cache: ''
 
-      - name: Install dev dependencies (peers are host-provided, optional)
+      # ONE install, and it is the install a user performs. The host packages
+      # the plugin IMPORTS (dsh-tools, schemastery) are devDependencies, so npm
+      # puts them at the top of the tree on every OS. They used to arrive from a
+      # second, ad-hoc `npm run host:deps`: the 0.2.x launcher nests its whole
+      # closure under its own node_modules, so whether `tsc` could resolve the
+      # types depended on where npm decided to hoist — and on Windows two jobs of
+      # the same matrix decided differently (TS2307 in one, clean in the other).
+      # The FLOOR is a separate question, answered by the host-contract job.
+      - name: Install dependencies
         run: npm install --no-audit --no-fund
-
-      # The host AND the peer packages the plugin imports (dsh-tools,
-      # schemastery, cordis) are installed by `npm run host:deps`. Naming the
-      # peers is not redundant: the 0.2.x launcher nests its whole closure under
-      # node_modules/@deepseek-ai/dsh/node_modules, which TypeScript cannot
-      # resolve from src/ — the typecheck then fails with TS2307 for every
-      # import, and a tree-install alone would have hidden it. The version also
-      # comes from `host:deps`, so the host tested here is the one `engines.dsh`
-      # enforces — npm ignores `engines` (EBADENGINE is a warning, not an error),
-      # which is exactly why a 0.1.x host used to be installed on a Node line the
-      # 0.2.x host refuses to run on.
-      - name: Install host packages for typecheck
-        run: npm run host:deps
 
       - name: Typecheck
         run: npm run typecheck
@@ -119,11 +114,22 @@ jobs:
       - name: Install dev dependencies
         run: npm install --no-audit --no-fund
 
+      # `host:deps` is the same install every user runs; here the version is
+      # pinned to the declared floor instead of a range. The failure text goes
+      # into annotations: a job log needs a token, a check run does not.
       - name: Install the declared host floor
         run: |
           FLOOR=$(node -p "require('./package.json').engines.dsh.match(/\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?/)[0]")
           echo "Declared floor: $FLOOR"
-          npm install --no-save --no-audit --no-fund "@deepseek-ai/dsh@$FLOOR"
+          log="${RUNNER_TEMP:-/tmp}/host-floor.log"
+          if ! npm install --no-save --no-audit --no-fund "@deepseek-ai/dsh@$FLOOR" >"$log" 2>&1; then
+            tail -n 40 "$log" >&2 || true
+            while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error::${line//%/%%}"
+            done < <(tail -n 20 "$log")
+            exit 1
+          fi
+          tail -n 5 "$log"
 
       - name: Typecheck against the floor
         run: npm run typecheck
@@ -147,11 +153,8 @@ jobs:
           node-version: 24
           cache: ''
 
-      - name: Install dev dependencies
+      - name: Install dependencies
         run: npm install --no-audit --no-fund
-
-      - name: Install host packages for typecheck
-        run: npm run host:deps
 
       - name: Build
         run: npm run build
@@ -197,11 +200,8 @@ jobs:
           node-version: 24
           cache: ''
 
-      - name: Install dev dependencies
+      - name: Install dependencies
         run: npm install --no-audit --no-fund
-
-      - name: Install host packages for typecheck
-        run: npm run host:deps
 
       - name: Build
         run: npm run build

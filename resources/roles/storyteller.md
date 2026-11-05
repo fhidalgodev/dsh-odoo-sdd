@@ -32,3 +32,7 @@ this rubric (2 points each, it passes with ≥ 9 and no lint ERROR):
 - Language: the one the storyboard declares (language). No mixing.
 - The verdict comes from `odoo_docs report` (or the lint); your audit mode is an
   internal gate, not a formal approval.
+
+> **Video mode** (`odoo_video`): hooks, cold opens, spoken rhythm and the
+> 20/28-word caps are in `references/video-craft.md` — read it before writing
+> any `procedure`, `hook` or `outro`. Every rule above still applies.

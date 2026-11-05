@@ -215,6 +215,56 @@ try {
 			check("the capture report stores POSIX paths", vres.ok === true && /^video\/raw\/[^\\]+\.webm$/.test(vres.value.video.file), vres.ok ? JSON.stringify(vres.value.video) : vres.error);
 		}
 		rmSync(outDir, { recursive: true, force: true });
+
+		// --- Phase 4: the FX overlay + interactive recording ----------------
+		// The init script must parse (it is injected verbatim into the page).
+		const { FX_INIT_SCRIPT } = await import(libUrl("video-fx.js"));
+		check("the FX init script is syntactically valid JS", (() => { try { new Function(FX_INIT_SCRIPT); return true; } catch { return false; } })());
+		// The overlay exists in a page it was injected into — and nowhere else.
+		const fxDir = mkdtempSync(join(tmpdir(), "capture-fx-"));
+		const fxCtx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+		await fxCtx.addInitScript({ content: FX_INIT_SCRIPT });
+		const fxPage = await fxCtx.newPage();
+		await fxPage.setContent(PAGE_HTML);
+		check("the injected page exposes window.__sddFx", await fxPage.evaluate("typeof window.__sddFx === 'object' && typeof window.__sddFx.ring === 'function'"));
+		await fxPage.evaluate("window.__sddFx.ring({x:100,y:100,w:50,h:30}, 'label')");
+		check("ring() paints inside the shadow host", await fxPage.evaluate("document.getElementById('__sddFxHost')?.shadowRoot?.querySelector('.ring') !== null"));
+		const shotBuf = await (async () => { await fxPage.evaluate("window.__sddFx.hide()"); const b = await fxPage.screenshot({ type: "png" }); await fxPage.evaluate("window.__sddFx.show()"); return b; })();
+		check("the overlay host hides around a screenshot", shotBuf.length > 100 && (await fxPage.evaluate("document.getElementById('__sddFxHost').style.display === ''")) === true);
+		await fxCtx.close();
+		const plainCtx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+		const plainPage = await plainCtx.newPage();
+		await plainPage.setContent(PAGE_HTML);
+		check("no injection means no overlay and no __sddFx", await plainPage.evaluate("typeof window.__sddFx === 'undefined' && document.getElementById('__sddFxHost') === null"));
+		await plainCtx.close();
+		// The recorder path itself: only when the bundled ffmpeg can record.
+		const recorded = await capture.captureFlow({
+			session: { baseUrl, sessionId: "fakesession123", uid: 2 }, browser, family: fam17.value.family,
+			flow: {
+				id: "f-fx", title: "fx",
+				steps: [
+					{ id: "s01", kind: "goto", procedure: null, target: { kind: "url", url: `${baseUrl}/web` } },
+					{ id: "s02", kind: "highlight", procedure: null, field: "partner_id" },
+					{ id: "s03", kind: "highlight", procedure: null, field: "no_such_field" },
+				],
+			},
+			allowActions: false, headed: false, zoom: 1, workspace: fxDir, video: true,
+			holdMsByStep: { s02: 2500 },
+		});
+		if (!recorded.ok && /BUNDLED ffmpeg/.test(recorded.error)) {
+			console.log("  SKIP  highlight/focus/hold E2E — Playwright's bundled ffmpeg is not installed");
+		} else {
+			check("the recorded capture runs the FX path", recorded.ok === true, recorded.ok ? "" : recorded.error);
+			if (recorded.ok) {
+				const hi = recorded.value.steps.find((s) => s.id === "s02");
+				check("highlight on a visible field reports ok + a focus rect", hi?.status === "ok" && hi.focus && hi.focus.w > 0 && hi.focus.h > 0, JSON.stringify(hi));
+				const missing = recorded.value.steps.find((s) => s.id === "s03");
+				check("highlight on a missing field errors naming the probe order", missing?.status === "error" && /not on screen/.test(missing.error ?? ""), JSON.stringify(missing));
+				const held = (hi?.endMs ?? 0) - (hi?.startMs ?? 0);
+				check("holdMsByStep holds the live page for the narration (≥2s)", held >= 2000, `held=${held}ms`);
+			}
+		}
+		rmSync(fxDir, { recursive: true, force: true });
 	}
 } finally {
 	if (browser) await browser.close().catch(() => {});

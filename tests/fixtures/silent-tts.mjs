@@ -2,23 +2,32 @@
 /**
  * Deterministic silent-WAV "TTS" stub for tests/video.mjs.
  *
- * Usage: node silent-tts.mjs --out PATH [--text WORDS] [--voice X]
+ * Usage: node silent-tts.mjs --out PATH [--text WORDS] [--voice X] [--copy SRC]
  * Writes a valid 16-bit mono 16 kHz PCM WAV whose duration is derived from
  * the word count (0.25s per word, minimum 0.4s) — no real speech, no network.
+ * `--copy SRC` instead copies an existing file verbatim to --out, mimicking a
+ * TTS engine (edge-tts) that writes a non-WAV payload under a .wav name.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 let out = null;
 let text = "";
+let copy = null;
 const args = process.argv.slice(2);
 for (let i = 0; i < args.length; i++) {
 	if (args[i] === "--out") out = args[++i];
 	else if (args[i] === "--text") text = args[++i];
+	else if (args[i] === "--copy") copy = args[++i];
 }
 if (!out) {
 	process.stderr.write("silent-tts: --out is required\n");
 	process.exit(3);
+}
+if (copy) {
+	mkdirSync(dirname(out), { recursive: true });
+	copyFileSync(copy, out);
+	process.exit(0);
 }
 const words = text.split(/\s+/).filter(Boolean).length;
 const rate = 16_000;

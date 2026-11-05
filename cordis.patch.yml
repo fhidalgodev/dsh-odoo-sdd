@@ -57,3 +57,12 @@
         # Where odoo_manual keeps the narrated manuals: specs (default), docs or module.
         # manualsMode: 'specs'
         # manualsDir: 'docs/manuals'
+        # Where odoo_video keeps the video workspaces: default docs/videos.
+        # videosDir: 'docs/videos'
+        # Narration voice preset: viral-male | viral-female | calm-male |
+        # calm-female | offline-piper | custom. Cloud presets send the
+        # narration text to Microsoft — an explicit decision.
+        # ttsPreset: ''
+        # Assembly: synthesized music bed and UI sfx, on by default.
+        # videoMusic: true
+        # videoSfx: true

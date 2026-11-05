@@ -14,11 +14,12 @@
  * template uses {voice}, NEEDS_TTS with per-language example voices.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readSync, closeSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { writeFileAtomic } from "./atomic.js";
 import { posixPath } from "./paths.js";
+import { listVoicePresets } from "./video-voices.js";
 import type { Flow } from "./manual-model.js";
 import type { RpcResult } from "./manual-capture.js";
 
@@ -40,6 +41,31 @@ export function voiceExamples(language: string | undefined): string[] {
 	const ex = VOICE_EXAMPLES[languagePrefix(language)];
 	if (!ex) return ["(no bundled example for this language — list voices with your TTS engine and set ttsVoice)"];
 	return [`piper-tts (offline): ${ex.piper}`, `edge-tts (cloud — sends the text to Microsoft): ${ex.edge}`];
+}
+
+/**
+ * The NEEDS_TTS text, shared by voiceFlow and the tool layer (which resolves
+ * the engine before calling). It lists every preset with the concrete voice
+ * it would use for this language — recommended first — so the answer to "no
+ * voice configured" is a choice, not a chore. The privacy line is part of the
+ * contract: cloud presets send the narration text to Microsoft, and picking
+ * one IS the developer's explicit decision.
+ */
+export function needsTtsMessage(language: string | undefined): string {
+	const presets = listVoicePresets(language)
+		.map(
+			({ preset, voice }) =>
+				`  - ${preset.id}${preset.recommended ? " (recommended)" : ""} [${preset.cloud ? "cloud" : "offline"}]${preset.gender ? ` ${preset.gender}` : ""} ${preset.style}: ${voice ?? preset.note}`,
+		)
+		.join("\n");
+	return (
+		"NEEDS_TTS — no voice engine is configured. Pick a voice preset (config key ttsPreset) or set a custom ttsCommand " +
+		"(config key ttsCommand / env ODOO_SDD_TTS_CMD) with the placeholders {text}/{textFile}/{voice}/{out}.\n" +
+		`Voice presets for this script's language:\n${presets}\n` +
+		`Custom-engine example voices for this language: ${voiceExamples(language).join(" · ")}.\n` +
+		"Privacy: the cloud presets send the narration text to Microsoft — choosing one is the developer's explicit decision. " +
+		"The offline preset (piper) keeps the text on this machine and needs ttsVoice set to a .onnx model file."
+	);
 }
 
 /**
@@ -119,6 +145,42 @@ export async function probeDurationSeconds(file: string, ffmpegPath: string): Pr
 	return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+/** Read the first `n` bytes of a file without loading it whole. */
+function fileHead(file: string, n: number): Buffer {
+	const fd = openSync(file, "r");
+	try {
+		const buf = Buffer.alloc(n);
+		const got = readSync(fd, buf, 0, n, 0);
+		return buf.subarray(0, got);
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * edge-tts writes an MP3 even when the output is named `.wav` — it only works
+ * downstream because ffmpeg sniffs content. The voice directory, however, is
+ * also read directly (durations, exports), so a non-RIFF file is normalized to
+ * a REAL WAV (mono 24 kHz, enough for narration) through ffmpeg, written to a
+ * sibling temp and renamed into place so a crash never leaves a half file.
+ */
+async function ensureWavFile(file: string, ffmpegPath: string): Promise<RpcResult<{ transcoded: boolean }>> {
+	if (fileHead(file, 4).toString("ascii") === "RIFF") return { ok: true, value: { transcoded: false } };
+	const tmp = `${file}.transcode.wav`;
+	const run = await runTtsCommand([ffmpegPath, "-y", "-loglevel", "error", "-i", file, "-ar", "24000", "-ac", "1", tmp]);
+	if (!run.ok || !existsSync(tmp)) {
+		rmSync(tmp, { force: true });
+		return {
+			ok: false,
+			error: `the TTS output was not a WAV and ffmpeg could not transcode it: ${run.stderr.slice(-400) || "(no stderr)"}. Check ffmpegPath.`,
+		};
+	}
+	// Sibling temp + rename: readers see the old MP3 or the new WAV, never a
+	// half-transcoded file.
+	renameSync(tmp, file);
+	return { ok: true, value: { transcoded: true } };
+}
+
 export interface VoiceItem {
 	stepId: string;
 	file: string;
@@ -154,14 +216,7 @@ export interface VoiceOptions {
  */
 export async function voiceFlow(opts: VoiceOptions): Promise<RpcResult<VoiceReport>> {
 	if (!opts.ttsCommand || opts.ttsCommand.trim() === "") {
-		return {
-			ok: false,
-			errorKind: "needs_tts",
-			error:
-				"NEEDS_TTS — no ttsCommand is configured. Set one (config key ttsCommand / env ODOO_SDD_TTS_CMD) with the " +
-				`placeholders {text}/{textFile}/{voice}/{out}, plus a voice. Example voices for this script's language: ${voiceExamples(opts.language).join(" · ")}. ` +
-				"Cloud engines (edge-tts) send the narration text to a third party — that is the developer's explicit choice.",
-		};
+		return { ok: false, errorKind: "needs_tts", error: needsTtsMessage(opts.language) };
 	}
 	const argvTemplate = splitTemplate(opts.ttsCommand);
 	if (argvTemplate.length === 0) return { ok: false, error: "ttsCommand is empty after parsing" };
@@ -188,8 +243,17 @@ export async function voiceFlow(opts: VoiceOptions): Promise<RpcResult<VoiceRepo
 		items: [],
 	};
 
-	for (const step of opts.flow.steps) {
-		const sentence = step.procedure;
+	// The script is not only the steps: the cold-open hook is narrated FIRST
+	// (reserved stepId "_hook") and the closing line LAST ("_outro"), so the
+	// assembler can lay each over its segment without inventing step ids.
+	const script: Array<{ id: string; sentence: string | null | undefined }> = [
+		{ id: "_hook", sentence: opts.flow.hook?.text },
+		...opts.flow.steps.map((s) => ({ id: s.id, sentence: s.procedure })),
+		{ id: "_outro", sentence: opts.flow.outro?.text },
+	];
+	for (const line of script) {
+		const step = { id: line.id };
+		const sentence = line.sentence;
 		if (sentence === null || sentence === undefined || sentence.trim() === "") continue;
 		const file = posixPath("voice", opts.flow.id, `${step.id}.wav`);
 		const abs = join(opts.workspace, file);
@@ -224,6 +288,8 @@ export async function voiceFlow(opts: VoiceOptions): Promise<RpcResult<VoiceRepo
 					`Check ttsCommand placeholders — the command must write exactly {out} (got: ${file}).`,
 			};
 		}
+		const wav = await ensureWavFile(abs, opts.ffmpegPath);
+		if (!wav.ok) return { ok: false, error: `step ${step.id}: ${wav.error}` };
 		report.items.push({
 			stepId: step.id,
 			file,

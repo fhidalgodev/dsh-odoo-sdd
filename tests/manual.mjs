@@ -137,6 +137,8 @@ function fakeClient(major, options = {}) {
 				return { ok: true, value: [row({ code: "en_US" }), row({ code: "es_VE" })] };
 			}
 			if (lang === "") return { ok: false, error: "no context lang sent", errorKind: "protocol" };
+			if (m === "ir.model" && method === "search_count") return { ok: true, value: options.module ? 1 : 0 };
+			if (m === "ir.model" && method === "search_read" && JSON.stringify(args[0] ?? []).includes('"id","in"')) return { ok: true, value: [row({ id: 3, model: "sale.order" })] };
 			if (m === "ir.model") {
 				if (kwargs?.context?.model !== undefined) throw new Error("ir.model must carry context.lang");
 				// the collector filters by model; only sale.order exists here
@@ -183,6 +185,16 @@ function fakeClient(major, options = {}) {
 				return { ok: true, value: [row({ login: options.connectedUser, groups_id: options.connectedAdmin ? [[4, "Settings"], [5, "User"]] : [[5, "User"]] })] };
 			}
 			if (m === "ir.model.access") return { ok: true, value: [row({ name: "sale.order.user", group_id: [5, "User"], perm_read: true, perm_write: true, perm_create: true, perm_unlink: false })] };
+			if (m === "ir.ui.view" && options.module) {
+				return { ok: true, value: [
+					row({ id: 61, name: "Order form ext", model: "sale.order", type: "form", inherit_id: [9, "Base form"], mode: "extension", arch_db: '<form><xpath expr="//field[@name=\'partner_id\']" position="after"><field name="note"/></xpath><field name="extra_tab" position="before"/><button name="action_confirm" position="replace"/></form>' }),
+					row({ id: 62, name: "Order tree", model: "sale.order", type: "list", inherit_id: false, mode: "primary", arch_db: '<list><field name="partner_id"/><field name="date_order"/></list>' }),
+				] };
+			}
+			if (m === "ir.cron" && options.module) return { ok: true, value: [row({ id: 71, name: "Prune drafts", model_id: [3, "Sale Order"], interval_number: 1, interval_type: "days", active: true })] };
+			if (m === "base.automation" && options.module) return { ok: true, value: [row({ id: 72, name: "Auto confirm", model_id: [3, "Sale Order"], trigger: "on_write", active: true })] };
+			if (m === "mail.template" && options.module) return { ok: true, value: [row({ id: 73, name: "Confirm mail", model: "sale.order" })] };
+			if (m === "ir.rule" && options.module) return { ok: true, value: [row({ id: 74, name: "Own orders", model_id: [3, "Sale Order"], domain_force: "[('user_id','=',uid)]" })] };
 			if (m === "ir.rule") return { ok: true, value: [row({ name: "own orders", groups: [[5, "User"]], domain_force: "[('user_id','=',uid)]", active: true })] };
 			if (m === "res.groups") return { ok: true, value: [row({ full_name: "Sales/User" })] };
 			if (m === "ir.model.data") {
@@ -196,6 +208,12 @@ function fakeClient(major, options = {}) {
 						row({ module: options.module, model: "ir.actions.act_window", res_id: 51, name: "action_quotations" }),
 						row({ module: options.module, model: "ir.actions.server", res_id: 52, name: "action_server_confirm" }),
 						row({ module: options.module, model: "ir.qweb", res_id: 53, name: "not_a_menu_nor_action" }),
+						row({ module: options.module, model: "ir.ui.view", res_id: 61, name: "order_form_ext" }),
+						row({ module: options.module, model: "ir.ui.view", res_id: 62, name: "order_tree" }),
+						row({ module: options.module, model: "ir.cron", res_id: 71, name: "cron_prune" }),
+						row({ module: options.module, model: "base.automation", res_id: 72, name: "auto_confirm" }),
+						row({ module: options.module, model: "mail.template", res_id: 73, name: "tmpl_confirm" }),
+						row({ module: options.module, model: "ir.rule", res_id: 74, name: "rule_own" }),
 					] };
 				}
 				// echo the res_ids the domain asks for, so xmlids map back; a
@@ -881,6 +899,29 @@ const auditMod = await import(libUrl("manual-audit.js"));
 	check("no manual means NO User manual section and no manual finding", !noManual.detail.includes("## User manual") && !noManual.findings.some((f) => String(f.rule).startsWith("docs-manual-")));
 	rmSync(modForDocs, { recursive: true, force: true });
 	rmSync(aProj, { recursive: true, force: true });
+}
+
+// The module inventory also carries views/crons/automations/templates/rules.
+{
+	const rInv = await canon.collectCanon(fakeClient(17, { module: "sale" }), { model: "sale.order", serverVersion: "17.0", language: "es", modules: ["sale"] });
+	check("module canon collects views with adds/modifies", rInv.ok && (() => {
+		const v = rInv.canon.modules?.[0]?.views?.find((x) => x.xmlid === "sale.order_form_ext");
+		return v?.mode === "extension" && typeof v.inheritXmlid === "string" && (rInv.canon.modules?.[0]?.views ?? []).length === 2;
+	})(), JSON.stringify(rInv.ok ? rInv.canon.modules?.[0]?.views : rInv.blocked));
+	check("module canon collects crons/automations/templates/rules", rInv.ok && rInv.canon.modules?.[0]?.crons?.[0]?.xmlid === "sale.cron_prune" && rInv.canon.modules?.[0]?.automations?.[0]?.xmlid === "sale.auto_confirm" && rInv.canon.modules?.[0]?.templates?.[0]?.xmlid === "sale.tmpl_confirm" && rInv.canon.modules?.[0]?.rules?.[0]?.xmlid === "sale.rule_own");
+	check("extension view splits adds (no position) from modifies (position)", rInv.ok && (() => {
+		const v = rInv.canon.modules?.[0]?.views?.find((x) => x.xmlid === "sale.order_form_ext");
+		return v?.adds?.includes("note") && v?.modifies?.includes("extra_tab") && v?.modifies?.includes("action_confirm") && !v?.adds?.includes("extra_tab");
+	})(), JSON.stringify(rInv.ok ? rInv.canon.modules?.[0]?.views : ""));
+	check("primary view lists its adds and no modifies", rInv.ok && (() => {
+		const v = rInv.canon.modules?.[0]?.views?.find((x) => x.xmlid === "sale.order_tree");
+		return v?.mode === "primary" && v?.adds?.includes("partner_id") && (v?.modifies ?? []).length === 0;
+	})());
+	check("cron carries interval and model resolution", rInv.ok && rInv.canon.modules?.[0]?.crons?.[0]?.interval === "1 days" && rInv.canon.modules?.[0]?.crons?.[0]?.model === "sale.order");
+	check("per-model canon fingerprint is unchanged by the new arrays", (() => {
+		const fp = canon.canonFingerprint({ model: "m", serverVersion: "17.0", major: 17, language: "es", modelModules: "x", views: [], fields: [], actions: [], menus: [], access: { models: "", access: [], rules: [], groups: [] }, errors: {} });
+		return typeof fp === "string" && fp.length === 64;
+	})());
 }
 
 rmSync(proj, { recursive: true, force: true });

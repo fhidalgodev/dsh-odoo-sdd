@@ -352,8 +352,14 @@ for (const doc of docs) {
 		/translations=\s*\[/.test(raw),
 	);
 	// Config keys the code declares must appear in the documented example.
-	for (const key of ["communityRepoPath", "enterpriseRepoPath", "odooApi", "requireInstanceChoice", "specPolicyScope", "manualsMode", "manualsDir"]) {
+	for (const key of ["communityRepoPath", "enterpriseRepoPath", "odooApi", "requireInstanceChoice", "specPolicyScope", "manualsMode", "manualsDir", "ttsPreset", "videoMusic", "videoSfx"]) {
 		check(`${doc.file}: documents the ${key} config key`, raw.includes(key));
+	}
+	// The video pipeline exposes operations a reader must be able to name:
+	// audit (the coverage matrix), index (the series README gate) and the
+	// read-only highlight step kind.
+	for (const op of ["audit", "index", "highlight"]) {
+		check(`${doc.file}: documents odoo_video ${op}`, raw.includes(`odoo_video`) && raw.includes(op));
 	}
 	// The manual section is only useful if a reader can find: where a manual may
 	// live (the three modes), and that driving the UI is an action, not a default.

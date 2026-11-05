@@ -41,7 +41,8 @@ export type StepKind =
 	| "confirm"
 	| "assert"
 	| "explore"
-	| "screenshot";
+	| "screenshot"
+	| "highlight";
 
 export interface Step {
 	id: string;
@@ -59,6 +60,12 @@ export interface Step {
 	safety?: "read-only" | "action";
 	/** Expected failure and what to do about it (the `recovery` rule). */
 	note?: string;
+	/**
+	 * VIDEO only: the canon refs this step documents (menu:<xmlid>,
+	 * view:<xmlid>, field:<model>.<name>, button:<model>.<name>, cron:<xmlid>,
+	 * …). Explicit coverage, added on top of what the step covers on its own.
+	 */
+	covers?: string[];
 }
 
 /** Evidence that a screenshot was taken for one step. */
@@ -82,6 +89,27 @@ export interface Flow {
 	/** res.groups xml id the flow is written for (top-down audience). */
 	role?: string;
 	audience?: string;
+	/**
+	 * VIDEO only: the section this video belongs to in the series (the README
+	 * index groups by it; numbering follows first-appearance order). Flows
+	 * without one group under the storyboard slug.
+	 */
+	group?: string;
+	/**
+	 * VIDEO only: override for the file stem (`NN-<slug>`). Defaults to the
+	 * slugified title — set it when the file name should differ from it.
+	 */
+	slug?: string;
+	/** VIDEO only: one-line "what you'll learn" for the series README table. */
+	summary?: string;
+	/**
+	 * VIDEO only: the cold-open line — the first seconds of the video say this
+	 * before any step runs. `showStep` names the step whose tail opens the
+	 * video (default: the last one).
+	 */
+	hook?: { text: string; showStep?: string };
+	/** VIDEO only: the closing line spoken over the last frame. */
+	outro?: { text: string };
 	steps: Step[];
 	/** What to do when the flow's own action fails (recovery rule). */
 	recovery?: string;
@@ -134,6 +162,12 @@ export interface Storyboard {
 	docs?: StoryboardDocs;
 	/** Canon fingerprint this storyboard was planned against (CANON-STALE). */
 	canonFingerprint?: string;
+	/**
+	 * VIDEO only: canon refs deliberately left out of the series, ref → reason
+	 * (non-empty). A skip counts as resolved coverage — it is a decision, not
+	 * a gap — and the reason is the whole point of writing it down.
+	 */
+	videoSkip?: Record<string, string>;
 	updatedAt?: string;
 }
 
@@ -331,7 +365,7 @@ export function sha256Of(data: string | Buffer): string {
 import type { Canon, CanonModule } from "./manual-canon.js";
 
 /** Steps that only LOOK at the instance — always allowed to capture. */
-export const READ_ONLY_KINDS: readonly StepKind[] = ["goto", "menu", "wait", "assert", "explore", "screenshot", "confirm"];
+export const READ_ONLY_KINDS: readonly StepKind[] = ["goto", "menu", "wait", "assert", "explore", "screenshot", "confirm", "highlight"];
 /** Steps that MUTATE the record — gated behind `allow_actions` (Fase 3). */
 export const ACTION_KINDS: readonly StepKind[] = ["new", "fill", "select", "press", "click", "drag"];
 

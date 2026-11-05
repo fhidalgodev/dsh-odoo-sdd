@@ -29,10 +29,10 @@ interface RuleDef {
 	exceptData?: boolean;
 }
 
-const ES_FILLER =
-	/\b(en el mundo (actual|de hoy)|cabe (destacar|señalar)|es importante (destacar|señalar|mencionar)|no cabe duda|en definitiva|sin duda alguna|en resumen,|de cara a|jugando un papel (crucial|importante)|desempeña un papel)\b/gi;
-const EN_FILLER =
-	/\b(it is important to note|it's worth noting|in today's (fast-paced )?world|delve|seamless(ly)?|unlock the (power|potential)|game-?changer|leverage the power|at the end of the day|needless to say)\b/gi;
+export const ES_FILLER =
+	/\b(en el mundo (actual|de hoy)|cabe (destacar|señalar)|es importante (destacar|señalar|mencionar)|no cabe duda|en definitiva|sin duda alguna|en resumen,|de cara a|jugando un papel (crucial|importante)|desempeña un papel|como (pueden|puedes) ver|como vemos|bueno,|basicamente|en este video vamos a ver)\b/gi;
+export const EN_FILLER =
+	/\b(it is important to note|it's worth noting|in today's (fast-paced )?world|delve|seamless(ly)?|unlock the (power|potential)|game-?changer|leverage the power|at the end of the day|needless to say|as you can see|basically|in this video we will)\b/gi;
 
 const RULES: RuleDef[] = [
 	{

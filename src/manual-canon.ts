@@ -359,6 +359,56 @@ export interface CanonModelDoc {
 	unreadable?: string;
 }
 
+/** One view owned or extended by the module (ir.ui.view via ir.model.data). */
+export interface CanonModuleView {
+	xmlid: string;
+	resId: number;
+	name: string;
+	model: string;
+	type: string;
+	inheritXmlid?: string;
+	mode: "primary" | "extension";
+	/** field/button/page/filter names the arch introduces (no position attr). */
+	adds: string[];
+	/** names it modifies on the inherited view (position attr present). */
+	modifies: string[];
+	groups?: string[];
+}
+
+export interface CanonModuleCron {
+	xmlid: string;
+	resId: number;
+	name: string;
+	model?: string;
+	/** Human interval, e.g. "1 days". */
+	interval?: string;
+	active: boolean;
+}
+
+export interface CanonModuleAutomation {
+	xmlid: string;
+	resId: number;
+	name: string;
+	model?: string;
+	trigger?: string;
+	active: boolean;
+}
+
+export interface CanonModuleTemplate {
+	xmlid: string;
+	resId: number;
+	name: string;
+	model?: string;
+}
+
+export interface CanonModuleRule {
+	xmlid: string;
+	resId: number;
+	name: string;
+	model?: string;
+	domain?: string;
+}
+
 /**
  * The module-wide inventory. A per-model canon answers "what does this screen
  * do"; this one answers "what does the MODULE have", so a manual can cover
@@ -374,6 +424,16 @@ export interface CanonModule {
 	actions: CanonModuleAction[];
 	/** EVERY model the module implements, with its fields, buttons and rights. */
 	models: CanonModelDoc[];
+	/** Every view the module owns or extends (optional for legacy canons). */
+	views?: CanonModuleView[];
+	/** Scheduled jobs (ir.cron). */
+	crons?: CanonModuleCron[];
+	/** Automation rules (base.automation; [] when the addon is not installed). */
+	automations?: CanonModuleAutomation[];
+	/** Mail templates (mail.template). */
+	templates?: CanonModuleTemplate[];
+	/** Record rules (ir.rule) the module owns. */
+	rules?: CanonModuleRule[];
 }
 
 export interface CanonAccess {
@@ -817,11 +877,21 @@ async function collectModuleInventory(
 	if (!dataRows.ok) return { ok: false, blocked: dataRows.error };
 	const ownedMenus: Array<{ resId: number; name: string }> = [];
 	const ownedActions = new Map<string, Array<{ resId: number; name: string }>>();
+	const ownedViews: Array<{ resId: number; name: string }> = [];
+	const ownedCrons: Array<{ resId: number; name: string }> = [];
+	const ownedAutomations: Array<{ resId: number; name: string }> = [];
+	const ownedTemplates: Array<{ resId: number; name: string }> = [];
+	const ownedRules: Array<{ resId: number; name: string }> = [];
 	for (const r of dataRows.value) {
 		const model = String(r["model"] ?? "");
 		const resId = Number(r["res_id"]);
 		if (!Number.isFinite(resId)) continue;
 		if (model === "ir.ui.menu") ownedMenus.push({ resId, name: String(r["name"] ?? "") });
+		else if (model === "ir.ui.view") ownedViews.push({ resId, name: String(r["name"] ?? "") });
+		else if (model === "ir.cron") ownedCrons.push({ resId, name: String(r["name"] ?? "") });
+		else if (model === "base.automation") ownedAutomations.push({ resId, name: String(r["name"] ?? "") });
+		else if (model === "mail.template") ownedTemplates.push({ resId, name: String(r["name"] ?? "") });
+		else if (model === "ir.rule") ownedRules.push({ resId, name: String(r["name"] ?? "") });
 		else if (model.startsWith("ir.actions.")) {
 			const list = ownedActions.get(model) ?? [];
 			list.push({ resId, name: String(r["name"] ?? "") });
@@ -911,7 +981,147 @@ async function collectModuleInventory(
 		models.push(await collectModelDoc(client, row, major, language, groupsAttr));
 	}
 
-	return { ok: true, value: { name: module, menus, actions, models } };
+	// Technical names of the m2o `model_id` rows seen below (cron/automation/
+	// rule carry a relation to ir.model, not a char). Best effort: a failed
+	// read leaves the model undefined instead of blocking the inventory.
+	const modelIdsWanted = new Set<number>();
+	const collectModelIds = (raw: unknown): void => {
+		const id = refId(raw);
+		if (id !== undefined) modelIdsWanted.add(id);
+	};
+	const readOwnedRows = async (model: string, wanted: Array<{ resId: number; name: string }>, fields: string[]): Promise<{ ok: true; rows: Row[]; xmlByRes: Map<number, string> } | { ok: false; blocked: string }> => {
+		const ids = wanted.map((w) => w.resId);
+		let rows = await read(client, model, "search_read", [[["id", "in", ids]], fields], language, model);
+		if (!rows.ok) rows = await read(client, model, "search_read", [[["id", "in", ids]], ["name"]], language, model);
+		if (!rows.ok) return { ok: false, blocked: rows.error };
+		return { ok: true, rows: rows.value, xmlByRes: new Map(wanted.map((w) => [w.resId, `${module}.${w.name}`])) };
+	};
+
+	// Views: ownership from ir.model.data; adds/modifies come from the arch
+	// itself (a node carrying position= patches something inherited).
+	const views: CanonModuleView[] = [];
+	if (ownedViews.length > 0) {
+		const got = await readOwnedRows("ir.ui.view", ownedViews, ["name", "model", "type", "inherit_id", "mode", "arch_db"]);
+		if (!got.ok) return { ok: false, blocked: got.blocked };
+		const inheritIds = got.rows.map((r) => refId(r["inherit_id"])).filter((x): x is number => x !== undefined);
+		const inheritXml = new Map<number, string>();
+		if (inheritIds.length > 0) {
+			const rows = await read(client, "ir.model.data", "search_read", [[["model", "=", "ir.ui.view"], ["res_id", "in", inheritIds]], ["module", "name", "res_id"]], language, "ir.model.data(views)");
+			if (rows.ok) for (const r of rows.value) inheritXml.set(Number(r["res_id"]), `${r["module"]}.${r["name"]}`);
+		}
+		const viewGroups = await readRowGroups(client, "ir.ui.view", ownedViews.map((v) => v.resId), groupsAttr, language);
+		for (const r of got.rows) {
+			const adds = new Set<string>();
+			const modifies = new Set<string>();
+			const arch = String(r["arch_db"] ?? "").replace(/<!--[\s\S]*?-->/g, "");
+			for (const m of arch.matchAll(TAG_RE)) {
+				if (m[1] === "/") continue;
+				const tag = m[2].toLowerCase();
+				if (tag === "xpath" || !["field", "button", "page", "filter"].includes(tag)) continue;
+				const attrs = parseAttrs(m[3] ?? "");
+				const name = attrs["name"] ?? "";
+				if (name === "") continue;
+				(attrs["position"] !== undefined ? modifies : adds).add(name);
+			}
+			const inheritId = refId(r["inherit_id"]);
+			views.push({
+				xmlid: got.xmlByRes.get(Number(r["id"])) ?? `${module}.view_${r["id"]}`,
+				resId: Number(r["id"]),
+				name: String(r["name"] ?? ""),
+				model: String(r["model"] ?? ""),
+				type: String(r["type"] ?? ""),
+				inheritXmlid: inheritId !== undefined ? inheritXml.get(inheritId) : undefined,
+				mode: String(r["mode"] ?? "") === "extension" || inheritId !== undefined ? "extension" : "primary",
+				adds: [...adds].sort(),
+				modifies: [...modifies].sort(),
+				groups: viewGroups.get(Number(r["id"])),
+			});
+		}
+		views.sort((a, b) => a.xmlid.localeCompare(b.xmlid));
+	}
+
+	// ir.model technical names for the m2o `model_id` fields (cron/automation/rule).
+	const crons: CanonModuleCron[] = [];
+	const automations: CanonModuleAutomation[] = [];
+	const templates: CanonModuleTemplate[] = [];
+	const rules: CanonModuleRule[] = [];
+	const modelNameById = new Map<number, string>();
+	const resolveModelIds = async (rows: Row[]): Promise<void> => {
+		for (const r of rows) collectModelIds(r["model_id"]);
+		if (modelIdsWanted.size === 0) return;
+		const mrows = await read(client, "ir.model", "search_read", [[["id", "in", [...modelIdsWanted]]], ["id", "model"]], language, "ir.model(model_id)");
+		if (mrows.ok) for (const r of mrows.value) modelNameById.set(Number(r["id"]), String(r["model"] ?? ""));
+	};
+	if (ownedCrons.length > 0) {
+		const got = await readOwnedRows("ir.cron", ownedCrons, ["name", "model_id", "interval_number", "interval_type", "active"]);
+		if (!got.ok) return { ok: false, blocked: got.blocked };
+		await resolveModelIds(got.rows);
+		for (const r of got.rows) {
+			const mid = refId(r["model_id"]);
+			crons.push({
+				xmlid: got.xmlByRes.get(Number(r["id"])) ?? `${module}.cron_${r["id"]}`,
+				resId: Number(r["id"]),
+				name: String(r["name"] ?? ""),
+				model: mid !== undefined ? modelNameById.get(mid) : undefined,
+				interval: r["interval_number"] !== undefined ? `${r["interval_number"]} ${r["interval_type"] ?? ""}`.trim() : undefined,
+				active: r["active"] === true || r["active"] === 1,
+			});
+		}
+		crons.sort((a, b) => a.xmlid.localeCompare(b.xmlid));
+	}
+	if (ownedAutomations.length > 0) {
+		// base.automation only exists when the addon is installed; the xmlid
+		// rows are already evidence it is, but read through the model anyway.
+		const exists = await client.executeKw<number>("ir.model", "search_count", [[["model", "=", "base.automation"]]], { context: { lang: language } });
+		if (exists.ok && Number(exists.value) > 0) {
+			const got = await readOwnedRows("base.automation", ownedAutomations, ["name", "model_id", "trigger", "active"]);
+			if (!got.ok) return { ok: false, blocked: got.blocked };
+			await resolveModelIds(got.rows);
+			for (const r of got.rows) {
+				const mid = refId(r["model_id"]);
+				automations.push({
+					xmlid: got.xmlByRes.get(Number(r["id"])) ?? `${module}.automation_${r["id"]}`,
+					resId: Number(r["id"]),
+					name: String(r["name"] ?? ""),
+					model: mid !== undefined ? modelNameById.get(mid) : undefined,
+					trigger: typeof r["trigger"] === "string" ? r["trigger"] : undefined,
+					active: r["active"] === true || r["active"] === 1,
+				});
+			}
+			automations.sort((a, b) => a.xmlid.localeCompare(b.xmlid));
+		}
+	}
+	if (ownedTemplates.length > 0) {
+		const got = await readOwnedRows("mail.template", ownedTemplates, ["name", "model"]);
+		if (!got.ok) return { ok: false, blocked: got.blocked };
+		for (const r of got.rows) {
+			templates.push({
+				xmlid: got.xmlByRes.get(Number(r["id"])) ?? `${module}.template_${r["id"]}`,
+				resId: Number(r["id"]),
+				name: String(r["name"] ?? ""),
+				model: typeof r["model"] === "string" && r["model"] !== "" ? (r["model"] as string) : undefined,
+			});
+		}
+		templates.sort((a, b) => a.xmlid.localeCompare(b.xmlid));
+	}
+	if (ownedRules.length > 0) {
+		const got = await readOwnedRows("ir.rule", ownedRules, ["name", "model_id", "domain_force"]);
+		if (!got.ok) return { ok: false, blocked: got.blocked };
+		await resolveModelIds(got.rows);
+		for (const r of got.rows) {
+			const mid = refId(r["model_id"]);
+			rules.push({
+				xmlid: got.xmlByRes.get(Number(r["id"])) ?? `${module}.rule_${r["id"]}`,
+				resId: Number(r["id"]),
+				name: String(r["name"] ?? ""),
+				model: mid !== undefined ? modelNameById.get(mid) : undefined,
+				domain: typeof r["domain_force"] === "string" ? r["domain_force"] : undefined,
+			});
+		}
+		rules.sort((a, b) => a.xmlid.localeCompare(b.xmlid));
+	}
+
+	return { ok: true, value: { name: module, menus, actions, models, views, crons, automations, templates, rules } };
 }
 
 export async function collectCanon(client: CanonClient, request: CanonRequest): Promise<CanonResult> {

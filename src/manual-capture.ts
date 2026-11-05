@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { writeFileAtomic } from "./atomic.js";
 import { posixPath } from "./paths.js";
 import { stepSafety, type Flow, type Step } from "./manual-model.js";
+import { FX_INIT_SCRIPT } from "./video-fx.js";
 
 /** The ONLY playwright-core line this plugin is tested against. */
 export const PLAYWRIGHT_CORE_VERSION = "1.63.0";
@@ -38,6 +39,15 @@ interface PwPage {
 	fill(selector: string, value: string, options?: { timeout?: number }): Promise<void>;
 	press(selector: string, key: string, options?: { timeout?: number }): Promise<void>;
 	keyboard: { press(key: string): Promise<void> };
+	/**
+	 * The real pointer, used only while recording: `mouse.move(cx,cy,{steps})`
+	 * paints the cursor travel the overlay then replays, and `mouse.click(x,y)`
+	 * fires the mousedown wave on screen. Manual captures keep selector clicks.
+	 */
+	mouse: {
+		move(x: number, y: number, options?: { steps?: number }): Promise<void>;
+		click(x: number, y: number, options?: { button?: string; delay?: number }): Promise<void>;
+	};
 	evaluate<T>(fn: string | ((arg: unknown) => T), arg?: unknown): Promise<T>;
 	waitForSelector(selector: string, options?: { state?: string; timeout?: number }): Promise<unknown>;
 	/**
@@ -70,6 +80,8 @@ interface PwRoute {
 interface PwContext {
 	newPage(options?: { viewport?: { width: number; height: number }; deviceScaleFactor?: number }): Promise<PwPage>;
 	route(pattern: string, handler: (route: PwRoute) => Promise<void>): Promise<void>;
+	/** Runs `content` before any page script on every document — the FX overlay. */
+	addInitScript(init: { content?: string; path?: string }): Promise<void>;
 	close(): Promise<void>;
 }
 interface PwBrowser {
@@ -306,6 +318,12 @@ export interface CaptureStepResult {
 	/** Wall-clock offset of the step inside the recording (schema /2, video only). */
 	startMs?: number;
 	endMs?: number;
+	/**
+	 * The element the step acted on, in CSS px of the 1440x900 viewport —
+	 * what the assembler's zoom pushes toward. Rounded ints; absent when the
+	 * step touched no element (goto/wait/assert) or the run did not record.
+	 */
+	focus?: { x: number; y: number; w: number; h: number };
 }
 
 export interface CaptureReport {
@@ -344,6 +362,13 @@ export interface CaptureOptions {
 	 * odoo_manual never passes it.
 	 */
 	video?: boolean;
+	/**
+	 * VIDEO only: how long each step's screen should live on the live page,
+	 * keyed by step id (built from the voice report — one hold per narrated
+	 * sentence). The runner still clamps every hold to [700, 14000] ms and
+	 * subtracts the time the step itself already spent on screen.
+	 */
+	holdMsByStep?: Record<string, number>;
 	/** default viewport */
 	viewport?: { width: number; height: number };
 	/** abort signal from the host */
@@ -413,6 +438,10 @@ export async function captureFlow(opts: CaptureOptions): Promise<RpcResult<Captu
 		// that follows (routes, cookies, first page) becomes the natural
 		// lead-in of the first segment cut by the video assembler.
 		const recordingStartedAt = Date.now();
+		// The video overlay (cursor, click wave, focus ring) is recording-only:
+		// init scripts re-run on every document, so it survives navigations
+		// without the runner re-injecting anything.
+		if (videoDir) await context.addInitScript({ content: FX_INIT_SCRIPT });
 		const baseUrl = session.baseUrl.replace(/\/$/, "");
 		// ORIGIN LOCK: abort everything that leaves the Odoo base URL.
 		await context.route("**/*", (route) => {
@@ -451,15 +480,24 @@ export async function captureFlow(opts: CaptureOptions): Promise<RpcResult<Captu
 				report.steps.push({ id: step.id, kind: step.kind, status: "skipped", error: "aborted" });
 				break;
 			}
-			const startMs = Date.now() - recordingStartedAt;
+			const stepWallStart = Date.now();
+			const startMs = stepWallStart - recordingStartedAt;
 			const result = await runStep(page, step, family, { baseUrl, imagesDir, slug: opts.flow.id, zoom: opts.zoom, recording: Boolean(videoDir) });
 			if (videoDir) {
 				// A step can finish in 50 ms — faster than one frame. Hold the
-				// resulting screen for RECORD_DWELL_MS so the recording (and the
-				// frozen frame the assembler clones) shows the state the narration
-				// talks about, and so the screenshot overlay is gone before the
-				// encoder's next frame.
-				await page.waitForTimeout(RECORD_DWELL_MS).catch(() => {});
+				// resulting screen so the recording (and the frozen frame the
+				// assembler clones) shows the state the narration talks about.
+				// When the voice report gave this step a hold, the LIVE page
+				// stays for the narration length minus what the step already
+				// took — clamped so a broken wav can never stall a capture.
+				const wanted = opts.holdMsByStep?.[step.id];
+				const dwell =
+					wanted === undefined
+						? RECORD_DWELL_MS
+						: Math.min(14000, Math.max(700, wanted - (Date.now() - stepWallStart)));
+				await page.waitForTimeout(dwell).catch(() => {});
+				// A highlight ring belongs to its own hold only.
+				await page.evaluate("window.__sddFx && window.__sddFx.clearRing()").catch(() => {});
 				result.startMs = startMs;
 				result.endMs = Date.now() - recordingStartedAt;
 			}
@@ -489,6 +527,44 @@ export async function captureFlow(opts: CaptureOptions): Promise<RpcResult<Captu
 	}
 }
 
+/** One element's viewport rect in CSS px, or null when it is not on screen. */
+interface DomRect {
+	x: number;
+	y: number;
+	w: number;
+	h: number;
+}
+
+/**
+ * Scroll `selector` into view and read its viewport rect (or null when the
+ * element is not rendered). Runs in the page via an expression string — this
+ * plugin compiles without the DOM lib, and the evaluate body is the only
+ * place `document` exists.
+ */
+async function domRectOf(page: PwPage, selector: string): Promise<DomRect | null> {
+	const rect = await page.evaluate(
+		`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; ` +
+			`el.scrollIntoView({ block: "center", inline: "center" }); const r = el.getBoundingClientRect(); ` +
+			`return { x: r.x, y: r.y, w: r.width, h: r.height }; })()`,
+	);
+	return (rect as DomRect | null) ?? null;
+}
+
+/**
+ * Last-resort lookup for `highlight`: the first visible element whose own
+ * text IS the name (a menu item the selector families do not reach).
+ */
+async function domRectByText(page: PwPage, name: string): Promise<DomRect | null> {
+	const rect = await page.evaluate(
+		`(() => { const name = ${JSON.stringify(name)}; ` +
+			`for (const el of document.querySelectorAll("a,button,li,span,[role='menuitem']")) { ` +
+			`if ((el.textContent || "").trim() !== name) continue; ` +
+			`el.scrollIntoView({ block: "center", inline: "center" }); const r = el.getBoundingClientRect(); ` +
+			`if (r.width > 0 && r.height > 0) return { x: r.x, y: r.y, w: r.width, h: r.height }; } return null; })()`,
+	);
+	return (rect as DomRect | null) ?? null;
+}
+
 async function runStep(
 	page: PwPage,
 	step: Step,
@@ -496,6 +572,26 @@ async function runStep(
 	env: { baseUrl: string; imagesDir: string; slug: string; zoom: number; recording: boolean },
 ): Promise<CaptureStepResult> {
 	const base: CaptureStepResult = { id: step.id, kind: step.kind, status: "ok" };
+	// Recording only: the pointer moves visibly to the element and clicks it
+	// for real (the overlay cursor follows; the click wave fires on screen).
+	// Returns the element rect for the assembler's focus zoom — the manual
+	// path is untouched: instant selector clicks, no overlay, no focus.
+	const canMouse = typeof page.mouse?.move === "function";
+	const moveAndClick = async (selector: string, timeout = 10_000): Promise<DomRect | undefined> => {
+		const rect = env.recording && canMouse ? await domRectOf(page, selector).catch(() => null) : null;
+		if (!rect) {
+			await page.click(selector, { timeout });
+			return undefined;
+		}
+		const cx = rect.x + rect.w / 2;
+		const cy = rect.y + rect.h / 2;
+		await page.mouse.move(cx, cy, { steps: 18 }).catch(() => {});
+		await page.waitForTimeout(180);
+		await page.mouse.click(cx, cy);
+		return rect;
+	};
+	const roundRect = (r: DomRect | undefined): { x: number; y: number; w: number; h: number } | undefined =>
+		r ? { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.w), h: Math.round(r.h) } : undefined;
 	try {
 		switch (step.kind) {
 			case "goto": {
@@ -535,27 +631,38 @@ async function runStep(
 				break;
 			}
 			case "menu": {
-				await page.click(`${family.selectors.menuXmlid}[data-menu-xmlid="${step.target?.xmlid ?? ""}"]`, { timeout: 10_000 }).catch(async () => {
-					// fall back to direct navigation when the menu is not rendered
-					await page.goto(menuUrl(env.baseUrl, step.target?.xmlid ?? ""), { waitUntil: "load", timeout: 30_000 });
-				});
+				const menuSel = `${family.selectors.menuXmlid}[data-menu-xmlid="${step.target?.xmlid ?? ""}"]`;
+				// Same contract as before: direct navigation is the fallback for
+				// a menu that is not rendered — never the default path.
+				const rect = env.recording && canMouse ? (await domRectOf(page, menuSel).catch(() => null)) ?? undefined : undefined;
+				if (rect) {
+					base.focus = roundRect(rect);
+					await page.mouse.move(rect.x + rect.w / 2, rect.y + rect.h / 2, { steps: 18 }).catch(() => {});
+					await page.waitForTimeout(180);
+					await page.mouse.click(rect.x + rect.w / 2, rect.y + rect.h / 2);
+				} else {
+					await page.click(menuSel, { timeout: 10_000 }).catch(async () => {
+						// fall back to direct navigation when the menu is not rendered
+						await page.goto(menuUrl(env.baseUrl, step.target?.xmlid ?? ""), { waitUntil: "load", timeout: 30_000 });
+					});
+				}
 				await page.waitForTimeout(500);
 				break;
 			}
 			case "new": {
-				await page.click(family.selectors.newRecord, { timeout: 10_000 });
+				base.focus = roundRect(await moveAndClick(family.selectors.newRecord));
 				await page.waitForTimeout(500);
 				break;
 			}
 			case "fill": {
 				const sel = family.selectors.field(step.field ?? "");
-				await page.click(sel, { timeout: 10_000 });
+				base.focus = roundRect(await moveAndClick(sel));
 				await page.fill(sel, step.value ?? "", { timeout: 10_000 });
 				break;
 			}
 			case "select": {
 				const sel = family.selectors.field(step.field ?? "");
-				await page.click(sel, { timeout: 10_000 });
+				base.focus = roundRect(await moveAndClick(sel));
 				await page.fill(sel, step.value ?? "", { timeout: 10_000 });
 				await page.keyboard.press("Enter");
 				await page.waitForSelector(family.selectors.many2oneDropdown, { state: "hidden", timeout: 10_000 }).catch(() => {});
@@ -574,7 +681,7 @@ async function runStep(
 				const headerSelector = family.selectors.headerButton(name);
 				const tabSelector = family.selectors.notebookTab(name);
 				const selector = (await page.$(headerSelector)) ? headerSelector : tabSelector;
-				await page.click(selector, { timeout: 15_000 });
+				base.focus = roundRect(await moveAndClick(selector, 15_000));
 				await page.waitForSelector(family.selectors.loading, { state: "hidden", timeout: 20_000 }).catch(() => {});
 				break;
 			}
@@ -584,7 +691,7 @@ async function runStep(
 				return { ...base, status: "error", error: "drag steps are planned, not captured: narrate the drag and screenshot its result" };
 			}
 			case "confirm": {
-				await page.click(`${family.selectors.modal} .btn-primary`, { timeout: 10_000 });
+				base.focus = roundRect(await moveAndClick(`${family.selectors.modal} .btn-primary`));
 				await page.waitForSelector(family.selectors.modal, { state: "hidden", timeout: 20_000 }).catch(() => {});
 				break;
 			}
@@ -599,6 +706,39 @@ async function runStep(
 			case "explore": {
 				const aria = await page.ariaSnapshot({ scope: ".o_action_manager" }).catch(() => page.ariaSnapshot());
 				return { ...base, aria: aria.slice(0, 8000) };
+			}
+			case "highlight": {
+				// The visual ring belongs to the video recorder, not to this
+				// shared engine: a manual capture must not silently succeed on a
+				// step it cannot render.
+				if (!env.recording) {
+					return { ...base, status: "error", error: "highlight is implemented by the recorder (odoo_video capture)" };
+				}
+				const name = step.field ?? step.value ?? "";
+				// Field first (the common case), then a header button, a notebook
+				// tab, and finally a plain-text menu item — the same precedence a
+				// viewer reads the screen with.
+				const rect =
+					(await domRectOf(page, family.selectors.field(name)).catch(() => null)) ??
+					(await domRectOf(page, family.selectors.headerButton(name)).catch(() => null)) ??
+					(await domRectOf(page, family.selectors.notebookTab(name)).catch(() => null)) ??
+					(await domRectByText(page, name).catch(() => null));
+				if (!rect) {
+					return {
+						...base,
+						status: "error",
+						error:
+							`highlight "${name}" was not on screen (probed: field → header button → notebook tab → menu item). ` +
+							"Do not narrate what is not visible — fix the flow or the previous step.",
+					};
+				}
+				base.focus = roundRect(rect);
+				if (canMouse) await page.mouse.move(rect.x + rect.w / 2, rect.y + rect.h / 2, { steps: 18 }).catch(() => {});
+				await page.waitForTimeout(150);
+				await page.evaluate(
+					`window.__sddFx && window.__sddFx.ring(${JSON.stringify({ x: rect.x, y: rect.y, w: rect.w, h: rect.h })}, ${JSON.stringify(step.value ?? "")})`,
+				).catch(() => {});
+				break;
 			}
 			case "screenshot": {
 				// annotate → shoot → strip. The overlay is the ONLY annotation
@@ -618,7 +758,11 @@ async function runStep(
 						"d.textContent = label || ''; document.body.appendChild(d);",
 				) as unknown as (l: unknown) => void;
 				if (annotate) await page.evaluate(annotate, step.procedure ?? step.id);
+				// The FX overlay is DOM too: it would photobomb the PNG (cursor +
+				// ring over the screenshot the manual ships). Hide → shoot → show.
+				if (env.recording) await page.evaluate("window.__sddFx && window.__sddFx.hide()").catch(() => {});
 				const buf = await page.screenshot({ type: "png" });
+				if (env.recording) await page.evaluate("window.__sddFx && window.__sddFx.show()").catch(() => {});
 				await page.evaluate("document.querySelectorAll('[data-dsh-step]').forEach((n) => n.remove())");
 				const dims = verifyPng(buf, VIEWPORT.width, VIEWPORT.height);
 				if (!dims.ok) return { ...base, status: "error", error: `screenshot invalid: ${dims.error}` };

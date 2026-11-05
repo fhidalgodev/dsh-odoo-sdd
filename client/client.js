@@ -83,6 +83,26 @@ var zh = {
 	"manualsModeHint_specs": "每份手册位于 <specs>/manuals/<manual>，与记录该变更的规范放在一起。这是默认选项，也覆盖没有规范的独立工作：它绝不会因为缺少规范而被阻塞。",
 	"manualsModeHint_docs": "每份手册位于项目文档树中的 <project>/<folder>/<manual>（默认为 docs/manuals）。canon 仍然从实例读取；改变的只是文件落地位置。",
 	"manualsModeHint_module": "每份手册都是 <module>/readme/manual/<manual> 下的一个 OCA 片段，可与模块的 README 一起编译。每次调用都必须指定 module_dir。",
+	"videos": "视频",
+	"videosHint": "odoo_video 为脚本配音并把视频组装成编号系列。请选择配音、存放文件夹和收尾选项。",
+	"voice": "配音音色",
+	"voiceNone": "请选择用于视频配音的音色",
+	"voicePrivacy": "云端音色会把配音文本发送给 Microsoft —— 选择它即视为你的明确决定。",
+	"voiceCloud": "云端",
+	"voiceOffline": "离线",
+	"voiceRecommended": "推荐",
+	"voiceStyle_viral": "快节奏",
+	"voiceStyle_calm": "沉稳",
+	"voiceStyle_offline": "离线",
+	"genderMale": "男声",
+	"genderFemale": "女声",
+	"ttsCommand": "TTS 命令",
+	"ttsCommandHint": "不带 shell 的 argv；占位符 {text} {textFile} {voice} {out}。",
+	"ttsVoice": "音色",
+	"ttsVoiceHint": "引擎相关的音色字符串（例如 edge-tts 的 es-ES-AlvaroNeural，piper 的 .onnx 路径）。",
+	"videoMusic": "背景音乐",
+	"videoSfx": "音效",
+	"videosDir": "视频文件夹",
 	"policyHint": "插件的 fail-closed 守卫：在守卫条件满足之前，它会阻止任何变更（实例变更与项目文件编辑）。",
 	"docPolicy": "模块文档",
 	"docRequired": "必需",
@@ -172,6 +192,26 @@ var zh = {
 		"manualsModeHint_specs": "Each manual lives at <specs>/manuals/<manual>, next to the spec documenting the change. This is the default and also covers standalone work without a spec: it never blocks on a missing one.",
 		"manualsModeHint_docs": "Each manual lives at <project>/<folder>/<manual> inside the project's documentation tree (default docs/manuals). The canon is still read from the instance; only where files land changes.",
 		"manualsModeHint_module": "Each manual is an OCA fragment at <module>/readme/manual/<manual>, ready to compile with the module's README. Each call must name a module_dir.",
+		"videos": "Videos",
+		"videosHint": "odoo_video narrates the storyboard and assembles a numbered series. Pick the voice, the folder and the finishing touches.",
+		"voice": "Narration voice",
+		"voiceNone": "Choose a voice to narrate the videos",
+		"voicePrivacy": "Cloud voices send the narration text to Microsoft — picking one is your explicit decision.",
+		"voiceCloud": "Cloud",
+		"voiceOffline": "Offline",
+		"voiceRecommended": "Recommended",
+		"voiceStyle_viral": "viral",
+		"voiceStyle_calm": "calm",
+		"voiceStyle_offline": "offline",
+		"genderMale": "male",
+		"genderFemale": "female",
+		"ttsCommand": "TTS command",
+		"ttsCommandHint": "argv without a shell; placeholders {text} {textFile} {voice} {out}.",
+		"ttsVoice": "Voice",
+		"ttsVoiceHint": "Engine-specific voice string (e.g. es-ES-AlvaroNeural for edge-tts, a .onnx path for piper).",
+		"videoMusic": "Music bed",
+		"videoSfx": "Sound effects",
+		"videosDir": "Videos folder",
 		"policyHint": "Fail-closed plugin guards: the guard blocks every change (instance mutations and project file edits) until they are satisfied.",
 		"docPolicy": "Module documentation",
 		"docRequired": "Required",
@@ -269,7 +309,21 @@ var zh = {
 		".odoo-sdd-item:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4f6ef7);outline-offset:-2px}",
 		".odoo-sdd-empty{padding:14px;color:var(--dsw-alias-label-tertiary,#8b93a1);font-size:12px}",
 		".odoo-sdd-hint{margin-top:6px;color:var(--dsw-alias-label-tertiary,#8b93a1);font-size:12px;line-height:1.45}",
-		"@media (prefers-reduced-motion:reduce){.odoo-sdd-card,.odoo-sdd-input,.odoo-sdd-btn,.odoo-sdd-seg-btn,.odoo-sdd-item{transition:none}}"
+		// Voice preset picker: a grid of selectable cards (the seg control is a
+		// one-line choice; a preset carries a name, badges and a caveat).
+		".odoo-sdd-voices{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-top:6px}",
+		".odoo-sdd-voice{display:flex;flex-direction:column;gap:4px;text-align:left;padding:9px 10px;border:1px solid var(--dsw-alias-border-l2,#e5e7eb);border-radius:10px;background:var(--dsw-alias-bg-layer-2,#f7f8fa);color:var(--dsw-alias-label-primary,#1f2328);cursor:pointer;font:inherit;font-size:12px;transition:border-color .15s,background .15s}",
+		".odoo-sdd-voice:hover:not(:disabled){border-color:var(--dsw-alias-border-l3,#b8bec7)}",
+		".odoo-sdd-voice.is-on{border-color:var(--dsw-alias-brand-primary,#4f6ef7);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 7%,var(--dsw-alias-bg-layer-1,#fff))}",
+		".odoo-sdd-voice:disabled{opacity:.55;cursor:not-allowed}",
+		".odoo-sdd-voice:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4f6ef7);outline-offset:1px}",
+		".odoo-sdd-voice-name{font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}",
+		".odoo-sdd-voice-meta{display:flex;gap:4px;flex-wrap:wrap}",
+		".odoo-sdd-voice-tag{font-size:10px;font-weight:600;padding:1px 6px;border-radius:5px;background:var(--dsw-alias-bg-layer-3,#eceef1);color:var(--dsw-alias-label-secondary,#6b7280)}",
+		".odoo-sdd-voice-tag--rec{color:var(--dsw-alias-brand-primary,#4f6ef7);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4f6ef7) 12%,transparent)}",
+		".odoo-sdd-voice-tag--off{color:var(--dsw-alias-state-success-primary,#16a34a);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#16a34a) 12%,transparent)}",
+		".odoo-sdd-voice-note{color:var(--dsw-alias-label-tertiary,#8b93a1);line-height:1.4}",
+		"@media (prefers-reduced-motion:reduce){.odoo-sdd-card,.odoo-sdd-input,.odoo-sdd-btn,.odoo-sdd-seg-btn,.odoo-sdd-item,.odoo-sdd-voice{transition:none}}"
 	].join("");
 
 	function injectCss() {
@@ -316,6 +370,23 @@ var zh = {
 		};
 	}
 
+	/**
+	 * The voice presets offered by the picker. This MIRRORS the catalog in
+	 * src/video-voices.ts — the client bundle cannot import the compiled lib
+	 * (it loads standalone via the ModuleLoader), so the contract is kept here
+	 * and pinned by tests/client.mjs. `note` is data (shown as-is), while the
+	 * badges localize through the dictionaries.
+	 */
+	var VOICE_PRESETS = [
+		{ id: "viral-male", label: "Viral — male", style: "viral", gender: "male", cloud: true, recommended: true, note: "Fast-paced neural voice for short, punchy narration." },
+		{ id: "viral-female", label: "Viral — female", style: "viral", gender: "female", cloud: true, recommended: true, note: "Fast-paced neural voice for short, punchy narration." },
+		{ id: "calm-male", label: "Calm — male", style: "calm", gender: "male", cloud: true, note: "Even, documentary pace for long walkthroughs." },
+		{ id: "calm-female", label: "Calm — female", style: "calm", gender: "female", cloud: true, note: "Even, documentary pace for long walkthroughs." },
+		{ id: "offline-piper", label: "Offline — Piper", style: "offline", cloud: false, note: "Local engine (more robotic): the text never leaves the machine. Needs a .onnx model file." },
+		{ id: "custom", label: "Custom command", style: "offline", cloud: false, note: "Your own ttsCommand/ttsVoice, exactly as configured." }
+	];
+	var VOICE_IDS = VOICE_PRESETS.map(function (p) { return p.id; });
+
 	function readSnap(form) {
 		var s = scopeState(form).value;
 		var asStr = function (v, fb) { return typeof v === "string" ? v : fb; };
@@ -344,7 +415,13 @@ var zh = {
 			documentationPolicy: (s.documentationPolicy === "optional" || s.documentationPolicy === "off") ? s.documentationPolicy : "required",
 			documentationLanguage: asStr(s.documentationLanguage, ""),
 			manualsMode: ["specs", "docs", "module"].indexOf(s.manualsMode) >= 0 ? s.manualsMode : "specs",
-			manualsDir: asStr(s.manualsDir, "docs/manuals")
+			manualsDir: asStr(s.manualsDir, "docs/manuals"),
+			videosDir: asStr(s.videosDir, "docs/videos"),
+			ttsPreset: VOICE_IDS.indexOf(s.ttsPreset) >= 0 ? s.ttsPreset : "",
+			ttsCommand: asStr(s.ttsCommand, ""),
+			ttsVoice: asStr(s.ttsVoice, ""),
+			videoMusic: asBool(s.videoMusic, true),
+			videoSfx: asBool(s.videoSfx, true)
 		};
 	}
 
@@ -373,7 +450,13 @@ var zh = {
 			documentationPolicy: snap.documentationPolicy,
 			documentationLanguage: snap.documentationLanguage,
 			manualsMode: snap.manualsMode,
-			manualsDir: snap.manualsDir
+			manualsDir: snap.manualsDir,
+			videosDir: snap.videosDir,
+			ttsPreset: snap.ttsPreset,
+			ttsCommand: snap.ttsCommand,
+			ttsVoice: snap.ttsVoice,
+			videoMusic: snap.videoMusic,
+			videoSfx: snap.videoSfx
 		};
 	}
 
@@ -516,7 +599,13 @@ var zh = {
 				documentationPolicy: form.documentationPolicy === "optional" || form.documentationPolicy === "off" ? form.documentationPolicy : "required",
 				documentationLanguage: form.documentationLanguage || "",
 				manualsMode: ["specs", "docs", "module"].indexOf(form.manualsMode) >= 0 ? form.manualsMode : "specs",
-				manualsDir: form.manualsMode === "docs" ? (form.manualsDir || "docs/manuals") : ""
+				manualsDir: form.manualsMode === "docs" ? (form.manualsDir || "docs/manuals") : "",
+				videosDir: form.videosDir || "docs/videos",
+				ttsPreset: VOICE_IDS.indexOf(form.ttsPreset) >= 0 ? form.ttsPreset : "",
+				ttsCommand: form.ttsCommand || "",
+				ttsVoice: form.ttsVoice || "",
+				videoMusic: form.videoMusic === true,
+				videoSfx: form.videoSfx === true
 			};
 			var ops = [];
 			Object.keys(target).forEach(function (k) {
@@ -669,6 +758,41 @@ var zh = {
 					}, t("browse")) : null));
 		};
 
+		/** A plain text field (the TTS command/voice inputs, shown conditionally). */
+		var textField = function (name, label, placeholder, hint) {
+			var id = prefix + "-" + name;
+			return h("div", { className: "odoo-sdd-field" },
+				h("label", { className: "odoo-sdd-label", htmlFor: id }, label),
+				h("input", {
+					id: id, type: "text", disabled: !canWrite, className: "odoo-sdd-input odoo-sdd-input--mono",
+					value: form[name] || "", placeholder: placeholder, spellCheck: false, autoComplete: "off", onChange: onField(name)
+				}),
+				hint ? h("div", { className: "odoo-sdd-hint" }, hint) : null);
+		};
+
+		/**
+		 * One voice preset card. Clicking the selected card DESELECTS it
+		 * (ttsPreset back to ""), because "no voice chosen yet" is a real state
+		 * the engine reports as NEEDS_TTS — the picker must be able to show it.
+		 */
+		var voiceCard = function (p) {
+			var on = form.ttsPreset === p.id;
+			return h("button", {
+				key: p.id, type: "button", disabled: !canWrite,
+				className: "odoo-sdd-voice" + (on ? " is-on" : ""),
+				"aria-pressed": on,
+				onClick: function () { var patch = {}; patch.ttsPreset = on ? "" : p.id; edit(patch); }
+			},
+				h("span", { className: "odoo-sdd-voice-name" }, p.label,
+					p.recommended ? h("span", { className: "odoo-sdd-voice-tag odoo-sdd-voice-tag--rec" }, t("voiceRecommended")) : null),
+				h("span", { className: "odoo-sdd-voice-meta" },
+					h("span", { className: "odoo-sdd-voice-tag" + (p.cloud ? "" : " odoo-sdd-voice-tag--off") }, p.cloud ? t("voiceCloud") : t("voiceOffline")),
+					p.gender ? h("span", { className: "odoo-sdd-voice-tag" }, t(p.gender === "male" ? "genderMale" : "genderFemale")) : null,
+					h("span", { className: "odoo-sdd-voice-tag" }, t("voiceStyle_" + p.style))),
+				h("span", { className: "odoo-sdd-voice-note" }, p.note));
+		};
+		var selectedVoice = VOICE_PRESETS.filter(function (p) { return p.id === form.ttsPreset; })[0] || null;
+
 		var chips = String(form.allowlist || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean);
 		var methodChips = String(form.methods || "").split(",").map(function (x) { return x.trim(); }).filter(Boolean);
 		var status = h("div", {
@@ -782,6 +906,27 @@ var zh = {
 				form.manualsMode === "docs"
 					? dirField("manualsDir", t("manualsDir"), "docs/manuals")
 					: null),
+
+			h(SectionCard, { title: t("videos"), hint: t("videosHint") },
+				policyRow(t("voice"),
+					h("div", null,
+						h("div", { className: "odoo-sdd-voices" }, VOICE_PRESETS.map(voiceCard)),
+						form.ttsPreset === ""
+							? h("div", { className: "odoo-sdd-banner", style: { marginTop: "8px" } }, h("span", null, t("voiceNone")))
+							: null)),
+				selectedVoice && selectedVoice.cloud
+					? h("p", { className: "odoo-sdd-hint" }, t("voicePrivacy"))
+					: null,
+				form.ttsPreset === "custom"
+					? h("div", null,
+						textField("ttsCommand", t("ttsCommand"), "piper -m {voice} -i {textFile} -f {out}", t("ttsCommandHint")),
+						textField("ttsVoice", t("ttsVoice"), "es-ES-AlvaroNeural", t("ttsVoiceHint")))
+					: form.ttsPreset === "offline-piper"
+						? textField("ttsVoice", t("ttsVoice"), "/path/to/voice.onnx", t("ttsVoiceHint"))
+						: null,
+				policyRow(t("videoMusic"), boolSeg("videoMusic", form.videoMusic)),
+				policyRow(t("videoSfx"), boolSeg("videoSfx", form.videoSfx)),
+				dirField("videosDir", t("videosDir"), "docs/videos")),
 
 			h(SectionCard, { title: t("pipeline"), hint: t("pipelineHint") }, null),
 

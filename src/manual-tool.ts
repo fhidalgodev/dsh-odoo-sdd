@@ -588,9 +588,17 @@ export function mergeStoryboards(existing: Storyboard, planned: Storyboard): Sto
 			audience: old.audience,
 			captures: old.captures,
 			role: flow.role ?? old.role,
+			// The video-series authoring fields are the same kind of work as the
+			// narration: a re-plan offers a default (or none) but never erases a
+			// group, slug or script line the storyteller already wrote.
+			group: old.group ?? flow.group,
+			slug: old.slug ?? flow.slug,
+			summary: old.summary ?? flow.summary,
+			hook: old.hook ?? flow.hook,
+			outro: old.outro ?? flow.outro,
 			steps: flow.steps.map((step) => {
 				const prev = oldSteps.get(step.id);
-				return prev && prev.kind === step.kind ? { ...step, procedure: prev.procedure ?? null, note: step.note ?? prev.note } : step;
+				return prev && prev.kind === step.kind ? { ...step, procedure: prev.procedure ?? null, note: step.note ?? prev.note, covers: step.covers ?? prev.covers } : step;
 			}),
 		};
 	});
@@ -603,6 +611,8 @@ export function mergeStoryboards(existing: Storyboard, planned: Storyboard): Sto
 		interview: existing.interview ?? planned.interview,
 		docs: mergeDocs(planned.docs, existing.docs),
 		language: existing.language ?? planned.language,
+		// Declared coverage exceptions are authored state: a re-plan keeps them.
+		videoSkip: existing.videoSkip ?? planned.videoSkip,
 		updatedAt: planned.updatedAt,
 	};
 }

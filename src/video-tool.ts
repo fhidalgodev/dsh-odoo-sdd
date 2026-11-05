@@ -9,7 +9,7 @@
  * script: one sentence per step becomes one narration and one caption.
  */
 import { join } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { writeFileAtomic } from "./atomic.js";
 import {
@@ -19,6 +19,7 @@ import {
 	stepSafety,
 	writeStoryboard,
 	planStoryboard,
+	type Flow,
 	type ManualsMode,
 	type Storyboard,
 } from "./manual-model.js";
@@ -37,8 +38,11 @@ import {
 	validateVideoStoryboard,
 	importFromManual,
 } from "./video-model.js";
-import { voiceFlow } from "./video-voice.js";
-import { assembleVideo } from "./video-assemble.js";
+import { needsTtsMessage, readVoiceReport, voiceFlow } from "./video-voice.js";
+import { resolveVoiceEngine } from "./video-voices.js";
+import { assembleVideo, readSeries } from "./video-assemble.js";
+import { numberFlows, renderReadme, shouldWriteReadme, type SeriesMeta } from "./video-index.js";
+import { computeCoverage, formatCoverage, seedCoverageFlows } from "./video-coverage.js";
 import { presentCall } from "./present.js";
 
 export interface VideoToolDeps {
@@ -61,6 +65,12 @@ export interface VideoToolDeps {
 	ttsCommand: (exec?: unknown) => string | null;
 	/** ttsVoice config / env; the call param `voice` wins over it. */
 	ttsVoice: (exec?: unknown) => string | null;
+	/** ttsPreset config: the chosen voice character ("" = undecided). */
+	ttsPreset: (exec?: unknown) => string | null;
+	/** videoMusic config (default true): synthesized music bed under the voice. */
+	videoMusic: (exec?: unknown) => boolean;
+	/** videoSfx config (default true): synthesized UI sound effects. */
+	videoSfx: (exec?: unknown) => boolean;
 	/** ffmpeg binary (default "ffmpeg"). */
 	ffmpegPath: (exec?: unknown) => string;
 }
@@ -91,21 +101,24 @@ export function registerVideoTool(
 				"(a canon read from the instance — or imported from an existing manual with from_manual) and the " +
 				"same storyboard: every step's procedure sentence becomes the narration script and the caption. " +
 				"operation=plan drafts the storyboard (from the instance canon, or imports a manual's canon+storyboard); " +
-				"operation=voice narrates it with an externally configured TTS command; operation=capture records the " +
-				"browser session (webm + per-step timestamps) — read-only steps always, ACTION steps only with " +
-				"allow_actions=true AND confirm_destructive=true on a DISPOSABLE database; operation=assemble cuts, " +
-				"pads to the narration and muxes video/<flow>.mp4 with ffmpeg — SRT/VTT captions ALWAYS ship. " +
+				"operation=voice narrates it with the configured voice engine (ttsPreset, or a custom ttsCommand); " +
+				"operation=capture records the browser session (webm + per-step timestamps) — read-only steps always, " +
+				"ACTION steps only with allow_actions=true AND confirm_destructive=true on a DISPOSABLE database; " +
+				"operation=assemble cuts, pads to the narration and muxes <NN-slug>.mp4 at the workspace root with " +
+				"ffmpeg — SRT/VTT captions ALWAYS ship; operation=index regenerates the series README.md. " +
 				"It never writes MANUAL.md: odoo_manual stays untouched.",
 			parameters: {
 				operation: {
 					type: "string",
 					required: true,
-					enum: ["plan", "voice", "capture", "assemble"],
+					enum: ["plan", "voice", "capture", "assemble", "index", "audit"],
 					description:
 						"plan: draft the video storyboard from the instance canon, or import a manual's canon+storyboard (from_manual). " +
-						"voice: narrate each step's procedure with the configured ttsCommand (idempotent per .wav). " +
+						"voice: narrate each step's procedure with the resolved voice engine (idempotent per .wav). " +
 						"capture: run the flow in a real browser and RECORD it (video always on); ACTION steps need allow_actions=true + confirm_destructive=true. " +
-						"assemble: cut the recording by step, freeze frames to fit the narration, mux video/<flow>.mp4 + .srt/.vtt.",
+						"assemble: cut the recording by step, freeze frames to fit the narration, mux <NN-slug>.mp4 + .srt/.vtt at the workspace root. " +
+						"index: regenerate the series README.md (groups, durations, progress) and report orphan media files. " +
+						"audit: print the coverage matrix of the module (read-only — what the series still owes).",
 				},
 				slug: {
 					type: "string",
@@ -148,8 +161,8 @@ export function registerVideoTool(
 				voice: {
 					type: "string",
 					description:
-						"voice: engine-specific voice string (e.g. es-ES-AlvaroNeural for edge-tts, es_ES-sharvard-medium for piper). " +
-						"Overrides the ttsVoice config; required when the ttsCommand uses {voice} and no config voice exists.",
+						"voice: engine-specific voice string (e.g. es-ES-AlvaroNeural for edge-tts, a .onnx path for piper). " +
+						"Overrides ONLY the concrete voice of the resolved engine — the preset still picks character and rate.",
 				},
 				from_step: { type: "string", description: "capture: resume from this step id after a failure." },
 				allow_actions: {
@@ -169,7 +182,15 @@ export function registerVideoTool(
 				},
 				captions: {
 					type: "boolean",
-					description: "assemble: also BURN the captions in (drawtext, needs a known font). SRT/VTT always ship regardless.",
+					description: "assemble: BURN the captions in (drawtext; default true, needs a known font). SRT/VTT always ship regardless.",
+				},
+				music: {
+					type: "boolean",
+					description: "assemble: synthesized music bed with voice ducking (default: config videoMusic).",
+				},
+				sfx: {
+					type: "boolean",
+					description: "assemble: synthesized UI sfx per step kind (default: config videoSfx).",
 				},
 			},
 			output: {
@@ -187,7 +208,7 @@ export function registerVideoTool(
 				render: (_args: unknown, value: unknown) => [{ type: "text", text: (value as { detail: string }).detail }],
 			},
 			async execute(args: {
-				operation: "plan" | "voice" | "capture" | "assemble";
+				operation: "plan" | "voice" | "capture" | "assemble" | "index" | "audit";
 				slug?: string;
 				from_manual?: string;
 				model?: string;
@@ -208,6 +229,8 @@ export function registerVideoTool(
 				zoom?: number;
 				browser?: "auto" | "chromium" | "chrome" | "msedge";
 				captions?: boolean;
+				music?: boolean;
+				sfx?: boolean;
 			}, exec?: unknown) {
 				const projectRoot = deps.projectRoot(exec);
 				const slug =
@@ -229,9 +252,11 @@ export function registerVideoTool(
 					return { ok: false, operation: args.operation, summary: "BLOCKED", artifacts, detail: `BLOCKED — ${ws.blocked}` };
 				}
 				if (args.operation === "plan") return planOp(args, ws.dir, slug, deps, artifacts, projectRoot, exec);
-				if (args.operation === "voice") return voiceOp(args, ws.dir, slug, deps, artifacts);
+				if (args.operation === "voice") return voiceOp(args, ws.dir, slug, deps, artifacts, exec);
 				if (args.operation === "capture") return captureOp(args, ws.dir, slug, deps, artifacts, exec);
-				return assembleOp(args, ws.dir, slug, deps, artifacts);
+				if (args.operation === "index") return indexOp(args, ws.dir, slug, deps, artifacts);
+				if (args.operation === "audit") return auditOp(ws.dir, slug, artifacts);
+				return assembleOp(args, ws.dir, slug, deps, artifacts, exec);
 			},
 		}),
 	);
@@ -339,12 +364,16 @@ async function planOp(
 			// The manual storyboard had no language pinned: resolve it now and
 			// pin it (the video's language is fixed at plan time).
 			sb.language = args.language ?? deps.configuredLanguage(exec) ?? "en_US";
-			writeStoryboard(dir, sb);
 		}
+		const grouped = assignGroups(sb);
+		const seeded = seedCoverageFlows(sb, readVideoCanonSurface(dir) ?? { actionXmlids: [], menuXmlids: [] });
+		writeStoryboard(dir, sb);
 		artifacts.push(`${slug}/storyboard.json`, `${slug}/canon.json`);
 		const findings = validateVideoStoryboard(sb, readVideoCanonSurface(dir));
 		lines.push(`Imported from manual "${args.from_manual}": ${imported.value.flows} flow(s), ${imported.value.steps} step(s), ${imported.value.narrated} narrated.`);
 		lines.push(`Language: ${sb.language} (inherited from the manual — narration and captions use it).`);
+		if (grouped > 0) lines.push(`Groups: ${grouped} flow(s) got a section name from the menu/model heuristic — re-group by feature if it fits the series better.`);
+		if (seeded > 0) lines.push(`Coverage: ${seeded} flow(s) seeded for the module's uncovered refs — narrate their steps (or videoSkip with a reason).`);
 		lines.push(...findingLines(findings));
 		lines.push("");
 		lines.push("Next: fill any missing procedure sentence (the script), then voice → capture → assemble.");
@@ -426,6 +455,8 @@ async function planOp(
 	const sb = existing ? mergeStoryboards(existing, planStoryboard(canon, slug)) : planStoryboard(canon, slug);
 	sb.canonFingerprint = fingerprint;
 	sb.language = existing?.language ?? args.language ?? deps.configuredLanguage(exec) ?? canon.language;
+	const grouped = assignGroups(sb);
+	const seeded = seedCoverageFlows(sb, readVideoCanonSurface(dir) ?? { actionXmlids: [], menuXmlids: [] });
 	writeStoryboard(dir, sb);
 	artifacts.push(`${slug}/storyboard.json`);
 
@@ -433,6 +464,8 @@ async function planOp(
 	const steps = sb.flows.reduce((a, f) => a + f.steps.length, 0);
 	lines.push(`Storyboard planned from the canon: ${sb.flows.length} flow(s), ${steps} step(s), fingerprint ${fingerprint.slice(0, 12)}….`);
 	lines.push(`Language: ${sb.language} (write every procedure sentence in it — it is the narration AND caption script).`);
+	if (grouped > 0) lines.push(`Groups: ${grouped} flow(s) got a section name from the menu/model heuristic — re-group by feature if it fits the series better.`);
+	if (seeded > 0) lines.push(`Coverage: ${seeded} flow(s) seeded for the module's uncovered refs — narrate their steps (or videoSkip with a reason).`);
 	lines.push(...findingLines(findings));
 	lines.push("");
 	lines.push("Next: write ONE sentence per step (procedure), then voice → capture → assemble per flow.");
@@ -442,6 +475,37 @@ async function planOp(
 function findingLines(findings: { severity: string; rule: string; message: string; flow?: string; step?: string }[]): string[] {
 	if (findings.length === 0) return ["No findings."];
 	return findings.map((f) => `- [${f.severity}] ${f.rule}${f.flow ? ` (${f.flow}${f.step ? `/${f.step}` : ""})` : ""}: ${f.message}`);
+}
+
+/**
+ * The section a planned flow most likely belongs to, as a FIRST guess the
+ * storyteller can re-group from (they may organize by feature, not by menu).
+ * A menu flow titles itself after the menu path ("App / Section / Screen"),
+ * so its section is the path's second segment — the first is the app itself;
+ * a model flow belongs under its model's name. Anything else is left for the
+ * author (GROUP-MISSING names it). An existing group is NEVER overwritten.
+ */
+function guessFlowGroup(flow: Flow): string | undefined {
+	if ((flow.group ?? "").trim() !== "") return undefined;
+	if (flow.kind === "menu") {
+		const segments = (flow.title ?? "").split(" / ").map((s) => s.trim()).filter((s) => s !== "");
+		return segments.length >= 3 ? segments[1] : segments[0] || undefined;
+	}
+	if (flow.kind === "model") return flow.model ?? (flow.title.trim() !== "" ? flow.title : undefined);
+	return undefined;
+}
+
+/** Fill flow.group where the heuristic can — never overwrite the author's. */
+function assignGroups(sb: Storyboard): number {
+	let assigned = 0;
+	for (const flow of sb.flows) {
+		const group = guessFlowGroup(flow);
+		if (group) {
+			flow.group = group;
+			assigned += 1;
+		}
+	}
+	return assigned;
 }
 
 // ---------------------------------------------------------------------------
@@ -460,12 +524,36 @@ async function voiceOp(
 	if (!loaded.ok) return loaded.result;
 	const got = needFlow(loaded.sb, args.flow, "voice", artifacts);
 	if (!got.ok) return got.result;
+	// The engine is resolved HERE (the tool layer): a preset supplies both the
+	// command template and the concrete voice; the call param `voice`
+	// overrides only that voice string, never the chosen engine.
+	const engine = resolveVoiceEngine({
+		ttsPreset: deps.ttsPreset(exec),
+		ttsCommand: deps.ttsCommand(exec),
+		ttsVoice: args.voice ?? deps.ttsVoice(exec),
+		language: loaded.sb.language,
+	});
+	if (!engine) {
+		return { ok: false, operation: "voice", summary: "NEEDS_TTS", artifacts, detail: needsTtsMessage(loaded.sb.language) };
+	}
+	if (engine.presetId === "offline-piper" && !engine.voice) {
+		return {
+			ok: false,
+			operation: "voice",
+			summary: "NEEDS_TTS",
+			artifacts,
+			detail:
+				"NEEDS_TTS — the offline-piper preset needs ttsVoice set to the piper .onnx MODEL FILE (e.g. " +
+				"ttsVoice=/path/to/es_ES-sharvard-medium.onnx, or the voice param of this call). " +
+				"Pick another preset to use a cloud engine instead.",
+		};
+	}
 	const res = await voiceFlow({
 		workspace: dir,
 		flow: got.flow,
 		language: loaded.sb.language,
-		ttsCommand: deps.ttsCommand(exec),
-		voice: args.voice ?? deps.ttsVoice(exec),
+		ttsCommand: engine.command,
+		voice: engine.voice,
 		ffmpegPath: deps.ffmpegPath(exec),
 	});
 	if (!res.ok) {
@@ -565,6 +653,19 @@ async function captureOp(
 	const opened = await resolveBrowser(pw.value.chromium, browserChoice, headed);
 	if (!opened.ok) return { ok: false, operation: "capture", summary: "NEEDS_BROWSER", artifacts, detail: opened.error };
 
+	// When the voice already exists each step holds the live page for its
+	// narration (+ tail), so the recording carries real screen time instead of
+	// the fixed dwell — the assembler then freezes almost nothing. _hook and
+	// _outro are not steps, so they never enter the map.
+	const voice = readVoiceReport(dir, got.flow.id);
+	const holdMsByStep: Record<string, number> = {};
+	for (const item of voice?.items ?? []) {
+		if (item.stepId.startsWith("_")) continue;
+		if (item.durationSeconds !== null && item.durationSeconds > 0) {
+			holdMsByStep[item.stepId] = Math.round(item.durationSeconds * 1000 + 350);
+		}
+	}
+
 	try {
 		const res = await captureFlow({
 			session: session.value,
@@ -577,6 +678,7 @@ async function captureOp(
 			zoom: args.zoom ?? 1,
 			workspace: dir,
 			video: true,
+			...(Object.keys(holdMsByStep).length > 0 ? { holdMsByStep } : {}),
 		});
 		if (!res.ok) return { ok: false, operation: "capture", summary: "BLOCKED", artifacts, detail: `BLOCKED — ${res.error}` };
 		if (!res.value.video) {
@@ -616,6 +718,9 @@ async function captureOp(
 					failed
 						? `Stopped at step ${failed.id} (${failed.kind}): ${failed.error ?? "error"} — the video will truncate here; fix the storyboard and re-run with from_step="${failed.id}".`
 						: "All steps captured.",
+					Object.keys(holdMsByStep).length > 0
+						? `Holds: ${Object.keys(holdMsByStep).length} step(s) held for their narration length (voice report present).`
+						: "Holds: fixed dwell per step — voice first, then capture: each step is held for its narration.",
 					"Next: operation=assemble for this flow (voice first if you want narration).",
 				].join("\n"),
 		};
@@ -625,11 +730,51 @@ async function captureOp(
 }
 
 // ---------------------------------------------------------------------------
-// assemble — ffmpeg cut + freeze + mux, captions always
+// assemble — ffmpeg cut + freeze + mux into the series layout, captions always
 // ---------------------------------------------------------------------------
 
+/**
+ * Regenerate the series README from the CURRENT storyboard + series.json,
+ * and report `NN-*` media files at the workspace root that no current flow
+ * owns (renamed or deleted flows leave them behind; the tool never deletes
+ * them on its own — a README update is safe, a media file is user data).
+ */
+function refreshSeriesIndex(dir: string, sb: Storyboard): { readme: string | null; orphans: string[]; gapCount: number; error?: string } {
+	const numbered = numberFlows(sb);
+	if (!numbered.ok) return { readme: null, orphans: [], gapCount: 0, error: numbered.error };
+	const series = readSeries(dir);
+	const meta: SeriesMeta = {};
+	for (const item of numbered.items) {
+		const report = series.flows[item.flow.id];
+		meta[item.flow.id] = {
+			file: report?.file ?? `${item.stem}.mp4`,
+			durationSeconds: report?.durationSeconds ?? null,
+			steps: item.flow.steps.length,
+		};
+	}
+	const coverage = computeCoverage(sb, readVideoCanonSurface(dir) ?? { actionXmlids: [], menuXmlids: [] });
+	let readme: string | null = null;
+	if (shouldWriteReadme(numbered.items)) {
+		writeFileAtomic(
+			join(dir, "README.md"),
+			renderReadme({
+				sb,
+				items: numbered.items,
+				meta,
+				coverage: { gaps: coverage.gaps.map((g) => ({ ref: g.ref, label: g.label })), total: coverage.items.length, covered: coverage.items.filter((i) => coverage.covered.has(i.ref) || coverage.skipped[i.ref] !== undefined).length },
+			}),
+		);
+		readme = "README.md";
+	}
+	const stems = new Set(numbered.items.map((i) => i.stem));
+	const orphans = readdirSync(dir)
+		.filter((name) => /^\d{2,}-.+\.(mp4|srt|vtt)$/i.test(name))
+		.filter((name) => !stems.has(name.replace(/\.(mp4|srt|vtt)$/i, "")));
+	return { readme, orphans, gapCount: coverage.gaps.length };
+}
+
 async function assembleOp(
-	args: { flow?: string; captions?: boolean },
+	args: { flow?: string; captions?: boolean; music?: boolean; sfx?: boolean },
 	dir: string,
 	slug: string,
 	deps: VideoToolDeps,
@@ -640,18 +785,49 @@ async function assembleOp(
 	if (!loaded.ok) return loaded.result;
 	const got = needFlow(loaded.sb, args.flow, "assemble", artifacts);
 	if (!got.ok) return got.result;
+	const numbered = numberFlows(loaded.sb);
+	if (!numbered.ok) return { ok: false, operation: "assemble", summary: "BLOCKED", artifacts, detail: `BLOCKED — ${numbered.error}` };
+	const numberedFlow = numbered.items.find((i) => i.flow.id === got.flow.id);
+	if (!numberedFlow) {
+		return { ok: false, operation: "assemble", summary: "BLOCKED", artifacts, detail: `BLOCKED — flow ${got.flow.id} is not in the storyboard numbering.` };
+	}
+	const previousFile = readSeries(dir).flows[got.flow.id]?.file;
+	// The series context the video dresses itself with: "NN · Group — Title"
+	// (no redundant group when it IS the storyboard name) and the next title
+	// for the outro's "next" pill.
+	const groupName = numberedFlow.group === loaded.sb.slug ? "" : numberedFlow.group;
+	const chapterLabel = `${String(numberedFlow.number).padStart(2, "0")} · ${groupName !== "" ? `${groupName} — ` : ""}${numberedFlow.flow.title}`;
+	const idx = numbered.items.findIndex((i) => i.flow.id === got.flow.id);
+	const nextTitle = idx >= 0 && idx + 1 < numbered.items.length ? numbered.items[idx + 1].flow.title : undefined;
 	const res = await assembleVideo({
 		workspace: dir,
 		flow: got.flow,
 		language: loaded.sb.language,
 		ffmpegPath: deps.ffmpegPath(exec),
-		captions: args.captions === true,
+		captions: args.captions !== false,
+		stem: numberedFlow.stem,
+		previousFile,
+		title: got.flow.title,
+		chapterLabel,
+		nextTitle,
+		music: args.music ?? deps.videoMusic(exec),
+		sfx: args.sfx ?? deps.videoSfx(exec),
 	});
 	if (!res.ok) {
 		const kind = res.errorKind === "needs_video_capture" ? "NEEDS_VIDEO_CAPTURE" : res.errorKind === "needs_ffmpeg" ? "NEEDS_FFMPEG" : "BLOCKED";
 		return { ok: false, operation: "assemble", summary: kind, artifacts, detail: `${kind} — ${res.error}` };
 	}
-	artifacts.push(`${slug}/${res.value.file}`, `${slug}/video/${got.flow.id}.srt`, `${slug}/video/${got.flow.id}.vtt`, `${slug}/video/video.json`);
+	artifacts.push(
+		`${slug}/${res.value.file}`,
+		`${slug}/${numberedFlow.stem}.srt`,
+		`${slug}/${numberedFlow.stem}.vtt`,
+		`${slug}/video/video.json`,
+		`${slug}/video/series.json`,
+	);
+	// The README belongs to the SERIES: with more than one flow every assemble
+	// refreshes it, so the guide is never stale relative to the files on disk.
+	const indexed = loaded.sb.flows.length > 1 ? refreshSeriesIndex(dir, loaded.sb) : { readme: null, orphans: [] as string[], gapCount: 0 };
+	if (indexed.readme) artifacts.push(`${slug}/${indexed.readme}`);
 	return {
 		ok: true,
 		operation: "assemble",
@@ -660,12 +836,78 @@ async function assembleOp(
 		detail:
 			[
 				`Video: ${res.value.file} (${(res.value.bytes / 1_048_576).toFixed(2)} MiB, language track ${(res.value.language ?? "en").split(/[-_]/)[0]}).`,
-				`Captions: video/${got.flow.id}.srt + .vtt (always shipped — they are also the export path to external video platforms).`,
+				`Assembly: ${[res.value.hook ? "hook" : null, res.value.outro ? "outro" : null, "zoom", res.value.captions ? "captions" : null, res.value.music ? "music" : null, res.value.sfx ? "sfx" : null].filter(Boolean).join(", ")}${res.value.loudnessLufs !== undefined ? ` — ${res.value.loudnessLufs.toFixed(1)} LUFS` : ""}.`,
+				`Captions: ${numberedFlow.stem}.srt + .vtt next to the video (always shipped — they are also the export path to external video platforms).`,
 				res.value.truncatedAt ? `TRUNCATED at step ${res.value.truncatedAt}: the capture failed there; fix the storyboard and re-run capture with from_step.` : "Full flow assembled.",
 				res.value.captionsNote ? `NOTE: ${res.value.captionsNote}` : "",
+				indexed.readme ? "Series guide: README.md regenerated." : "",
+				indexed.error ? `WARNING: the series index could not be refreshed: ${indexed.error}` : "",
+				(indexed.orphans ?? []).length > 0 ? `ORPHANS at the workspace root: ${(indexed.orphans ?? []).join(", ")} — no current flow owns them; delete them by hand if obsolete.` : "",
 				"The raw webm under video/raw/ is kept: re-assembly (other voice, other timing) never needs a re-capture.",
 			]
 				.filter(Boolean)
 				.join("\n"),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// index — regenerate the series README and report orphan media
+// ---------------------------------------------------------------------------
+
+async function indexOp(
+	_args: { flow?: string },
+	dir: string,
+	slug: string,
+	_deps: VideoToolDeps,
+	artifacts: string[],
+): Promise<VideoToolResult> {
+	const loaded = needStoryboard(dir, "index", slug, artifacts);
+	if (!loaded.ok) return loaded.result;
+	const indexed = refreshSeriesIndex(dir, loaded.sb);
+	if (indexed.error) return { ok: false, operation: "index", summary: "BLOCKED", artifacts, detail: `BLOCKED — ${indexed.error}` };
+	if (indexed.readme) artifacts.push(`${slug}/${indexed.readme}`);
+	const series = readSeries(dir);
+	const assembled = loaded.sb.flows.filter((f) => series.flows[f.id]).length;
+	// The index still writes the README (its coverage section names the
+	// gaps), but a series with uncovered refs is not DONE — ok:false is how
+	// the caller learns that without parsing prose.
+	const gaps = indexed.gapCount;
+	const detail =
+		[
+			indexed.readme ? `Series guide written to ${slug}/README.md.` : "A README needs at least 2 videos — write more flows and re-run index.",
+			`Assembled: ${assembled}/${loaded.sb.flows.length} flow(s) (see video/series.json).`,
+			gaps > 0 ? `COVERAGE: ${gaps} ref(s) still uncovered — run operation=audit for the matrix, then narrate, cover or videoSkip them.` : "Coverage: 100%.",
+			indexed.orphans.length > 0 ? `ORPHANS at the workspace root: ${indexed.orphans.join(", ")} — media files no current flow owns; delete them by hand if obsolete.` : "No orphan media files.",
+		].join("\n");
+	return {
+		ok: gaps === 0,
+		operation: "index",
+		summary: gaps > 0 ? `COVERAGE GAPS ${gaps}` : indexed.readme ? `README.md regenerated (${assembled}/${loaded.sb.flows.length} video(s) assembled).` : `Series too small for a README (${loaded.sb.flows.length} flow) — nothing written.`,
+		artifacts,
+		detail,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// audit — the coverage matrix, read-only
+// ---------------------------------------------------------------------------
+
+async function auditOp(dir: string, slug: string, artifacts: string[]): Promise<VideoToolResult> {
+	const loaded = needStoryboard(dir, "audit", slug, artifacts);
+	if (!loaded.ok) return loaded.result;
+	const surface = readVideoCanonSurface(dir);
+	const coverage = computeCoverage(loaded.sb, surface ?? { actionXmlids: [], menuXmlids: [] });
+	const total = coverage.items.length;
+	const covered = coverage.items.filter((i) => coverage.covered.has(i.ref) || coverage.skipped[i.ref] !== undefined).length;
+	const findings = validateVideoStoryboard(loaded.sb, surface);
+	return {
+		ok: true,
+		operation: "audit",
+		summary: `coverage ${covered}/${total}`,
+		artifacts,
+		detail:
+			total === 0
+				? "No module inventory in canon.json — coverage does not apply to a per-model canon."
+				: [...formatCoverage(coverage), "", ...findingLines(findings)].join("\n"),
 	};
 }

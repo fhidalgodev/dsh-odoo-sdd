@@ -482,7 +482,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | `odoo_docs` | 模块文档，可**独立使用**（不需要 spec、阶段、checkpoint 或实例），因此一个已有模块也能直接被文档化：`check`（把 OCA 片段映射到 Diátaxis、版本方案、changelog、`index.html`、docstring、xpath 注释、OWL 指令 → 带 `file:line` 的 ERROR/WARN）、`plan`、`scaffold`（只创建、绝不覆盖的骨架）和 `report`（持久化 `docs-report.md`；只有当不存在仍是骨架的片段时才是 APPROVED）。对已发布模块的任何改动都必须写 changelog 条目。 |
 | `odoo_security_scan` | 本地静态安全审查（不需要实例）：拼接式原生 SQL、`eval`/`exec`/`pickle`、硬编码密钥、没有理由的 `sudo()`、`auth="none"`、被关闭的 CSRF、QWeb `t-raw`。发现项带有 `file:line` + 修复提示；任何 ERROR 都会阻止 `DONE`。 |
 | `odoo_manual` | 基于证据的叙述式用户手册。**`canon`** 从实例读取一个模型的功能 canon（视图、header 按钮以及显示它们的状态、必填字段、notebook 页、动作、菜单、访问规则、用户组、`raise UserError`/`ValidationError` 与 `_sql_constraints` 位置）并连同指纹持久化：手册只能描述 canon 说过的话。**`plan`** 把 canon 变成一份分镜（流程、有序步骤、每步一句话）：再次运行会**合并**，已经写好的叙述、截图和散文都会保留。**`lint`** 用 canon 校验分镜和渲染后的散文（`CANON-STALE`、`TARGET-UNKNOWN`、`PLACEHOLDER-UNBOUND`、`ACTS-MISSING`、`RECOVERY-MISSING`、西语和英语的 AI 腔模式 → 带确切行号的 ERROR/WARN）。**`explore`** 返回真实屏幕的 ARIA 快照，因此不会去猜任何 xml id 或标签。**`capture`** 驱动浏览器：只读步骤总是执行，而动作步骤（`new`/`fill`/`select`/`press`/`click`）需要 `allow_actions=true` —— 守卫会把它当作一次变更。**`render`** 写出手册和一个 Apps 页面（只创建，除非 `overwrite=true`）。**`import`** 把 Playwright `codegen` 录制转换成一条流程，并拒绝任何携带凭据的录制。手册存放在「设置」指定的位置（`manualsMode`：`specs` 与 spec 同目录、`docs` 在 `manualsDir` 下、`module` 作为模块 `readme/manual/` 下的 OCA 片段）；没有 spec 的独立工作绝不会因此被阻塞。**`canon`** 接收访谈——`as_user`（手册写给谁）、`admin`、`module`/`modules` 与 `groups`——并把它记录下来：清单随即覆盖该模块拥有的**每一个菜单和每一个动作**（菜单打开的动作，即使是原生的），每个模型都会带上它的字段（标签、类型、必填、关联/选择、用户组）、表单和列表按钮、statusbar 状态以及按用户组的访问行。**`plan`** 为每个菜单开一条流程、为每个用户组的巡览开一条流程，并播种一份 `docs` 清单：每个字段、每个按钮一格空白。**`lint`** 在菜单、动作、字段、按钮、工作流或用户组仍未被覆盖时报告 `MODULE-COVERAGE`、`INTERVIEW-MISSING`、`FIELD-COVERAGE`、`BUTTON-COVERAGE`、`WORKFLOW-COVERAGE` 与 `GROUP-COVERAGE` —— 带理由的 `skip` 属于已记录的覆盖，而 `ROLE-UNVERIFIED` 只是警告，因为截图是以已连接用户的身份跑的。**`render`** 为每个模型加一张表（类型、必填、关联、用户组，以及你写的那句话）并为每个访问组加一节。只要分镜已存在，`odoo_docs` 就会在文档结论中加入 `## User manual` 一节 —— 没有分镜时则保持不变。 |
-| `odoo_video` | 流程的配音**视频**文档，与 `odoo_manual` 并列的独立工具（绝不写 `MANUAL.md`）。**`plan`** 从实例 canon 起草分镜 —— 或者用 `from_manual=<slug>` 复制既有手册的 `canon.json` + `storyboard.json`，让叙述式手册直接变成视频脚本而无需重读实例（import-once：拒绝覆盖已有的视频分镜，因为视频侧的编辑会丢失）。**`voice`** 用**你**配置的 TTS 命令朗读每一步的 `procedure` 句子（`ttsCommand`，无 shell 执行；占位符 `{text}`/`{textFile}`/`{voice}`/`{out}`），每个被叙述的步骤一个 `voice/<flow>/<step>.wav` —— 幂等：已存在的 `.wav` 绝不重新生成（删掉即可重做），`voice.json` 记录语音与语言。**`capture`** 在真实浏览器中执行流程，录制**始终开启**：`video/raw/<flow>.webm` + 每步 `startMs`/`endMs` 时间戳 + PNG 定格，与手册相同的门禁（动作步骤需要 `allow_actions=true` 且 `confirm_destructive=true`，且只在一次性数据库上；`from_step` 在失败后恢复）。**`assemble`** 按步剪辑 webm、按配音时长定格（tpad）、用 ffmpeg 封装 `video/<flow>.mp4`（h264 + aac、faststart），并且**总是**交付 `.srt` + `.vtt` —— 通往外部视频平台的导出路径；可选 `captions=true` 把字幕烧录进画面（drawtext）。原始 webm 会保留：换一种语音或节奏重新装配绝不需要重新录制。语言在 `plan` 时固定（参数 > 手册 > `documentationLanguage` > `en_US`）；未配置 TTS → `NEEDS_TTS` 并附按语言的示例语音（离线 piper-tts、云端 edge-tts —— 云端 TTS 会把配音文本发给其提供商，这是开发者的显式决定）。 |
+| `odoo_video` | 流程的配音**视频**文档，与 `odoo_manual` 并列的独立工具（绝不写 `MANUAL.md`）。**`plan`** 从实例 canon 起草分镜 —— 或用 `from_manual=<slug>` 复制既有手册的 `canon.json` + `storyboard.json`（import-once：拒绝覆盖已有视频分镜）。带模块 canon 时还会**播种覆盖**：静默的 `v*` `highlight` 流程，使系列覆盖模块全部菜单、动作、视图、字段、按钮、页面、定时任务、自动化、模板、规则与向导。**`audit`** 打印覆盖矩阵 —— 只有**已叙述**的步骤（或 `covers[]`）才算覆盖，播种未叙述的步骤为 pending，`videoSkip`（ref → 理由）是有记录的跳过；`VIDEO-COVERAGE` 在读到 100% 前是 ERROR。**`voice`** 按 `_hook` → 步骤 → `_outro` 朗读，使用你选择的语音预设（`ttsPreset`：推荐 `viral-male`/`viral-female`、`calm-male`/`calm-female`、`offline-piper`、或 `custom` 自带 `ttsCommand`/`ttsVoice`）—— 无默认值：`NEEDS_TTS` 列出预设并提示云端预设会把配音文本发给 Microsoft（开发者的显式决定）。**`capture`** 在真实浏览器中执行流程，录制**始终开启**：`video/raw/<flow>.webm`、每步 `startMs`/`endMs`/`focus`、仅在录制时注入光标/点击波纹/焦点环覆盖层，且每步按配音时长在**活动页面**上保持 —— `highlight` 步骤圈出字段、按钮、标签页或菜单项，不可见时报错。**`assemble`** 在工作区根目录写出编号系列：`NN-标题.mp4|.srt|.vtt`（按 `flow.group` 分组），对每个 `focus` 做入场缩放、默认烧录药丸字幕（`captions=false` 关闭）、章节药丸、hook 标题卡、outro "下一步" 药丸、合成音效 + 闪避音乐床（参数/配置 `music`/`sfx`、`videoMusic`/`videoSfx`），以及两遍 `loudnorm` 至 −14 LUFS。**`index`** 重新生成 `README.md`（分组、时长、进度勾选框、覆盖率小节、推荐路线），报告孤立的 `NN-*` 媒体文件，并在系列不完整时返回 `ok:false`/`COVERAGE GAPS n`。语言在 `plan` 时固定；lint（`HOOK-LONG`、`SENTENCE-LONG`、`FILLER`、`COVERS-UNKNOWN`……）保证脚本口语化。 |
 | `odoo_tests` | 管道的测试一侧，可**独立使用**（不需要 spec、阶段、checkpoint 或实例）：`check` 扫描 Python 测试中安装日志看不到的问题 —— `tests/__init__.py` 从未导入的 `tests/*.py`（Odoo 只加载被导入的模块，因此该测试从不运行）、不是 Odoo 测试用例的类、没有任何断言或断言恒真的 `test_*`、被吞掉的异常、`time.sleep`、显式 skip、测试内的 `cr.commit()`（破坏每个测试的回滚）、17+ 上的 `SavepointCase`、没有 `start_tour` 的 `HttpCase`，并以断言密度作为参考指标。`plan` 把 spec 的每个验收标准映射到提到它的测试（按 AC id 或按其需求的 `REQ-<AREA>-NN`），并列出没有任何测试的标准。`scaffold` 为每个未覆盖的标准写一个 **RED stub**（函数体抛出 `NotImplementedError`，绝不是空洞的通过），只创建且幂等，并追加 import 让文件真正被加载。 |
 | `sdd_handoff` | 在运行收尾时写入 `specs/<id>/handoff.md`（最终阶段、结论、决策、blockers、checkpoint、**完整的**按 spec 的数据日志、生效配置、下一步）。只列出**本 spec** 的 checkpoint（同一容器中其他 spec 的只计数、不列举），并概括项目级的变更允许列表而不是整段粘贴。 |
 | `odoo_config` | 读取或更新持久化配置，并回答**"我现在在哪个项目里？"**：解析出的根目录、它的来源（会话 cwd / 已配置 / 进程 cwd）、specs 基础目录、生效的 spec 目录和正在使用的配置文件。 |
@@ -769,6 +769,9 @@ spec*：没有自己指针的会话，在它足够新（< 12 小时）且该 spe
         manualsMode: specs              # specs（spec 同目录）| docs（在 manualsDir 下）| module（readme/manual/）
         manualsDir: docs/manuals        # 仅当 manualsMode 为 docs 时使用
         videosDir: docs/videos          # odoo_video 写入 <slug>/ 工作区的位置（项目根目录内）
+        ttsPreset: ''                   # viral-male | viral-female | calm-male | calm-female | offline-piper | custom
+        videoMusic: true                # 装配时合成的配音闪避音乐床
+        videoSfx: true                  # 装配时按步骤类型合成的 UI 音效
         ttsCommand: ''                  # 仅配音视频。外部 TTS，无 shell；占位符
                                         #   {text} {textFile} {voice} {out}。示例：
                                         #   edge-tts（云端）: edge-tts --voice {voice} --text {text} --write-media {out}
@@ -776,6 +779,11 @@ spec*：没有自己指针的会话，在它足够新（< 12 小时）且该 spe
         ttsVoice: ''                    # 作为 {voice} 传入；示例语音: es-ES-ÁlvaroNeural（edge）/ es_ES-sharvard-medium（piper）
         ffmpegPath: ffmpeg              # 视频装配（系统 ffmpeg，4.x+；已验证 7.x），ffprobe 在其旁边
 ```
+
+设置面板中的 **Videos** 卡片承载相同的键：`ttsPreset` 的预设选择器
+（默认不预选 —— 未选择时 `NEEDS_TTS`；带推荐与云端/离线徽标，选中云端预设时
+显示隐私提示）、`videoMusic`/`videoSfx` 开关与 `videosDir` 目录，以及预设为
+`custom`/`offline-piper` 时需要的命令字段。
 
 > [!IMPORTANT]
 > 有两个配置存储，更具体的那一个获胜：**Settings**（用户级，
@@ -852,7 +860,10 @@ traceback、门禁拒绝理由和补救说明。
 | 面板改动似乎被忽略 | 项目的 `.sdd/config.json` 优先级高于全局 Settings 层 | `odoo_config mode=read` 显示生效值 |
 | 某个 spec 目录"找不到" | 你在另一个项目文件夹里 | 在会话中打开那个项目的文件夹 |
 | `odoo_manual capture` 返回 `NEEDS_BROWSER` | 找不到 Chromium/Chrome/Edge | `npx playwright-core install chromium`，或者传 `browser: "chrome"` |
-| `odoo_video voice` 返回 `NEEDS_TTS` | 未配置 `ttsCommand`（或模板需要 `{voice}` 而未设置语音） | 配置 `ttsCommand`（消息里带按语言的示例语音：离线 piper-tts、云端 edge-tts）和 `ttsVoice` |
+| `odoo_video voice` 返回 `NEEDS_TTS` | 未选择 `ttsPreset` 且未配置 `ttsCommand`（或 piper/custom 缺少 `ttsVoice`） | 选择一个预设（`viral-*`/`calm-*` 为云端、`offline-piper` 本地、`custom` 使用你的命令），需要时设置 `ttsVoice` —— 消息会列出全部预设 |
+| `odoo_video index` 返回 `COVERAGE GAPS n` | 模块清单中还有已叙述步骤未覆盖的引用（菜单/动作/视图/字段/按钮/页面/定时任务/自动化/模板/规则/向导） | 运行 `operation=audit` 查看矩阵，然后叙述播种的 `v*` 步骤、添加 `covers[]`，或用 `videoSkip` 注明理由 |
+| `odoo_video index` 返回 `ORPHANS` | 工作区根目录存在没有任何当前流程认领的 `NN-*.mp4/.srt/.vtt` 文件（流程被重新编号或删除） | 若已废弃请手动删除 —— index 绝不自行删除媒体文件 |
+| `odoo_video capture` 返回 `highlight "<name>" was not on screen` | 元素不可见：字段 → header 按钮 → notebook 标签页 → 菜单项全部没找到 | 修正流程或上一步 —— 绝不叙述屏幕上没有的东西 |
 | `odoo_video assemble` 返回 `NEEDS_FFMPEG` | 系统 `ffmpeg`（配置 `ffmpegPath`）缺失或无法运行 | 安装 ffmpeg 4.x+（已验证 7.x），或把 `ffmpegPath` 指向其绝对路径 |
 | `odoo_video assemble` 返回 `NEEDS_VIDEO_CAPTURE` | 该流程没有带视频条目的 `capture.json`（截图时未录制、是另一条流程、或从未跑过） | 先运行 `odoo_video operation=capture flow=<id>` —— 装配总是读取录制的 webm |
 | `odoo_video capture` 返回 `no view rendered within 30s` | 该 URL 不是 webclient 动作，或浏览器无法访问该实例 | 先用 `odoo_manual operation=explore` 打开该动作一次，或修正 target 的 xmlid；截图会等待视图及其记录，绝不仅等待 `load` |
@@ -907,10 +918,14 @@ JS ModuleLoader bundle，它贡献 **Odoo SDD** 设置区块。
 | `src/manual-model.ts` | 手册工作区解析（3 种模式，带包含性检查）、带稳定 id 的分镜读写、从 canon 出计划、canon 规则校验、步骤安全分级 |
 | `src/manual-canon.ts` | 功能 canon：XML arch 分词器（17 的 `invisible=` 表达式、14–16 的 `attrs`/`states`、statusbar 状态）、模块错误扫描、按版本区分的读取清单（≤15 用 `load_views`，16+ 用 `get_views`，19 中 `groups_id`→`group_ids`）以及一枚稳定的指纹 |
 | `src/manual-tool.ts` | `odoo_manual` 工具：canon / plan / lint / render / explore / capture / import，带只创建策略和失败后恢复的路径 |
-| `src/video-model.ts` | 视频工作区解析（`videosDir`，含包含性检查）、视频所需的轻量分镜校验（canon 过期、空流程、未知目标、静音步骤），以及 `from_manual` 导入（复制 canon + 分镜，绝不碰手册） |
-| `src/video-voice.ts` | 配音：带引号的模板拆分、无 shell 的 TTS spawn、按步骤幂等的 `.wav`、带实测时长的 `voice.json`、`NEEDS_TTS` 补救用的按语言示例语音 |
-| `src/video-assemble.ts` | ffmpeg 装配：按步骤剪辑 + 按配音时长定格（tpad）、concat demuxer、faststart 封装、总是交付的 SRT/VTT、可选烧录字幕、`video.json` 报告 |
-| `src/video-tool.ts` | `odoo_video` 工具：plan（实例或 `from_manual`）/ voice / capture（录制始终开启，与手册相同的门禁）/ assemble |
+| `src/video-model.ts` | 视频工作区解析（`videosDir`，含包含性检查）、分镜 lint（canon 过期、含 `highlight` 的未知目标、静音步骤、hook/outro/句子长度/口水词警告、`VIDEO-COVERAGE`/`COVERS-UNKNOWN`），以及 `from_manual` 导入 |
+| `src/video-voices.ts` | 语音预设：目录（`viral`/`calm`/`offline`/`custom`，推荐在前、云端徽标、按语言语音）与 `resolveVoiceEngine`（预设 > 命令的优先级，piper 需要 `ttsVoice`） |
+| `src/video-voice.ts` | 配音：hook/步骤/outro 输出 `_hook`/`_outro`/步骤 `.wav`，带引号的模板拆分、无 shell TTS、非 RIFF 输出转码为真 WAV、`NEEDS_TTS` 列出预设与隐私提示 |
+| `src/video-coverage.ts` | 模块清单 → 覆盖引用、已叙述脚本能到达的范围（自动 + `covers[]` + `videoSkip`）、`audit` 矩阵，以及 `seedCoverageFlows`（幂等的 `v*` 静默 `highlight` 草稿流程） |
+| `src/video-index.ts` | `slugify`、`numberFlows`（分组顺序、`NN-` 茎、碰撞报错）、`series.json` 合并、本地化的系列 `README.md`（分组、表格、进度、路线、覆盖率小节） |
+| `src/video-fx.ts` | 录制时注入的覆盖层：Shadow DOM 光标、点击波纹与焦点环；每次截图前隐藏 |
+| `src/video-assemble.ts` | ffmpeg 装配：hook/步骤/outro 片段、朝向 `focus` 的 zoompan、药丸字幕 + 章节/"下一步" 药丸、按步骤音效混合、闪避音乐床、两遍 loudnorm 至 −14 LUFS、SRT/VTT、`series.json`/`video.json` 报告 |
+| `src/video-tool.ts` | `odoo_video` 工具：plan（实例或 `from_manual`，播种覆盖）/ audit / voice / capture（录制始终开启，按配音时长保持活动页面）/ assemble / index |
 | `src/prose-lint.ts` | 西语和英语的建议性散文规则（AI 腔模式、句子长度、可读性）以及 OCA 格式所依赖的两条结构性 ERROR 规则 |
 | `src/manual-render.ts` | 确定性的 Markdown + Apps 页面渲染、逐文件 `sha256`，以及一个绝不会被覆盖（除非 `overwrite=true`）的手工编辑文件 |
 | `src/manual-capture.ts` | 浏览器引擎：源锁定、只读优先的步骤门禁、带标注的 PNG（1440×900，标注层已移除）、ARIA 快照、`capture.json` |

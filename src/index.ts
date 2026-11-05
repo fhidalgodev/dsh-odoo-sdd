@@ -253,9 +253,12 @@ export const Config = z.object({
 	manualsMode: markVolatile(z.string()),
 	manualsDir: markVolatile(z.string()),
 	videosDir: markVolatile(z.string()),
+	ttsPreset: markVolatile(z.string()),
 	ttsCommand: markVolatile(z.string()),
 	ttsVoice: markVolatile(z.string()),
 	ffmpegPath: markVolatile(z.string()),
+	videoMusic: markVolatile(z.boolean()),
+	videoSfx: markVolatile(z.boolean()),
 });
 
 /** Effective deployment configuration after validation. */
@@ -341,6 +344,12 @@ interface OdooSddConfig {
 	/** Folder for odoo_video workspaces, relative to the project root (default docs/videos). */
 	videosDir?: string;
 	/**
+	 * The voice PRESET odoo_video narrates with (viral-male, viral-female,
+	 * calm-male, calm-female, offline-piper, custom). Empty means undecided:
+	 * a preset wins over ttsCommand, and nothing configured → NEEDS_TTS.
+	 */
+	ttsPreset?: string;
+	/**
 	 * The TTS command odoo_video narrates with, argv-split (no shell), with the
 	 * placeholders {text}/{textFile}/{voice}/{out}. Empty → NEEDS_TTS.
 	 */
@@ -349,6 +358,10 @@ interface OdooSddConfig {
 	ttsVoice?: string;
 	/** ffmpeg binary for odoo_video assembly (default "ffmpeg"). */
 	ffmpegPath?: string;
+	/** Synthesized music bed under the narration (default true). */
+	videoMusic?: boolean;
+	/** Synthesized UI sound effects in the assembly (default true). */
+	videoSfx?: boolean;
 }
 
 /** Minimal structural view of the host tool registry. */
@@ -367,6 +380,15 @@ interface HostContextServices {
 }
 
 /** A visible plain-text content block (dsh-llm TextBlock). */
+/** "1"/"true" → true, "0"/"false" → false, anything else → undefined (env only). */
+const envBool = (v: string | undefined): boolean | undefined => {
+	if (v === undefined) return undefined;
+	const s = v.trim().toLowerCase();
+	if (s === "1" || s === "true" || s === "yes") return true;
+	if (s === "0" || s === "false" || s === "no") return false;
+	return undefined;
+};
+
 function text(value: string): { type: "text"; text: string } {
 	return { type: "text", text: value };
 }
@@ -1090,9 +1112,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		manualsMode: pickString(config.manualsMode, "specs"),
 		manualsDir: pickString(config.manualsDir, "docs/manuals"),
 		videosDir: pickString(config.videosDir, "docs/videos"),
+		ttsPreset: pickString(config.ttsPreset, ""),
 		ttsCommand: pickString(config.ttsCommand, ""),
 		ttsVoice: pickString(config.ttsVoice, ""),
 		ffmpegPath: pickString(config.ffmpegPath, "ffmpeg"),
+		videoMusic: pickBool(config.videoMusic, true),
+		videoSfx: pickBool(config.videoSfx, true),
 	};
 	// Live source of the Settings section. The host hands us a THUNK returning
 	// the currently authoritative value (the resolved user scope while attached,
@@ -3128,9 +3153,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			manualsMode: { type: "string", enum: ["specs", "docs", "module"], description: "Where odoo_manual keeps the manuals: specs (default, next to the spec), docs (a documentation tree under manualsDir) or module (OCA fragments under the module's readme/manual/)." },
 			manualsDir: { type: "string", description: "Folder for the manuals in docs mode, relative to the project root (default docs/manuals)." },
 			videosDir: { type: "string", description: "Folder for odoo_video workspaces, relative to the project root (default docs/videos)." },
+			ttsPreset: { type: "string", enum: ["", "viral-male", "viral-female", "calm-male", "calm-female", "offline-piper", "custom"], description: "Voice preset for odoo_video narration: the character (viral/calm, male/female) picks a concrete neural voice per storyboard language; offline-piper is local (needs ttsVoice = .onnx model path); custom uses ttsCommand. Empty = undecided (NEEDS_TTS until a preset or ttsCommand exists). Cloud presets send the narration text to Microsoft." },
 			ttsCommand: { type: "string", description: "The TTS command odoo_video narrates with, argv-split (no shell), placeholders {text}/{textFile}/{voice}/{out}. Example (cloud): edge-tts --voice {voice} --text {text} --write-media {out}. Example (offline): piper --model {voice} --output_file {out} (uses {textFile})." },
-			ttsVoice: { type: "string", description: "Engine-specific voice string passed as {voice} (e.g. es-ES-AlvaroNeural for edge-tts, es_ES-sharvard-medium for piper)." },
+			ttsVoice: { type: "string", description: "Engine-specific voice string passed as {voice} (e.g. es-ES-AlvaroNeural for edge-tts, a .onnx path for piper)." },
 			ffmpegPath: { type: "string", description: "ffmpeg binary for the video assembly (default ffmpeg)." },
+			videoMusic: { type: "boolean", description: "Synthesized music bed under the narration in odoo_video assemblies (default true)." },
+			videoSfx: { type: "boolean", description: "Synthesized UI sound effects in odoo_video assemblies (default true)." },
 			maxCheckpoints: { type: "number", description: "How many checkpoints to retain." },
 		},
 		output: {
@@ -3174,9 +3202,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					manualsMode: { type: "string", required: true },
 					manualsDir: { type: "string", required: true },
 					videosDir: { type: "string", required: true },
+					ttsPreset: { type: "string", required: true },
 					ttsCommand: { type: "string", required: true },
 					ttsVoice: { type: "string", required: true },
 					ffmpegPath: { type: "string", required: true },
+					videoMusic: { type: "boolean", required: true },
+					videoSfx: { type: "boolean", required: true },
 							maxCheckpoints: { type: "number", required: true },
 						},
 					},
@@ -3243,9 +3274,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			manualsMode?: string;
 			manualsDir?: string;
 			videosDir?: string;
+			ttsPreset?: string;
 			ttsCommand?: string;
 			ttsVoice?: string;
 			ffmpegPath?: string;
+			videoMusic?: boolean;
+			videoSfx?: boolean;
 		}, exec?: unknown) {
 			/** Project the stored JSON onto the known, typed configuration shape. */
 			const normalize = (data: Record<string, unknown>) => {
@@ -3292,9 +3326,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 					})(),
 					manualsDir: asString(data["manualsDir"], "docs/manuals"),
 					videosDir: asString(data["videosDir"], "docs/videos"),
+					ttsPreset: asString(data["ttsPreset"], ""),
 					ttsCommand: asString(data["ttsCommand"], ""),
 					ttsVoice: asString(data["ttsVoice"], ""),
 					ffmpegPath: asString(data["ffmpegPath"], "ffmpeg"),
+					videoMusic: typeof data["videoMusic"] === "boolean" ? data["videoMusic"] : true,
+					videoSfx: typeof data["videoSfx"] === "boolean" ? data["videoSfx"] : true,
 				};
 			};
 
@@ -3444,9 +3481,21 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.manualsMode !== undefined) updates["manualsMode"] = args.manualsMode;
 			if (args.manualsDir !== undefined) updates["manualsDir"] = args.manualsDir;
 			if (args.videosDir !== undefined) updates["videosDir"] = args.videosDir;
+			if (args.ttsPreset !== undefined) {
+				const preset = args.ttsPreset.trim();
+				if (!["", "viral-male", "viral-female", "calm-male", "calm-female", "offline-piper", "custom"].includes(preset)) {
+					return {
+						mode: "set" as string, ok: false, config: normalize(current), resolved: resolution(),
+						detail: `ttsPreset must be one of viral-male, viral-female, calm-male, calm-female, offline-piper, custom (or empty), not ${JSON.stringify(args.ttsPreset)}. Nothing was written.`,
+					};
+				}
+				updates["ttsPreset"] = preset;
+			}
 			if (args.ttsCommand !== undefined) updates["ttsCommand"] = args.ttsCommand;
 			if (args.ttsVoice !== undefined) updates["ttsVoice"] = args.ttsVoice;
 			if (args.ffmpegPath !== undefined) updates["ffmpegPath"] = args.ffmpegPath;
+			if (args.videoMusic !== undefined) updates["videoMusic"] = args.videoMusic;
+			if (args.videoSfx !== undefined) updates["videoSfx"] = args.videoSfx;
 			if (args.maxCheckpoints !== undefined) updates["maxCheckpoints"] = args.maxCheckpoints;
 			if (Object.keys(updates).length === 0) {
 				return {
@@ -3591,9 +3640,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			})(),
 			manualsDir: cfgString("manualsDir", "docs/manuals"),
 			videosDir: cfgString("videosDir", "docs/videos"),
+			ttsPreset: cfgString("ttsPreset", ""),
 			ttsCommand: cfgString("ttsCommand", ""),
 			ttsVoice: cfgString("ttsVoice", ""),
 			ffmpegPath: cfgString("ffmpegPath", "ffmpeg"),
+			videoMusic: cfgBool("videoMusic", true),
+			videoSfx: cfgBool("videoSfx", true),
 		};
 	};
 
@@ -5098,9 +5150,12 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			return { communityPath: cfg.communityRepoPath || undefined, enterprisePath: cfg.enterpriseRepoPath || undefined };
 		},
 		webSession: webSessionDep,
-		videosDir: (exec) => effectiveConfig(exec).videosDir,
+		videosDir: (exec) => effectiveConfig(exec).videosDir || process.env["ODOO_SDD_VIDEOS_DIR"] || "docs/videos",
+		ttsPreset: (exec) => effectiveConfig(exec).ttsPreset || process.env["ODOO_SDD_TTS_PRESET"] || null,
 		ttsCommand: (exec) => effectiveConfig(exec).ttsCommand || process.env["ODOO_SDD_TTS_CMD"] || null,
 		ttsVoice: (exec) => effectiveConfig(exec).ttsVoice || process.env["ODOO_SDD_TTS_VOICE"] || null,
+		videoMusic: (exec) => envBool(process.env["ODOO_SDD_VIDEO_MUSIC"]) ?? effectiveConfig(exec).videoMusic,
+		videoSfx: (exec) => envBool(process.env["ODOO_SDD_VIDEO_SFX"]) ?? effectiveConfig(exec).videoSfx,
 		ffmpegPath: (exec) => effectiveConfig(exec).ffmpegPath || process.env["ODOO_SDD_FFMPEG"] || "ffmpeg",
 	});
 

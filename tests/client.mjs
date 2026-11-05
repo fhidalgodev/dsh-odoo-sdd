@@ -380,6 +380,48 @@ check("the panel reads the manuals keys from the snapshot", /manualsMode:\s*\["s
 check("the panel maps the manuals keys into the form", /manualsMode:\s*snap\.manualsMode/.test(source) && /manualsDir:\s*snap\.manualsDir/.test(source));
 check("the panel persists the manuals keys and hides the folder outside docs mode", /manualsMode:\s*\["specs", "docs", "module"\]\.indexOf\(form\.manualsMode\)/.test(source) && /form\.manualsMode === "docs"\s*\?\s*dirField\("manualsDir"/.test(source));
 check("the manuals card explains each mode", /manualsModeHint_specs/.test(source) && /manualsModeHint_docs/.test(source) && /manualsModeHint_module/.test(source));
+// The Videos card is the same round-trip contract as the manuals card: read
+// the snapshot, carry it through the form, persist every key — a control that
+// only renders is a lie (same regression class as specPolicyScope).
+check(
+	"the panel reads the video keys from the snapshot",
+	/videosDir:\s*asStr\(s\.videosDir, "docs\/videos"\)/.test(source) &&
+		/ttsPreset:\s*VOICE_IDS\.indexOf\(s\.ttsPreset\)/.test(source) &&
+		/ttsCommand:\s*asStr\(s\.ttsCommand, ""\)/.test(source) &&
+		/ttsVoice:\s*asStr\(s\.ttsVoice, ""\)/.test(source) &&
+		/videoMusic:\s*asBool\(s\.videoMusic, true\)/.test(source) &&
+		/videoSfx:\s*asBool\(s\.videoSfx, true\)/.test(source),
+);
+check(
+	"the panel maps the video keys into the form",
+	/videosDir:\s*snap\.videosDir/.test(source) && /ttsPreset:\s*snap\.ttsPreset/.test(source) && /videoMusic:\s*snap\.videoMusic/.test(source) && /videoSfx:\s*snap\.videoSfx/.test(source),
+);
+check(
+	"the panel persists the video keys (preset validated against the catalog)",
+	/videosDir:\s*form\.videosDir/.test(source) &&
+		/ttsPreset:\s*VOICE_IDS\.indexOf\(form\.ttsPreset\)/.test(source) &&
+		/ttsCommand:\s*form\.ttsCommand/.test(source) &&
+		/ttsVoice:\s*form\.ttsVoice/.test(source) &&
+		/videoMusic:\s*form\.videoMusic === true/.test(source) &&
+		/videoSfx:\s*form\.videoSfx === true/.test(source),
+);
+check(
+	"the Videos card renders the preset picker, the empty-choice banner and the privacy note",
+	/SectionCard, \{ title: t\("videos"\)/.test(source) &&
+		/odoo-sdd-voices/.test(source) &&
+		/form\.ttsPreset === ""/.test(source) &&
+		/voicePrivacy/.test(source) &&
+		/voiceRecommended/.test(source),
+);
+check("the custom command fields only show for the custom/piper presets", /form\.ttsPreset === "custom"/.test(source) && /form\.ttsPreset === "offline-piper"/.test(source));
+check(
+	"the voice catalog mirrors the server contract (ids, cloud flags, recommended)",
+	(() => {
+		const ids = [...source.matchAll(/id: "([a-z-]+)", label:/g)].map((m) => m[1]);
+		return ["viral-male", "viral-female", "calm-male", "calm-female", "offline-piper", "custom"].every((id) => ids.includes(id));
+	})(),
+	"expected the six preset ids in client.js",
+);
 check(
 	"the narrow-input rule is actually shipped in the stylesheet",
 	/\.odoo-sdd-input--short\{width:min\(100%,200px\)\}/.test(source),

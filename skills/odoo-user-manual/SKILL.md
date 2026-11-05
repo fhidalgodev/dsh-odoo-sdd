@@ -122,3 +122,13 @@ alt).
 Report: phases completed, open lint findings (rule + severity),
 artifacts written and what is still pending human approval. When delegating to
 subagents ask for SUMMARIES, not context dumps.
+
+## After the render — the video question (ask ONCE, never assume)
+
+When the manual is rendered, ASK the user ONCE whether they also want a
+narrated video of its flows. If the answer is no (or nothing), close here: the
+manual is complete on its own. If the answer is yes, the video is a SEPARATE
+piece of work that builds on this one: call `odoo_video operation=plan
+from_manual=<slug> ...` (it copies the canon and the storyboard; it never
+touches the manual) and follow the `odoo-video` skill. Do not capture, voice
+or assemble anything before the user answers.

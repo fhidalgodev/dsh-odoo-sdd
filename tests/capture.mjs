@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { join } from "node:path";
@@ -188,6 +188,28 @@ try {
 			target: { kind: "action", xmlid: "sale.action_quotations" },
 		});
 		check("explore returns an aria snapshot", aria.ok === true && /action_manager|Quotations/.test(aria.value.aria), aria.ok ? aria.value.aria.slice(0, 80) : aria.error);
+		// video:true — the recording contract odoo_video relies on. Recording
+		// needs Playwright's BUNDLED ffmpeg (a download separate from the
+		// browser): without it this is a visible SKIP, not a failure, unless
+		// the run declares it must hold the video contract.
+		const vres = await capture.captureFlow({
+			session: { baseUrl, sessionId: "fakesession123", uid: 2 },
+			browser,
+			family: fam17.value.family,
+			flow: { id: "f-vid", title: "Recorded look", steps: [{ id: "s01", kind: "goto", procedure: null, target: { kind: "action", xmlid: "sale.action_quotations" } }, { id: "s02", kind: "screenshot", procedure: null }] },
+			allowActions: false,
+			headed: false,
+			zoom: 1,
+			workspace: outDir,
+			video: true,
+		});
+		const needsRecorder = !vres.ok && /BUNDLED ffmpeg/.test(vres.error);
+		if (needsRecorder && process.env["ODOO_SDD_REQUIRE_BROWSER"] !== "1") {
+			console.log("  SKIP  video:true recording — Playwright's bundled ffmpeg is not installed (npx playwright install ffmpeg)");
+		} else {
+			check("video:true records a webm under video/raw", vres.ok === true && vres.value.schema === "dsh-odoo-sdd/capture/2" && existsSync(join(outDir, "video", "raw", "f-vid.webm")) && statSync(join(outDir, "video", "raw", "f-vid.webm")).size > 0, vres.ok ? JSON.stringify(vres.value.video) : vres.error);
+			check("every recorded step carries startMs/endMs offsets", vres.ok === true && vres.value.steps.every((s) => typeof s.startMs === "number" && typeof s.endMs === "number" && s.endMs >= s.startMs));
+		}
 		rmSync(outDir, { recursive: true, force: true });
 	}
 } finally {

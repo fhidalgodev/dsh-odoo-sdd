@@ -37,6 +37,7 @@ import type { TargetEnvironment } from "./credentials.js";
 import { functionalBatchReason } from "./approval-i18n.js";
 import type { ApprovalReason } from "./approval-i18n.js";
 import type { RpcErrorKind } from "./odoo-client.js";
+import { presentCall } from "./present.js";
 
 /** What a batch is allowed to do. Each scope is approved separately. */
 export type BatchScope = "discovery" | "import-prep" | "apply" | "compensate";
@@ -832,6 +833,7 @@ export function registerFunctionalTool(
 ): void {
 	ctx.tools.register(defineTool({
 		name: "odoo_functional",
+				presentCall: (args: unknown) => presentCall("odoo_functional", args),
 		description:
 			"Execute an APPROVED functional batch against the connected instance: plan, approve (native human " +
 			"approval bound to hashes), apply, status, reconcile, verify and compensate. Nothing mutates without " +

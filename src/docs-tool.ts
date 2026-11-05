@@ -38,6 +38,7 @@ import {
 	type DocsScanResult,
 } from "./docs-scan.js";
 import { resolveDocsLanguage, type ResolvedLanguage } from "./project-conventions.js";
+import { presentCall } from "./present.js";
 
 /** Live dependencies provided by the registrant. */
 export interface DocsToolDeps {
@@ -118,6 +119,7 @@ export function registerDocsTool(
 ): void {
 	ctx.tools.register(defineTool({
 		name: "odoo_docs",
+				presentCall: (args: unknown) => presentCall("odoo_docs", args),
 		description:
 			"Documentation for an Odoo module, usable ON ITS OWN (no spec, phase, checkpoint or " +
 			"connected instance required), so an existing module can simply be documented. " +

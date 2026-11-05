@@ -289,6 +289,29 @@ export interface PoMergeResult {
  * @param lang - the language code, used to complete the header.
  * @returns the merged file and a summary of what changed.
  */
+/**
+ * Give every live entry the `#. module: <name>` extracted comment.
+ *
+ * OCA's `oca-checks-po` requires that line on EVERY entry, and the POT Odoo
+ * writes itself does not emit it (checked against 19.0), so a file generated
+ * from the raw export fails that hook once per entry. The module name is the
+ * only variable involved, which is why it is applied here rather than at each
+ * call site.
+ */
+export function withModuleComment(file: PoFile, moduleName: string): PoFile {
+	const name = moduleName.trim();
+	if (name === "") return file;
+	const comment = `#. module: ${name}`;
+	return {
+		...file,
+		entries: file.entries.map((entry) => {
+			if (entry.obsolete === true) return entry;
+			const kept = entry.flags.filter((flag) => !/^#\.\s*module\s*:/.test(flag));
+			return { ...entry, flags: [comment, ...kept] };
+		}),
+	};
+}
+
 export function mergePo(existing: PoFile | null, exported: PoFile, lang: string): PoMergeResult {
 	const previous = new Map<string, PoEntry>();
 	for (const entry of existing?.entries ?? []) {

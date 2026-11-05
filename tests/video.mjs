@@ -271,6 +271,7 @@ if (realFfmpeg.status !== 0) {
 	const flowTwo = { id: "f1", title: "F", steps: [flowEs.steps[0], { id: "s02", kind: "screenshot", procedure: "Vemos el resultado final del flujo." }] };
 	const vreal = await vvoice.voiceFlow({ workspace: ew, flow: flowTwo, language: "es-ES", ttsCommand: ttsCmd, voice: "es-ES-test", ffmpegPath: "ffmpeg" });
 	check("voice over real ffprobe reports true WAV durations", vreal.ok && vreal.value.items.length === 2 && vreal.value.items.every((i) => i.durationSeconds !== null && i.durationSeconds > 0.3), JSON.stringify(vreal.ok ? vreal.value.items : vreal.error));
+	check("the voice report stores POSIX paths", vreal.ok && vreal.value.items.every((i) => /^voice\/f1\/[^\\]+\.wav$/.test(i.file)), JSON.stringify(vreal.ok ? vreal.value.items.map((i) => i.file) : null));
 	const areal = await vassemble.assembleVideo({ workspace: ew, flow: flowTwo, language: "es-ES", ffmpegPath: "ffmpeg", captions: false });
 	check("the REAL assembly produces a playable mp4", areal.ok && areal.value.file === "video/f1.mp4", JSON.stringify(areal.ok ? areal.value : areal.error));
 	if (areal.ok) {

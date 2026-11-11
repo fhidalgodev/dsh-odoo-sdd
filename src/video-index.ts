@@ -243,7 +243,7 @@ function fmtDuration(seconds: number | null): string {
 
 /** Escape a table cell: a literal `|` would split the row in two. */
 function cell(text: string): string {
-	return text.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+	return text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 }
 
 /**

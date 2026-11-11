@@ -211,13 +211,23 @@ check("a tab-pinned click is read-only, a header click is an action", uiv.uiStep
 	const prodRun = await prod.get("odoo_ui_verify").execute({ operation: "run", spec_id: "x", allow_actions: true, confirm_destructive: true });
 	check("a production environment refuses the run outright", prodRun.ok === false && /production/.test(prodRun.detail), prodRun.detail);
 
-	// NEEDS_BROWSER: read-only flows, a browser choice that cannot exist — the
-	// tool must still WRITE the report the gate reads instead of guessing.
+	// NEEDS_BROWSER: read-only flows, a browser that cannot launch — the tool
+	// must still WRITE the report the gate reads instead of guessing. The
+	// launcher is injected: runners preinstall Chrome/Edge, so "a browser
+	// choice that cannot exist" would make this check depend on the host.
 	writeFileSync(
 		join(specDir, "ui-verify", "flows.json"),
 		JSON.stringify({ schema: "dsh-odoo-sdd/ui-verify/flows/1", flows: [{ id: "f1", steps: [{ id: "s01", kind: "screenshot" }] }] }),
 	);
-	const nb = await tool.execute({ operation: "run", spec_id: "x", browser: "msedge" });
+	const noBrowser = new Map();
+	uivTool.registerUiVerifyTool(
+		{ tools: { register: (t) => noBrowser.set(t.name, t) } },
+		{
+			...mkDeps("dev"),
+			launchBrowser: async () => ({ ok: false, error: "Executable doesn't exist at /nonexistent/playwright/chromium-1234/chrome-linux/chrome" }),
+		},
+	);
+	const nb = await noBrowser.get("odoo_ui_verify").execute({ operation: "run", spec_id: "x" });
 	const nbReport = existsSync(join(specDir, "ui-verify", "report.json")) ? JSON.parse(readFileSync(join(specDir, "ui-verify", "report.json"), "utf8")) : null;
 	check("NEEDS_BROWSER still writes report.json for the gate", nb.ok === false && /NEEDS_BROWSER/.test(nb.detail) && nbReport?.verdict === "NEEDS_BROWSER", nb.detail.slice(0, 140));
 

@@ -161,6 +161,30 @@ export function functionalBatchReason(input: {
 	};
 }
 
+/** odoo_ui_verify matrix: temporary QA users for role-based UI checks. */
+export function uiVerifyUsersReason(input: {
+	specId: string;
+	logins: string[];
+	groups: string[];
+	target: string;
+	environment: string;
+}): LocalizedReason {
+	const count = String(input.logins.length);
+	return {
+		en: `Create ${count} temporary user(s) in ${input.target} (environment ${input.environment}) for the ` +
+			`role-matrix UI verification of spec ${input.specId}: login(s) ${input.logins.join(", ")} with ` +
+			`group(s) ${input.groups.join(", ")}. Each user gets a random password kept only in memory; ` +
+			"the users are deleted when the run ends. These creations bypass the approval journal.",
+		es: `¿Crear ${count} usuario(s) temporal(es) en ${input.target} (entorno ${input.environment}) para la ` +
+			`verificación UI por rol de la spec ${input.specId}: login(s) ${input.logins.join(", ")} con ` +
+			`grupo(s) ${input.groups.join(", ")}. Cada usuario recibe una contraseña aleatoria solo en memoria; ` +
+			"los usuarios se eliminan al terminar. Estas altas no pasan por el journal de aprobaciones.",
+		zh: `是否在 ${input.target}（环境 ${input.environment}）中为 spec ${input.specId} 的角色矩阵 UI 验证` +
+			`创建 ${count} 个临时用户：login ${input.logins.join(", ")}，组 ${input.groups.join(", ")}。` +
+			"每个用户获得仅保存在内存中的随机密码；运行结束时删除用户。这些创建不经过审批日志。",
+	};
+}
+
 /** odoo_import use=prepare: upload one authorised file to the temp importer. */
 export function importPrepareReason(input: { specId: string; batchId: string; file: string }): LocalizedReason {
 	return {

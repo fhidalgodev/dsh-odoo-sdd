@@ -213,6 +213,11 @@ try {
 			// docs quote, so they are POSIX on every OS: `path.join` would write
 			// `video\raw\…` on Windows and only a Windows run would notice.
 			check("the capture report stores POSIX paths", vres.ok === true && /^video\/raw\/[^\\]+\.webm$/.test(vres.value.video.file), vres.ok ? JSON.stringify(vres.value.video) : vres.error);
+			// The FX overlay is injected at document_start, before the parser
+			// creates <html>: mounting it on `document` there makes the overlay
+			// the document ROOT and the recording shows a blank page. Every step
+			// must have seen the real Odoo page.
+			check("the overlay never swallows the page it records", vres.ok === true && vres.value.steps.every((s) => s.status === "ok"), vres.ok ? JSON.stringify(vres.value.steps.map((s) => `${s.id}:${s.status}:${s.error ?? ""}`)) : vres.error);
 		}
 		rmSync(outDir, { recursive: true, force: true });
 
@@ -225,10 +230,14 @@ try {
 		const fxCtx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
 		await fxCtx.addInitScript({ content: FX_INIT_SCRIPT });
 		const fxPage = await fxCtx.newPage();
-		await fxPage.setContent(PAGE_HTML);
+		// A REAL navigation, not setContent: init scripts run at document_start
+		// on every document, and setContent rewrites the document the overlay
+		// was mounted into. A parsed page is what a recording actually meets.
+		await fxPage.goto(`${baseUrl}/web`, { waitUntil: "load" });
 		check("the injected page exposes window.__sddFx", await fxPage.evaluate("typeof window.__sddFx === 'object' && typeof window.__sddFx.ring === 'function'"));
+		check("the injected page is the real page, not the overlay alone", await fxPage.evaluate("document.querySelector('.o_form_view') !== null && document.getElementById('__sddFxHost') !== null"));
 		await fxPage.evaluate("window.__sddFx.ring({x:100,y:100,w:50,h:30}, 'label')");
-		check("ring() paints inside the shadow host", await fxPage.evaluate("document.getElementById('__sddFxHost')?.shadowRoot?.querySelector('.ring') !== null"));
+		check("ring() paints inside the shadow host", await fxPage.evaluate("Boolean(document.getElementById('__sddFxHost')?.shadowRoot?.lastElementChild?.querySelector('.ring'))"));
 		const shotBuf = await (async () => { await fxPage.evaluate("window.__sddFx.hide()"); const b = await fxPage.screenshot({ type: "png" }); await fxPage.evaluate("window.__sddFx.show()"); return b; })();
 		check("the overlay host hides around a screenshot", shotBuf.length > 100 && (await fxPage.evaluate("document.getElementById('__sddFxHost').style.display === ''")) === true);
 		await fxCtx.close();

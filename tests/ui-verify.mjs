@@ -540,7 +540,7 @@ const server = createServer((req, res) => {
 				/* keep the default */
 			}
 			const sessionId = `sess-${login}`;
-			res.writeHead(200, { "content-type": "application/json", "set-cookie": `session_id=${sessionId}; Path=/; HttpOnly` });
+			res.writeHead(200, { "content-type": "application/json", "set-cookie": `session_id=${sessionId}; Path=/; HttpOnly; Secure; SameSite=Lax` });
 			res.end(JSON.stringify({ jsonrpc: "2.0", id: null, result: { uid: 7, session_id: sessionId } }));
 		});
 		return;

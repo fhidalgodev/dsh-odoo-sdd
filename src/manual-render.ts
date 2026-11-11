@@ -14,6 +14,16 @@ import { sha256Of } from "./manual-model.js";
 import type { ProseFinding } from "./prose-lint.js";
 import { lintProse } from "./prose-lint.js";
 
+/**
+ * Escape a table cell. A literal `|` splits the row, and an existing backslash
+ * would re-escape the pipe, so the backslash goes first.
+ * @param text - cell content as written by the canon.
+ * @returns the content safe for a Markdown table row.
+ */
+function cell(text: string): string {
+	return text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
+}
+
 const lintProseText = (text: string, labels?: string[]): ProseFinding[] => lintProse(text, { canonLabels: labels });
 
 export interface RenderResult {
@@ -53,7 +63,6 @@ function coverageSections(sb: Storyboard, canon: Canon | null, t: (es: string, e
 	const out: string[] = [];
 	const inventories = canon?.modules ?? (canon?.module ? [canon.module] : []);
 	const docs = sb.docs?.models ?? {};
-	const cell = (s: string): string => s.replace(/\|/g, "\\|");
 	for (const inventory of inventories) {
 		for (const doc of inventory.models) {
 			out.push(`### ${t("El modelo", "The model")} \`${doc.model}\`${doc.name && doc.name !== doc.model ? ` — ${doc.name}` : ""}`, "");
@@ -171,7 +180,7 @@ export function renderManualMarkdown(sb: Storyboard, canon: Canon | null): strin
 		out.push(t("### Si ves un error", "### If you see an error"), "");
 		out.push(t("| Mensaje | Cuándo ocurre |", "| Message | When it happens |"), "|---|---|");
 		for (const e of errors.slice(0, 20)) {
-			out.push(`| ${e.message.replace(/\|/g, "\\|")} | ${t(`al ejecutar ${e.method ?? "la acción"}`, `when running ${e.method ?? "the action"}`)} |`);
+			out.push(`| ${cell(e.message)} | ${t(`al ejecutar ${e.method ?? "la acción"}`, `when running ${e.method ?? "the action"}`)} |`);
 		}
 		out.push("");
 	}

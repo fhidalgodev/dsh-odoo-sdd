@@ -33,7 +33,7 @@ export const PLAYWRIGHT_CORE_VERSION = "1.63.0";
 interface PwVideoHandle {
 	path(): Promise<string>;
 }
-interface PwPage {
+export interface PwPage {
 	goto(url: string, options?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
 	click(selector: string, options?: { timeout?: number }): Promise<void>;
 	fill(selector: string, value: string, options?: { timeout?: number }): Promise<void>;
@@ -64,10 +64,10 @@ interface PwPage {
 	video?: PwVideoHandle | null | (() => PwVideoHandle | null);
 	close(): Promise<void>;
 }
-interface PwRouteRequest {
+export interface PwRouteRequest {
 	url(): string;
 }
-interface PwRoute {
+export interface PwRoute {
 	/**
 	 * playwright-core exposes `request` as a property in the public API but
 	 * older/newer builds hand back a method — the runtime compat helper below
@@ -77,18 +77,18 @@ interface PwRoute {
 	abort(): Promise<void>;
 	continue(): Promise<void>;
 }
-interface PwContext {
+export interface PwContext {
 	newPage(options?: { viewport?: { width: number; height: number }; deviceScaleFactor?: number }): Promise<PwPage>;
 	route(pattern: string, handler: (route: PwRoute) => Promise<void>): Promise<void>;
 	/** Runs `content` before any page script on every document — the FX overlay. */
 	addInitScript(init: { content?: string; path?: string }): Promise<void>;
 	close(): Promise<void>;
 }
-interface PwBrowser {
+export interface PwBrowser {
 	newContext(options?: Record<string, unknown>): Promise<PwContext>;
 	close(): Promise<void>;
 }
-interface PwChromium {
+export interface PwChromium {
 	launch(options?: { headless?: boolean; channel?: string; args?: string[] }): Promise<PwBrowser>;
 }
 
@@ -101,7 +101,7 @@ interface PwChromium {
  * @param owner - the object the method belongs to.
  * @returns the resolved value.
  */
-function readShaped<T>(value: T | (() => T), owner: unknown): T {
+export function readShaped<T>(value: T | (() => T), owner: unknown): T {
 	if (typeof value !== "function") return value;
 	return (value as () => T).call(owner);
 }
@@ -180,6 +180,23 @@ export interface UiFamily {
 		recordsReady: string;
 		modal: string;
 		many2oneDropdown: string;
+		/** The dialog Odoo opens on an unhandled client/RPC error (16 differs). */
+		errorDialog: string;
+		/** A danger (red) notification toast — the type marker differs in 18+. */
+		dangerNotification: string;
+		/** A field widget flagged invalid by the form controller. */
+		invalidField: string;
+		/** One record row of a list view. */
+		dataRow: string;
+		saveButton: string;
+		discardButton: string;
+		/** The control-panel switch button of one view type. */
+		switchView: (type: string) => string;
+		searchInput: string;
+		/** The "Add a line" link of an x2many list. */
+		addRow: string;
+		/** The statusbar step currently selected. */
+		statusbarCurrent: string;
 	};
 	verified: string;
 }
@@ -197,8 +214,22 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			recordsReady: ".o_data_row, .o_kanban_record, .o_form_sheet, .o_view_nocontent, .o_dashboard",
 			modal: ".modal",
 			many2oneDropdown: ".o_field_many2one input, .ui-autocomplete input",
+			errorDialog: ".o_error_dialog",
+			dangerNotification: ".o_notification.border-danger",
+			invalidField: ".o_field_invalid",
+			dataRow: ".o_data_row",
+			saveButton: ".o_form_button_save",
+			discardButton: ".o_form_button_cancel",
+			switchView: (type) => `.o_switch_view.o_${type}`,
+			searchInput: ".o_searchview_input",
+			addRow: ".o_field_x2many_list_row_add a",
+			statusbarCurrent: ".o_statusbar_status .o_arrow_button_current",
 		},
-		verified: "E2E-tested against an Odoo 17 form (tests/capture.mjs) — the baseline family.",
+		verified:
+			"E2E-tested against an Odoo 17 form (tests/capture.mjs) — the baseline family. " +
+			"Error selectors verified in the 17 sources: error_dialogs.xml renders contentClass o_error_dialog, " +
+			"notification.xml renders border-{type} (danger = .o_notification.border-danger), " +
+			"form_controller.scss owns .o_field_invalid.",
 	},
 	16: {
 		selectors: {
@@ -213,8 +244,21 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			recordsReady: ".o_data_row, .o_kanban_record, .o_form_sheet, .o_view_nocontent, .o_dashboard",
 			modal: ".modal",
 			many2oneDropdown: ".o_field_many2one input, .ui-autocomplete input",
+			errorDialog: ".o_dialog_error, .o_dialog_warning",
+			dangerNotification: ".o_notification.border-danger",
+			invalidField: ".o_field_invalid",
+			dataRow: ".o_data_row",
+			saveButton: ".o_form_button_save",
+			discardButton: ".o_form_button_cancel",
+			switchView: (type) => `.o_switch_view.o_${type}`,
+			searchInput: ".o_searchview_input",
+			addRow: ".o_field_x2many_list_row_add a",
+			statusbarCurrent: ".o_statusbar_status .o_arrow_button_current",
 		},
-		verified: "Same selectors as 17 (bootstrap 5 UI). Declared UNTESTED against a live 16 — verify on a dev instance before production captures.",
+		verified:
+			"Same selectors as 17 (bootstrap 5 UI) EXCEPT the error dialog: 16 renders contentClass o_dialog_error " +
+			"(and o_dialog_warning for WarningDialog) instead of .o_error_dialog — verified in the 16 sources. " +
+			"Declared UNTESTED against a live 16 — verify on a dev instance before production captures.",
 	},
 	18: {
 		selectors: {
@@ -229,8 +273,21 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			recordsReady: ".o_data_row, .o_kanban_record, .o_form_sheet, .o_view_nocontent, .o_dashboard",
 			modal: ".modal",
 			many2oneDropdown: ".o_field_many2one input, .ui-autocomplete input",
+			errorDialog: ".o_error_dialog",
+			dangerNotification: ".o_notification:has(.o_notification_bar.bg-danger)",
+			invalidField: ".o_field_invalid",
+			dataRow: ".o_data_row",
+			saveButton: ".o_form_button_save",
+			discardButton: ".o_form_button_cancel",
+			switchView: (type) => `.o_switch_view.o_${type}`,
+			searchInput: ".o_searchview_input",
+			addRow: ".o_field_x2many_list_row_add a",
+			statusbarCurrent: ".o_statusbar_status .o_arrow_button_current",
 		},
-		verified: "Declared UNTESTED against a live 18 — verify on a dev instance before production captures.",
+		verified:
+			"Error selectors verified in the 18 sources: error_dialogs.xml keeps .o_error_dialog, but the danger " +
+			"toast moved to .o_notification_bar.bg-{type} (border-danger is gone). Declared UNTESTED against a " +
+			"live 18 — verify on a dev instance before production captures.",
 	},
 	19: {
 		selectors: {
@@ -245,10 +302,20 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			recordsReady: ".o_data_row, .o_kanban_record, .o_form_sheet, .o_view_nocontent, .o_dashboard",
 			modal: ".modal",
 			many2oneDropdown: ".o_field_many2one input, .ui-autocomplete input",
+			errorDialog: ".o_error_dialog",
+			dangerNotification: ".o_notification:has(.o_notification_bar.bg-danger)",
+			invalidField: ".o_field_invalid",
+			dataRow: ".o_data_row",
+			saveButton: ".o_form_button_save",
+			discardButton: ".o_form_button_cancel",
+			switchView: (type) => `.o_switch_view.o_${type}`,
+			searchInput: ".o_searchview_input",
+			addRow: ".o_field_x2many_list_row_add a",
+			statusbarCurrent: ".o_statusbar_status .o_arrow_button_current",
 		},
 		verified:
-			"E2E-verified against a live Odoo 19.0+e Enterprise instance (quotation list + order form, 1440x900, narrated video).",
-
+			"E2E-verified against a live Odoo 19.0+e Enterprise instance (quotation list + order form, 1440x900, narrated video). " +
+			"Danger toast verified in the 19 sources as .o_notification_bar.bg-{type} (same marker as 18).",
 	},
 };
 
@@ -528,7 +595,7 @@ export async function captureFlow(opts: CaptureOptions): Promise<RpcResult<Captu
 }
 
 /** One element's viewport rect in CSS px, or null when it is not on screen. */
-interface DomRect {
+export interface DomRect {
 	x: number;
 	y: number;
 	w: number;
@@ -541,7 +608,7 @@ interface DomRect {
  * plugin compiles without the DOM lib, and the evaluate body is the only
  * place `document` exists.
  */
-async function domRectOf(page: PwPage, selector: string): Promise<DomRect | null> {
+export async function domRectOf(page: PwPage, selector: string): Promise<DomRect | null> {
 	const rect = await page.evaluate(
 		`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; ` +
 			`el.scrollIntoView({ block: "center", inline: "center" }); const r = el.getBoundingClientRect(); ` +
@@ -565,7 +632,7 @@ async function domRectByText(page: PwPage, name: string): Promise<DomRect | null
 	return (rect as DomRect | null) ?? null;
 }
 
-async function runStep(
+export async function runStep(
 	page: PwPage,
 	step: Step,
 	family: UiFamily,

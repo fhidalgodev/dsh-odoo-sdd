@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 const libDir = new URL("../lib/", import.meta.url);
 const sdd = await import(new URL("sdd-state.js", libDir).href);
 const creds = await import(new URL("credentials.js", libDir).href);
+const mdText = await import(new URL("markdown-text.js", libDir).href);
 
 let failures = 0;
 function check(label, cond, detail) {
@@ -3783,7 +3784,7 @@ console.log("== odoo_docs (fragments, Diátaxis, changelog, scaffold) ==");
 	const scaffoldText = readFileSync(join(modDir, "readme", "DESCRIPTION.md"), "utf8");
 	check("scaffold does NOT write an H1 (the OCA bot owns it)", !/^#\s/m.test(scaffoldText), JSON.stringify(scaffoldText.slice(0, 120)));
 	const before = readFileSync(join(modDir, "readme", "DESCRIPTION.md"), "utf8");
-	writeFileSync(join(modDir, "readme", "DESCRIPTION.md"), before.replace(/<!--[^>]*-->/g, "").trim() + "\n\nX\n", { mode: 0o600 });
+	writeFileSync(join(modDir, "readme", "DESCRIPTION.md"), mdText.stripHtmlComments(before).trim() + "\n\nX\n", { mode: 0o600 });
 	dr = await docs.execute({ operation: "scaffold", module_dir: modDir });
 	const after = readFileSync(join(modDir, "readme", "DESCRIPTION.md"), "utf8");
 	check("scaffold NEVER overwrites existing content", after.includes("X"));
@@ -4628,7 +4629,7 @@ console.log("== JSON-2 transport (Odoo 19+) ==");
 				served.ok ? `classic=${classicCalls}` : String(served.error).slice(0, 90),
 			);
 			check("...and the fallback is remembered, not retried per call", passwordClient.transport.api === "jsonrpc" && authAttempts === 1, `auth=${authAttempts}`);
-			check("...and the reported reason names the cause instead of shrugging", /Invalid apikey/.test(passwordClient.transport.reason), passwordClient.transport.reason.slice(0, 90));
+			check("...and the reported reason names the cause instead of shrugging", /Invalid apikey/.test(passwordClient.transport.reason));
 			if (served.ok) {
 				await passwordClient.executeKw("res.partner", "search_read", [[]], {});
 				check("...so the next call goes straight to the classic transport", authAttempts === 1, `auth=${authAttempts}`);

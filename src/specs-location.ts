@@ -64,17 +64,37 @@ export function asSpecsMode(value: unknown): SpecsMode {
 }
 
 /**
+ * Whether a code unit survives in a folder slug: letters, digits, dot,
+ * underscore and dash. Char codes keep the scan linear, with no backtracking.
+ * @param code - UTF-16 code unit.
+ */
+function isSlugChar(code: number): boolean {
+	return (
+		(code >= 97 && code <= 122) || // a-z
+		(code >= 65 && code <= 90) || // A-Z
+		(code >= 48 && code <= 57) || // 0-9
+		code === 46 || // .
+		code === 95 || // _
+		code === 45 // -
+	);
+}
+
+/**
  * Filesystem-safe folder name for a project path.
  * @param projectRoot - absolute project root.
  * @returns a slug derived from the last path segment (never empty).
  */
 export function projectSlug(projectRoot: string): string {
 	const raw = basename(resolve(projectRoot));
-	const slug = raw
-		.replace(/[^A-Za-z0-9._-]+/g, "-")
-		.replace(/^[-.]+/, "")
-		.replace(/[-.]+$/, "")
-		.slice(0, 48);
+	let replaced = "";
+	for (let i = 0; i < raw.length; i += 1) {
+		replaced += isSlugChar(raw.charCodeAt(i)) ? raw[i] : "-";
+	}
+	let start = 0;
+	let end = replaced.length;
+	while (start < end && (replaced[start] === "-" || replaced[start] === ".")) start += 1;
+	while (end > start && (replaced[end - 1] === "-" || replaced[end - 1] === ".")) end -= 1;
+	const slug = replaced.slice(start, end).slice(0, 48);
 	return slug === "" ? "project" : slug;
 }
 

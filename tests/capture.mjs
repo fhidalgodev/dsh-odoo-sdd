@@ -112,7 +112,7 @@ const PAGE_HTML = `<!doctype html><html><head><title>Odoo</title></head><body>
 
 const server = createServer((req, res) => {
 	if (req.url?.startsWith("/web/session/authenticate")) {
-		res.writeHead(200, { "content-type": "application/json", "set-cookie": "session_id=fakesession123; Path=/" });
+		res.writeHead(200, { "content-type": "application/json", "set-cookie": "session_id=fakesession123; Path=/; HttpOnly; Secure; SameSite=Lax" });
 		res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { uid: 2 } }));
 		return;
 	}

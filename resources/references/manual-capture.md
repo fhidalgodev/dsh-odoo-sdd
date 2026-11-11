@@ -86,3 +86,9 @@ instead of capturing again: `recording` (path inside the project),
 - The imported flow goes through the SAME `lint` and the same capture as one
   written by hand; importing exempts you neither from `from_step` nor from the
   action gate.
+
+## See also
+
+- `references/ui-verify.md` — `odoo_ui_verify` uses THIS engine for QA: same
+  steps, but the UI probe is drained after every step so an interface error
+  fails the run instead of being photographed.

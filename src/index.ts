@@ -86,6 +86,7 @@ import { isReadMethod, isCallableMethodName } from "./method-classification.js";
 import { registerDocsTool } from "./docs-tool.js";
 import { registerManualTool, type WebSessionResult } from "./manual-tool.js";
 import { registerVideoTool } from "./video-tool.js";
+import { registerUiVerifyTool } from "./ui-verify-tool.js";
 import { registerTestsTool } from "./tests-tool.js";
 import { registerI18nTools } from "./odoo-i18n.js";
 import { isLanguageCode } from "./po.js";
@@ -4485,6 +4486,14 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			// clicks/fills Odoo and that is not journalable.
 			return String(args["operation"] ?? "") === "capture" && args["allow_actions"] === true;
 		}
+		if (name === "odoo_ui_verify") {
+			// matrix creates temporary res.users on the instance — always a
+			// mutation. run is read-only by default; allow_actions=true makes the
+			// browser really click/fill Odoo, and that effect is not journalable.
+			const op = String(args["operation"] ?? "");
+			if (op === "matrix") return true;
+			return op === "run" && args["allow_actions"] === true;
+		}
 		return false;
 	};
 
@@ -5157,6 +5166,45 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 		videoMusic: (exec) => envBool(process.env["ODOO_SDD_VIDEO_MUSIC"]) ?? effectiveConfig(exec).videoMusic,
 		videoSfx: (exec) => envBool(process.env["ODOO_SDD_VIDEO_SFX"]) ?? effectiveConfig(exec).videoSfx,
 		ffmpegPath: (exec) => effectiveConfig(exec).ffmpegPath || process.env["ODOO_SDD_FFMPEG"] || "ffmpeg",
+	});
+
+	// odoo_ui_verify — the QA browser layer: the same capture engine and
+	// session contract as odoo_manual/odoo_video, but every step is drained
+	// through the UI probe so an interface error fails the step instead of
+	// photographing it. Artifacts live under <spec>/ui-verify/.
+	registerUiVerifyTool(ctx, {
+		projectRoot: (exec) => effectiveConfig(exec).projectRoot,
+		specDir: (specId, exec) => {
+			const cfg = effectiveConfig(exec);
+			return specDirOf(cfg.projectRoot, cfg.specsDir, specId ?? "", {
+				specsMode: cfg.specsMode,
+				specsRoot: cfg.specsRoot,
+			});
+		},
+		client: (exec) => clientForExec(exec).client ?? undefined,
+		environment: (exec) => clientForExec(exec).credentials?.environment ?? null,
+		credentials: (exec) => clientForExec(exec).credentials,
+		webSession: webSessionDep,
+		// matrix: web login for the temporary sddqa_* users. The password only
+		// ever travels inside webLoginWith — the dep returns just the session.
+		webSessionAs: async (login, password, exec) => {
+			const entry = clientForExec(exec);
+			if (!entry.client) {
+				return { ok: false, errorKind: "needs_session", error: "no instance connection for the temporary user login" };
+			}
+			const loginRes = await entry.client.webLoginWith(login, password);
+			if (!loginRes.ok) return { ok: false, error: loginRes.error, errorKind: loginRes.errorKind };
+			return {
+				ok: true,
+				value: { baseUrl: entry.credentials?.url ?? "", sessionId: loginRes.value.sessionId, uid: loginRes.value.uid },
+			};
+		},
+		approve: (exec, reason) => requestNativeApproval(ctx, exec, "odoo_ui_verify", reason),
+		audit: (exec, op, auditArgs, extra) => {
+			const cfg = effectiveConfig(exec);
+			appendAuditLine(cfg.projectRoot, op, auditArgs, clientForExec(exec).credentials, extra);
+		},
+		display: (v) => displayPath(v),
 	});
 
 	/**

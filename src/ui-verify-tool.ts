@@ -59,7 +59,7 @@ export interface UiVerifyToolDeps {
 	approve?: (exec: unknown, reason: ApprovalReason) => Promise<ApprovalOutcome>;
 	/** matrix: audit sink for user creation/cleanup (index.ts appendAuditLine). */
 	audit?: (exec: unknown, op: string, args: unknown, extra?: { outcome?: "ok" | "error" | "denied"; reason?: string }) => void;
-	/** Test hook: browser launcher for matrix (defaults to the real one). */
+	/** Test hook: browser launcher for run/crawl/matrix (defaults to the real one). */
 	launchBrowser?: (opts: { headed: boolean; browser: string }) => Promise<RpcResult<PwBrowser>>;
 	/** Test hook: flow runner inside the matrix (defaults to runUiFlows). */
 	runFlows?: (opts: UiVerifyOptions) => Promise<RpcResult<UiVerifyReport>>;
@@ -490,7 +490,10 @@ async function browserOp(
 		return blocked(args.operation, `NEEDS_BROWSER — ${pw.error} A NEEDS_BROWSER report was written so the verify gate records the requirement instead of guessing a pass.`, artifacts, "NEEDS_BROWSER");
 	}
 	const browserChoice = args.browser ?? "auto";
-	const opened = await resolveBrowser(pw.value.chromium, browserChoice, args.headed === true);
+	const launcher =
+		deps.launchBrowser ??
+		(async (o: { headed: boolean; browser: string }) => resolveBrowser(pw.value.chromium, o.browser as "auto", o.headed));
+	const opened = await launcher({ headed: args.headed === true, browser: browserChoice });
 	if (!opened.ok) {
 		writeNeedsBrowser(wsDir, mode, version.value.server_version, opened.error, environment);
 		return blocked(args.operation, `${opened.error} A NEEDS_BROWSER report was written so the verify gate records the requirement instead of guessing a pass.`, artifacts, "NEEDS_BROWSER");

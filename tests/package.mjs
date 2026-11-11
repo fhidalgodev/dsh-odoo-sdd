@@ -154,6 +154,7 @@ const required = [
 	"tsconfig.json",
 	"skills/odoo-sdd-workflow/SKILL.md",
 	"resources/references/tours-and-demo.md",
+	"resources/references/ui-verify.md",
 	"lib/index.js",
 	"lib/grants.js",
 	"lib/atomic.js",

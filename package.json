@@ -1,6 +1,6 @@
 {
   "name": "dsh-odoo-sdd",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "description": "Spec-Driven Development pipeline for Odoo as a DeepSeek Harness plugin: connects to an existing Odoo instance (JSON-RPC), orchestrates the 5-phase SDD workflow, and enforces fail-closed safety gates.",
   "author": "Franyer Hidalgo <fhidalgo.dev@gmail.com> (https://github.com/fhidalgodev)",
   "license": "MIT",
@@ -60,7 +60,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepare": "node scripts/prepare.mjs",
     "prepack": "node scripts/prepare.mjs --force",
-    "test": "node tests/smoke.mjs && node tests/spec-reqs.mjs && node tests/test-scan.mjs && node tests/client.mjs && node tests/readme.mjs && node tests/functional.mjs && node tests/import.mjs && node tests/manual.mjs && node tests/capture.mjs && node tests/video.mjs && node tests/package.mjs",
+    "test": "node tests/smoke.mjs && node tests/spec-reqs.mjs && node tests/test-scan.mjs && node tests/client.mjs && node tests/readme.mjs && node tests/functional.mjs && node tests/import.mjs && node tests/manual.mjs && node tests/capture.mjs && node tests/video.mjs && node tests/ui-verify.mjs && node tests/package.mjs",
     "host:deps": "npm install --no-save --no-audit --no-fund @deepseek-ai/dsh@^0.2.2-rc.1 @deepseek-ai/dsh-tools@^0.2.2-rc.1 @deepseek-ai/schemastery@^3.18.4 @deepseek-ai/cordis@^4.0.0",
     "test:package": "node tests/package.mjs",
     "test:client": "node tests/client.mjs",
@@ -70,7 +70,8 @@
     "test:functional": "node tests/functional.mjs",
     "test:import": "node tests/import.mjs",
     "test:manual": "node tests/manual.mjs",
-    "test:capture": "node tests/capture.mjs"
+    "test:capture": "node tests/capture.mjs",
+    "test:ui-verify": "node tests/ui-verify.mjs"
   },
   "publishConfig": {
     "access": "public"

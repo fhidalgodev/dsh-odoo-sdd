@@ -19,6 +19,7 @@
  */
 import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { extname, join } from "node:path";
+import { stripHtmlComments } from "./markdown-text.js";
 
 /** Severity of one finding; ERROR blocks `DONE` under the required policy. */
 export type DocsSeverity = "ERROR" | "WARN" | "INFO";
@@ -100,8 +101,21 @@ export const NEWSFRAGMENTS_DIR = join("readme", "newsfragments");
 /** Odoo version scheme: <OdooMajor>.<api>.<feature>.<bugfix>.<revision>. */
 const VERSION_SCHEME = /^\d+\.\d+\.\d+\.\d+\.\d+$/;
 
-/** Placeholder markers that mean "not actually written". */
-const PLACEHOLDER = /^\s*(?:<!--.*?-->\s*)?(?:todo|tbd|fixme|xxx|\.\.\.|-)?\s*$/i;
+/** A bare marker that means "not actually written". */
+const PLACEHOLDER_MARKER = /^(?:todo|tbd|fixme|xxx|\.\.\.|-)$/i;
+
+/**
+ * True when a fragment carries no prose: empty, only template comments, or a
+ * bare marker. Comments are stripped first because the template's own guidance
+ * is not a written fragment, and a malformed one must not count either.
+ * @param text - fragment content, or null when the file is absent.
+ * @returns whether the fragment is still a placeholder.
+ */
+function isPlaceholder(text: string | null): boolean {
+	if (text === null) return true;
+	const body = stripHtmlComments(text).trim();
+	return body === "" || PLACEHOLDER_MARKER.test(body);
+}
 
 /** One markdown image reference found outside fenced code blocks. */
 export interface FragmentImage {
@@ -298,18 +312,12 @@ export function scanDocs(moduleDir: string, options: DocsScanOptions = {}): Docs
 		}
 		present.push(fragment.file);
 		const text = readTextSafe(abs);
-		if (text === null || PLACEHOLDER.test(text)) {
-			findings.push({
-				severity: "ERROR",
-				rule: "docs-fragment-placeholder",
-				file: rel,
-				line: 0,
-				message: `${fragment.file} exists but has no real content (empty or placeholder).`,
-				hint: `Write the ${fragment.quadrant} content: ${fragment.purpose}.`,
-			});
-		} else if (text.includes(SCAFFOLD_MARKER)) {
+		if (text !== null && text.includes(SCAFFOLD_MARKER)) {
 			// Scaffolding is a starting point, not documentation: report it so a
-			// generated skeleton can never masquerade as finished content.
+			// generated skeleton can never masquerade as finished content. The
+			// marker is checked first because a scaffold IS a comment: stripping
+			// it would leave a blank fragment, turning the skeleton into a plain
+			// placeholder with a different hint.
 			scaffolded.push(fragment.file);
 			findings.push({
 				severity: "WARN",
@@ -319,8 +327,17 @@ export function scanDocs(moduleDir: string, options: DocsScanOptions = {}): Docs
 				message: `${fragment.file} is still the generated skeleton.`,
 				hint: `Replace the scaffold with the real ${fragment.quadrant} content: ${fragment.purpose}.`,
 			});
+		} else if (isPlaceholder(text)) {
+			findings.push({
+				severity: "ERROR",
+				rule: "docs-fragment-placeholder",
+				file: rel,
+				line: 0,
+				message: `${fragment.file} exists but has no real content (empty or placeholder).`,
+				hint: `Write the ${fragment.quadrant} content: ${fragment.purpose}.`,
+			});
 		}
-		if (text !== null && !PLACEHOLDER.test(text) && !text.includes(SCAFFOLD_MARKER)) {
+		if (text !== null && !isPlaceholder(text) && !text.includes(SCAFFOLD_MARKER)) {
 			// The OCA readme bot generates the fragment's H1 from the file name,
 			// so a fragment that carries its own `#` heading ends up with the
 			// title twice on the compiled README.rst.

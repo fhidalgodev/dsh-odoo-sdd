@@ -247,7 +247,7 @@ export function registerDocsTool(
 				const lines: string[] = [];
 				lines.push(`Documentation plan — ${moduleName}`);
 				lines.push(`Language: ${language} (${provenance}). Mode: ${mode}.`);
-				lines.push(location.replace("\n", " — "));
+				lines.push(location.replace(/\n/g, " — "));
 				lines.push("");
 				lines.push("Diátaxis coverage (OCA readme fragments):");
 				for (const fragment of README_FRAGMENTS) {

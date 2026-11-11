@@ -165,6 +165,12 @@ jobs:
       - name: Capture E2E (browser required)
         run: ODOO_SDD_REQUIRE_BROWSER=1 node tests/capture.mjs
 
+      # The UI-verification layer shares the same engine and the same fake
+      # Odoo: a capture can PASS on a screen that shows a traceback, this
+      # suite proves the probe fails it with the right finding kind.
+      - name: UI verify E2E (browser required)
+        run: ODOO_SDD_REQUIRE_BROWSER=1 bash scripts/ci-test.sh tests/ui-verify.mjs
+
       # The video assembly is verified against the runner's REAL ffmpeg
       # (synthetic testsrc webm → narrated mp4): the unit layer fakes ffmpeg,
       # this step proves the actual flag/filter pipeline still works. The

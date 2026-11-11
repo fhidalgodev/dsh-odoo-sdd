@@ -160,16 +160,19 @@ jobs:
         run: npm run build
 
       - name: Install Chromium + bundled ffmpeg for playwright-core
-        # Browser download FIRST (Playwright CDN, no apt): hosted runners
+        # Browser download FIRST (Playwright CDN, never apt): hosted runners
         # periodically lose DNS for the ubuntu mirrors ("Temporary failure
-        # resolving 'security.ubuntu.com'"), and a --with-deps install spends
-        # tens of minutes in apt retries before giving up. The system libraries
-        # are best-effort afterwards — the ubuntu image already ships what
-        # headless chromium needs.
+        # resolving 'security.ubuntu.com'"), and an apt install then spends tens
+        # of minutes retrying before failing. The system libraries are fetched
+        # only when headless chromium cannot actually launch, which is rare —
+        # the ubuntu image already ships them.
         run: |
           npx playwright-core install chromium ffmpeg
-          if ! npx playwright-core install-deps chromium; then
-            echo "::warning::install-deps failed (apt unreachable) — the runner image already ships chromium's shared libraries"
+          if node -e "require('playwright-core').chromium.launch().then(b => b.close()).catch(e => { console.error(String(e)); process.exit(1); })"; then
+            echo "headless chromium launches with the libraries already in the image"
+          else
+            echo "::warning::headless chromium needs system libraries — installing them"
+            npx playwright-core install-deps chromium
           fi
 
       - name: Capture E2E (browser required)

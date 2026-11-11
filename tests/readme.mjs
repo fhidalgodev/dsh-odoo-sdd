@@ -238,7 +238,7 @@ for (const doc of docs) {
 			if (langIdx === -1 || authorIdx === -1 || langIdx >= authorIdx) return false;
 			// Its own line means: not sharing a line with the badge row.
 			const langLine = doc.lines[langIdx];
-			return /<\/a>/.test(langLine) && !langLine.includes("img.shields.io");
+			return /<\/a>/.test(langLine) && !/img\.shields\.io/.test(langLine);
 		})(),
 	);
 	check(
@@ -323,8 +323,8 @@ check(
 );
 check(
 	"all READMEs carry the same badge set",
-	new Set(docs.map((doc) => (doc.text.match(/img.shields.io[^"]+/g) ?? []).length)).size === 1,
-	docs.map((doc) => `${doc.lang}=${(doc.text.match(/img.shields.io[^"]+/g) ?? []).length}`).join(" "),
+	new Set(docs.map((doc) => (doc.text.match(/img\.shields\.io[^"]+/g) ?? []).length)).size === 1,
+	docs.map((doc) => `${doc.lang}=${(doc.text.match(/img\.shields\.io[^"]+/g) ?? []).length}`).join(" "),
 );
 // A switcher that forgets a language is the classic translation bug: the new
 // file links to everyone and the existing ones keep linking to nobody.

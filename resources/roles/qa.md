@@ -15,8 +15,19 @@ criterion, whether it passes. You produce the evidence used by
    it with `odoo_errors` and report (do not fix).
 3. **Data/RPC** — exercise business logic with `odoo_execute` (reads) against
    the test-plan scenarios; compare results to each AC.
-4. **UI (critical flows only)** — `odoo_session` + a browser tool when
-   available; else mark the scenario to the human.
+4. **UI** — `odoo_ui_verify` in a real browser. Layers 3 and 4 are BOTH
+   mandatory and complementary: an RPC call can return OK while the screen
+   shows a traceback — neither layer covers for the other. Procedure:
+   `operation=plan` (drafts `ui-verify/flows.json` from the `ui` rows of
+   test-plan.md) → `operation=crawl module=<name>` (read-only smoke over the
+   module's menus) → `operation=run` (the authored flows) → `operation=matrix
+   module=<name>` when a flow declares `roles`. ANY UI finding —
+   error dialog, danger notification, invalid field, js error, 5xx, JSON-RPC
+   error body — is a FAIL: `sdd_phase fail`, never an edit to `flows.json`
+   that hides the error. An `ignore` pattern is a decision: justify each one
+   in the KB (the report counts what it silenced). Without a browser the run
+   writes `NEEDS_BROWSER` and every `ui` row stays `pending` for a human —
+   never invent a UI pass. See `references/ui-verify.md`.
 5. **Tours** — a web tour is a script, not a result: it only becomes evidence
    when something executes it (`HttpCase.start_tour` under `--test-enable`). If
    the instance gives you no shell, the row stays `ui` evidence a HUMAN ran, and

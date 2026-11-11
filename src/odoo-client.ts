@@ -37,7 +37,7 @@ const MODULE_OP_TIMEOUT_MS = 300_000;
  * answer. Callers that only mutate must treat `transport`/`protocol` as
  * INDETERMINATE, never as a plain failure.
  */
-export type RpcErrorKind = "transport" | "server" | "protocol" | "needs_password";
+export type RpcErrorKind = "transport" | "server" | "protocol" | "needs_password" | "credentials" | "no_cookie";
 
 /** Result of a JSON-RPC call: either the payload or a sanitized error. */
 export type RpcResult<T> =
@@ -641,19 +641,39 @@ export class OdooClient {
 			"authenticates interactive logins with `interactive: True` and only checks the API-key " +
 			"table otherwise. The API key keeps working for JSON-RPC (odoo_module/odoo_execute/" +
 			"odoo_errors) and for the JSON-2 API. UI tests can also run against a manually created session.";
+		const res = await this.webLoginWith(this.#credentials.username, this.#credentials.secret);
+		if (!res.ok) {
+			// The "no cookie" outcome carries no hint: it already names its cause.
+			if (res.errorKind === "no_cookie") return { ok: false, error: res.error };
+			const envNote = res.errorKind === "credentials" ? " Check .env values." : "";
+			return { ok: false, error: res.error + envNote + webHint };
+		}
+		return res;
+	}
+
+	/**
+	 * Authenticate a WEB session for an arbitrary login/password — the path the
+	 * role matrix uses for its temporary `sddqa_*` users. The password only
+	 * ever travels in the request body: it is never written into an error
+	 * message, a log line or a return value.
+	 * @param login - Odoo login.
+	 * @param password - account password (interactive logins never take keys).
+	 * @returns the session id and uid, or a failure naming the stage only.
+	 */
+	async webLoginWith(login: string, password: string): Promise<RpcResult<{ sessionId: string; uid: number }>> {
 		const res = await this.#rpc<{ uid: number; session_id?: string }>("/web/session/authenticate", {
 			jsonrpc: "2.0",
 			method: "call",
 			params: {
 				db: this.#credentials.db,
-				login: this.#credentials.username,
-				password: this.#credentials.secret,
+				login,
+				password,
 			},
 			id: randomUUID(),
 		});
-		if (!res.ok) return { ok: false, error: res.error + webHint };
+		if (!res.ok) return { ok: false, error: res.error };
 		if (!res.value || typeof res.value.uid !== "number" || res.value.uid === 0) {
-			return { ok: false, error: "Session authentication rejected (uid=0). Check .env values." + webHint };
+			return { ok: false, errorKind: "credentials", error: "Session authentication rejected (uid=0)." };
 		}
 		// Prefer the real session cookie from Set-Cookie; fall back to the
 		// session_id returned in the payload.
@@ -662,7 +682,7 @@ export class OdooClient {
 		const sessionId =
 			cookieHeader?.split(";")[0]?.slice("session_id=".length) ?? res.value.session_id ?? null;
 		if (sessionId == null) {
-			return { ok: false, error: "Authenticated but no session_id cookie was returned." };
+			return { ok: false, errorKind: "no_cookie", error: "Authenticated but no session_id cookie was returned." };
 		}
 		return { ok: true, value: { sessionId, uid: res.value.uid } };
 	}

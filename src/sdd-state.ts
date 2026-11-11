@@ -32,6 +32,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, ren
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { readJsonWithRecovery, quarantinedSiblings, writeFileAtomic } from "./atomic.js";
+import { stripHtmlComments } from "./markdown-text.js";
 
 /** Ordered pipeline phases (the 5 SDD steps + the CLARIFY entry + terminals). */
 export const PHASES = [
@@ -961,7 +962,7 @@ export function runbookGaps(specDir: string): string[] {
 		}
 		const rest = text.slice(idx + heading.length);
 		const next = rest.indexOf("\n## ");
-		const body = (next < 0 ? rest : rest.slice(0, next)).replace(/<!--[\s\S]*?-->/g, "").trim();
+		const body = stripHtmlComments(next < 0 ? rest : rest.slice(0, next)).trim();
 		if (body === "" || /^\(none\)$/i.test(body)) {
 			gaps.push(`${RUNBOOK_FILE}: ${heading} has no content`);
 		}
@@ -981,7 +982,7 @@ function sectionBody(text: string, heading: string): string {
 	if (idx < 0) return "";
 	const rest = text.slice(idx + heading.length);
 	const next = rest.indexOf("\n## ");
-	return (next < 0 ? rest : rest.slice(0, next)).replace(/<!--[\s\S]*?-->/g, "").trim();
+	return stripHtmlComments(next < 0 ? rest : rest.slice(0, next)).trim();
 }
 
 /**
@@ -1440,7 +1441,7 @@ export function documentationGaps(specDir: string, mode: PipelineMode | null = n
 	const next = rest.indexOf("\n## ");
 	// Strip HTML comments: the template's own guidance is not a decision, so an
 	// untouched skeleton must NOT satisfy the gate.
-	const section = (next < 0 ? rest : rest.slice(0, next)).replace(/<!--[\s\S]*?-->/g, "").trim();
+	const section = stripHtmlComments(next < 0 ? rest : rest.slice(0, next)).trim();
 	if (section === "") return ["`## Documentation` is empty (template comments do not count as a decision)"];
 	const gaps: string[] = [];
 	// Language must be decided (a code such as en/es, or an explicit statement).
@@ -1570,7 +1571,7 @@ export function designWarnings(specDir: string, mode: PipelineMode | null = null
 	// noise. Views/Reports keep their existing behaviour in every dev mode.
 	if (mode !== "bug") {
 		const tours = section("Tours");
-		const tourBody = tours.replace(/<!--[\s\S]*?-->/g, "").trim();
+		const tourBody = stripHtmlComments(tours).trim();
 		if (tours.trim() === "") {
 			warnings.push(
 				"`## Tours` is missing — state which web tours ship (onboarding, test, or both), which asset " +
@@ -1592,7 +1593,7 @@ export function designWarnings(specDir: string, mode: PipelineMode | null = null
 			);
 		}
 		const demo = section("Demo data");
-		const demoBody = demo.replace(/<!--[\s\S]*?-->/g, "").trim();
+		const demoBody = stripHtmlComments(demo).trim();
 		if (demo.trim() === "") {
 			warnings.push(
 				"`## Demo data` is missing — state whether the module ships demo data, in which files, and what " +

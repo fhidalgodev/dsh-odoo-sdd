@@ -197,12 +197,12 @@ bundle (`dsh.profile.bundles`). Dos consecuencias que conviene saber:
 
 - **pnpm tiene que estar en tu `PATH`** (`dsh plugin` lo avisa cuando no está).
 - Acepta cualquier spec de pnpm, así que podés fijar una versión:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.20.0`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.21.0`.
 
 ¿Preferís npm pelado — un proyecto que depende del plugin, o un job de CI?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.20.0
+npm install dsh-odoo-sdd        # 0.21.0
 ```
 
 > [!IMPORTANT]
@@ -527,7 +527,7 @@ filas que contó no se reenvían. La cookie de sesión queda en `.sdd/session.js
 
 ---
 
-## 🧰 Las 19 tools
+## 🧰 Las 20 tools
 
 | Tool | Propósito |
 |---|---|
@@ -544,12 +544,36 @@ filas que contó no se reenvían. La cookie de sesión queda en `.sdd/session.js
 | `odoo_security_scan` | Revisión de seguridad estática local (sin instancia): SQL concatenado, `eval`/`exec`/`pickle`, secretos hardcodeados, `sudo()` sin justificar, `auth="none"`, CSRF desactivado, `t-raw` en QWeb. Hallazgos con `file:line` + sugerencia; cualquier ERROR bloquea `DONE`. |
 | `odoo_manual` | Manuales de usuario narrados y construidos sobre evidencia. **`canon`** lee de la instancia el canon funcional de un modelo (vistas, botones del header y los estados que los revelan, campos requeridos, páginas del notebook, acciones, menús, reglas de acceso, grupos, sitios de `raise UserError`/`ValidationError` y de `_sql_constraints`) y lo persiste con una huella: el manual solo puede describir lo que el canon dice. **`plan`** convierte el canon en un storyboard (flujos, pasos ordenados, una frase por paso): volver a ejecutarlo FUSIONA, así la narración, las capturas y la prosa ya escritas sobreviven. **`lint`** contrasta el storyboard y la prosa renderizada contra el canon (`CANON-STALE`, `TARGET-UNKNOWN`, `PLACEHOLDER-UNBOUND`, `ACTS-MISSING`, `RECOVERY-MISSING`, patrones que delatan IA en español e inglés → ERROR/WARN con la línea exacta). **`explore`** devuelve el snapshot ARIA de una pantalla real, así no se adivina ningún xml id ni etiqueta. **`capture`** maneja un navegador: los pasos de solo lectura siempre corren, y los pasos de acción (`new`/`fill`/`select`/`press`/`click`) exigen `allow_actions=true` — que el guard trata como una mutación. **`render`** escribe el manual y una página de Apps (create-only salvo `overwrite=true`). **`import`** convierte una grabación `codegen` de Playwright en un flujo y rechaza cualquier grabación que lleve credenciales. Los manuales viven donde diga Ajustes (`manualsMode`: `specs` junto al spec (por defecto), `docs` bajo `manualsDir`, `module` como fragmentos OCA bajo el `readme/manual/` del módulo); el trabajo standalone sin spec nunca se bloquea por eso. **`canon`** recibe la entrevista — `as_user` (para quién es el manual), `admin`, `module`/`modules` y `groups` — y la registra: el inventario cubre además TODOS los menús y TODAS las acciones del módulo (la acción que abre un menú, aunque sea nativa), y cada modelo llega con sus campos (etiqueta, tipo, obligatorio, relación/selección, grupos), sus botones de formulario y de lista, los estados del statusbar y sus filas de acceso por grupo. **`plan`** abre un flujo por menú y uno por cada recorrido de grupo, y siembra una lista `docs` con una celda vacía por campo y por botón. **`lint`** reporta `MODULE-COVERAGE`, `INTERVIEW-MISSING`, `FIELD-COVERAGE`, `BUTTON-COVERAGE`, `WORKFLOW-COVERAGE` y `GROUP-COVERAGE` mientras quede sin cubrir un menú, una acción, un campo, un botón, el workflow o un grupo — un `skip` con motivo es cobertura documentada, y `ROLE-UNVERIFIED` avisa porque una captura corre como el usuario conectado. **`render`** añade una tabla por modelo (tipo, obligatorio, relación, grupos y tu frase) y una sección por grupo de acceso. `odoo_docs` añade una sección `## User manual` al veredicto de documentación en cuanto existe un storyboard — y no la toca cuando no hay ninguno. |
 | `odoo_video` | Documentación en VIDEO narrado de flujos, standalone junto a `odoo_manual` (nunca escribe `MANUAL.md`). **`plan`** redacta el storyboard desde el canon de la instancia — o, con `from_manual=<slug>`, copia el `canon.json` + `storyboard.json` de un manual existente (import-once: se niega a pisar un storyboard de video). Con canon de módulo además SIEMBRA cobertura: flujos `v*` mudos de pasos `highlight` para llegar al 100% de menús, acciones, vistas, campos, botones, páginas, crons, automatizaciones, plantillas, reglas y asistentes. **`audit`** imprime la matriz de cobertura — una ref solo la cubre un paso NARRADO (o `covers[]`), un paso sembrado sin narrar queda pendiente, y `videoSkip` (ref → motivo) es salto documentado; `VIDEO-COVERAGE` es ERROR hasta leer 100%. **`voice`** narra `_hook` → pasos → `_outro` con el preset de voz elegido (`ttsPreset`: `viral-male`/`viral-female` recomendados, `calm-male`/`calm-female`, `offline-piper`, o `custom` con tu `ttsCommand`/`ttsVoice`) — sin default: `NEEDS_TTS` lista los presets y advierte que los de nube envían el texto de la narración a Microsoft (decisión explícita del desarrollador). **`capture`** corre el flujo en un navegador real con la grabación SIEMPRE activa: `video/raw/<flow>.webm`, `startMs`/`endMs`/`focus` por paso, overlay de cursor/clic/anillo solo al grabar, y cada paso se sostiene en la página VIVA lo que dura su narración — los pasos `highlight` rodean campo, botón, pestaña o ítem de menú y fallan si no se ve en pantalla. **`assemble`** escribe la serie numerada en la raíz: `NN-titulo.mp4|.srt|.vtt` agrupada por `flow.group`, con zoom de entrada hacia cada `focus`, subtítulos en pastilla quemados por defecto (`captions=false` los apaga), pastilla de capítulo, tarjeta de título en el hook, pastilla "Siguiente" en el outro, SFX + música sintetizados con ducking (params/config `music`/`sfx`, `videoMusic`/`videoSfx`) y `loudnorm` de 2 pasadas a −14 LUFS. **`index`** regenera `README.md` (grupos, duraciones, casillas de progreso, sección de cobertura, rutas sugeridas), reporta medios `NN-*` huérfanos y responde `ok:false`/`COVERAGE GAPS n` hasta completar la serie. El idioma se fija en `plan`; los lints (`HOOK-LONG`, `SENTENCE-LONG`, `FILLER`, `COVERS-UNKNOWN`…) mantienen el guion en registro hablado. |
+| `odoo_ui_verify` | Verificación QA del lado del navegador sobre el MISMO motor que `odoo_manual capture` — la capa que la evidencia RPC no puede ver. **`plan`** redacta `ui-verify/flows.json` (un flujo esqueleto por fila `ui` de `test-plan.md`, create-only), **`lint`** revisa los flujos y la cobertura de ACs, **`crawl`** corre un smoke de solo lectura sobre el canon del propio módulo (cada menú → sus vistas → primer registro → páginas del notebook; los botones de cabecera solo se comprueban con `expect_visible`, nunca se pulsan), **`run`** ejecuta los flujos escritos, **`matrix`** corre la matriz por rol declarada en `flows.json` con un usuario temporal aprobado por grupo (se elimina después), y **`status`** resume los reportes. Una sonda se drena tras CADA paso: un diálogo de error, una notificación de peligro, un campo inválido, un error js no capturado, un 5xx del mismo origen o un cuerpo JSON-RPC con `error` en HTTP 200 marcan el paso como `error` y congelan un `*-error.png` de lo que el usuario vio — el chequeo que una captura simple nunca tuvo. Los pasos de solo lectura corren por defecto; los pasos ACTION (`fill`/`select`/`press`/`click`/`save`/`discard`/`click_text`/`add_line`) exigen `allow_actions=true` Y `confirm_destructive=true` — una mutación que el guard registra — y el entorno `production` rechaza la corrida. Los patrones `ignore` se descartan pero se cuentan; sin navegador la tool escribe un reporte `NEEDS_BROWSER` en vez de inventar un pass. Los reportes caen en `<spec>/ui-verify/` y el gate `sdd_phase succeed` los lee. |
 | `odoo_tests` | La mitad de pruebas del pipeline, usable **por sí sola** (sin spec, fase, checkpoint ni instancia): `check` escanea las pruebas Python por lo que un log de instalación no puede mostrar — un `tests/*.py` que `tests/__init__.py` nunca importa (Odoo solo carga lo importado, así que la prueba nunca corre), una clase que no es un caso de test de Odoo, un `test_*` que no afirma nada o afirma algo trivialmente verdadero, una excepción tragada, `time.sleep`, skips explícitos, `cr.commit()` dentro de una prueba (rompe el rollback por prueba), `SavepointCase` en 17+, un `HttpCase` sin `start_tour` — con la densidad de aserciones como métrica informativa. `plan` mapea cada criterio de aceptación de la spec a la prueba que lo menciona (por AC id o por el `REQ-<AREA>-NN` de su requisito) y lista los criterios sin prueba. `scaffold` escribe un **stub RED por criterio sin cubrir** (el cuerpo lanza `NotImplementedError`, nunca un pass vacío), create-only e idempotente, agregando el import para que el archivo realmente cargue. |
 | `sdd_handoff` | Escribe `specs/<id>/handoff.md` (fase final, veredicto, decisiones, blockers, checkpoints, el journal de datos **completo** de la spec, config efectiva, próximos pasos) al cerrar la ejecución. Solo lista los checkpoints de ESTA spec (los de otras specs que comparten el contenedor se cuentan, no se nombran) y resume la allowlist global de mutaciones en vez de volcarla. |
 | `odoo_config` | Lee o actualiza la configuración persistente y responde **"¿en qué proyecto estoy?"**: la raíz resuelta, su procedencia (cwd de la sesión / configurada / cwd del proceso), la base de specs, el directorio de spec efectivo y el archivo de configuración en uso. |
 | `odoo_i18n` | Traducciones con los **modelos propios de Odoo**: `base.language.export` aporta los términos traducibles y `base.language.install` activa el idioma. `export` escribe `<módulo>/i18n/<lang>.po` (creando la carpeta `i18n/` si falta) y **fusiona** con el fichero existente — una traducción escrita nunca se reemplaza por lo que diga el export, los términos nuevos se añaden y los que el módulo ya no tiene se conservan como `#~` en vez de borrarse. `status` informa la cobertura de cada idioma y `check` falla mientras quede una entrada sin texto o sin el comentario `#. module: <nombre>` que exige `oca-checks-po` de OCA (lo escribe el export; el POT de Odoo no). No traduce: el export da los identificadores y el texto lo escribe una persona. Consciente de la versión (Odoo 16 es el corte, el mismo que eliminó `ir.translation`). |
 | `odoo_import` | Preparación de una importación CSV/XLS/XLSX por el importador **propio de Odoo** (`base_import`), nunca con un parser de este plugin: `prepare` sube el archivo autorizado con la sesión web y su propia aprobación, `preview` informa lo que Odoo lee (hojas, encabezados, una muestra acotada, los campos importables), `map` registra una decisión por columna y `plan` lo convierte en un lote `apply` — que `odoo_functional` aprueba y ejecuta como cualquier otro, así que esta tool nunca aplica una importación por sí sola. Una respuesta JSONP se parsea como dato (jamás se ejecuta), la cookie de sesión no sale del plugin, y una versión fuera de las familias verificadas se rechaza indicando qué investigar. |
 | `odoo_functional` | El ejecutor de lotes del camino funcional: `plan` (valida y guarda un lote fail-closed), `approve` (aprobación humana nativa atada a los hashes de spec, diseño, plan y lote), `apply` (lo ejecuta operación por operación, persistiendo cada estado antes y después de la llamada, y lo registra como **aplicado sólo después de releer el estado que la operación declaró** — una llamada que responde pero deja los registros intactos es un fallo, no un éxito), `inspect` (descubrimiento solo-lectura bajo su propio alcance), `status`, `reconcile` (decide un resultado que volvió desconocido), `verify` (evidencia por criterio de aceptación) y `compensate` (arma el lote de deshacer desde el journal). El entorno declarado condiciona la corrida y producción exige además un respaldo declarado; mientras un lote corre, toda otra vía de mutación queda denegada. |
+
+---
+
+## 🔍 Verificación de UI
+
+La evidencia RPC y la evidencia de UI son complementarias: un `search_read`
+puede devolver OK mientras la pantalla muestra un traceback. `odoo_ui_verify`
+cierra esa brecha — mismo motor de navegador que `odoo_manual capture`, pero
+una sonda se drena tras CADA paso (diálogo de error, notificación de peligro,
+campo inválido, error js, 5xx, cuerpo JSON-RPC con `error`) y la pantalla
+fallida queda congelada en un `*-error.png`. `sdd_phase succeed` exige esta
+evidencia cuando la spec tiene superficie de UI — `## Views` de
+`architecture.md` con contenido real, o una fila `ui` en `test-plan.md`. Sin
+navegador el reporte es `NEEDS_BROWSER` y las filas `ui` quedan pendientes
+para un humano: nunca un pass inventado.
+
+Cuando un flujo declara `roles` (resultado esperado por grupo: `ok` o
+`denied`), `operation=matrix` lo verifica: tras la aprobación nativa crea un
+usuario temporal `sddqa_*` por grupo, ejecuta solo los flujos que declaran ese
+grupo y siempre elimina los usuarios — `CLEANUP_PENDING` nombra a los
+supervivientes si la eliminación falla. Las contraseñas aleatorias nunca
+salen de la memoria del proceso, y estas altas no pasan por el journal de
+aprobaciones (la aprobación nativa ES el control).
 
 ---
 
@@ -911,7 +935,7 @@ los necesita.
 
 ## 🤖 Experiencia del modelo
 
-El agente ve 19 tools con descripciones autocontenidas. El flujo típico:
+El agente ve 20 tools con descripciones autocontenidas. El flujo típico:
 `sdd_phase init` → entrevista de seguridad + `odoo_connect` → fases con compuerta
 mediante `APPROVED` → `sdd_checkpoint create` → código → `odoo_security_scan` →
 `odoo_module install` → si hay traceback, `odoo_errors` + `sdd_phase fail` (puede
@@ -1027,7 +1051,7 @@ ModuleLoader que aporta la sección **Odoo SDD** en Ajustes.
 
 | Archivo | Rol |
 |---|---|
-| `src/index.ts` | Entrada del plugin: registro de las 19 tools, resolución de configuración y el guard de política |
+| `src/index.ts` | Entrada del plugin: registro de las 20 tools, resolución de configuración y el guard de política |
 | `src/types.ts` | Tipos públicos de payload (nunca contienen material secreto) |
 | `src/credentials.ts` | Cascada de credenciales, carga/validación del `.env`, verificación de permisos, `redact()`, fail-closed |
 | `src/odoo-client.ts` | Cliente JSON-RPC: `common.version`, `authenticate`, `execute_kw`, `button_immediate_*`, `ir.logging`, `/web/session/authenticate` |
@@ -1064,6 +1088,9 @@ ModuleLoader que aporta la sección **Odoo SDD** en Ajustes.
 | `src/prose-lint.ts` | Reglas de prosa advisory en español e inglés (patrones que delatan IA, longitud de frase, legibilidad) más las dos reglas estructurales ERROR de las que depende el formato OCA |
 | `src/manual-render.ts` | Render determinista de Markdown + página de Apps, `sha256` por archivo, y un archivo editado a mano que nunca se sobrescribe salvo `overwrite=true` |
 | `src/manual-capture.ts` | El motor de navegador: bloqueo de origen, gating de pasos con solo-lectura primero, PNG anotados (1440×900, overlay removido), snapshots ARIA, `capture.json` |
+| `src/ui-probe.ts` | La sonda de errores de UI: eventos `pageerror`/console/5xx/JSON-RPC-`error`/request-failed más el escaneo DOM (diálogo de error, toast de peligro, campo inválido); los patrones `ignore` se descartan pero se cuentan, los mensajes se depuran y se acotan |
+| `src/ui-verify.ts` | El runner de verificación: pasos base + pasos de verificación sobre las familias versionadas, drenaje de la sonda por paso, evidencia `-error.png`, el crawl smoke del canon y el lint de flujos |
+| `src/ui-verify-tool.ts` | La tool `odoo_ui_verify`: plan / lint / crawl / run / matrix / status, las dos vallas de acciones, el rechazo a producción, reportes `NEEDS_BROWSER`, los usuarios temporales aprobados de la matriz por rol |
 | `src/manual-import.ts` | Lector del dialecto `codegen` de Playwright: mapeo de etiquetas al canon, pasos genéricos con WARN en vez de adivinanzas, rechazo de credenciales por línea |
 | `src/manual-audit.ts` | Auditoría de solo lectura que permite al veredicto de documentación cubrir un manual existente (cobertura de capturas, obsolescencia del canon, salud de la prosa) y no cambia nada cuando no hay ninguno |
 

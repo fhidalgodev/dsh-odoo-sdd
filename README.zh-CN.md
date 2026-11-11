@@ -175,12 +175,12 @@ dsh plugin --profile web add dsh-odoo-sdd
 
 - **pnpm 必须在你的 `PATH` 上**（不在时 `dsh plugin` 会报出来）。
 - 任何 pnpm spec 都能用，所以你可以锁定版本：
-  `dsh plugin --profile web add dsh-odoo-sdd@0.20.0`。
+  `dsh plugin --profile web add dsh-odoo-sdd@0.21.0`。
 
 更想用原生 npm —— 一个依赖这个插件的项目，或者一个 CI job？
 
 ```bash
-npm install dsh-odoo-sdd        # 0.20.0
+npm install dsh-odoo-sdd        # 0.21.0
 ```
 
 > [!IMPORTANT]
@@ -466,7 +466,7 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 
 ---
 
-## 🧰 19 个工具
+## 🧰 20 个工具
 
 | 工具 | 用途 |
 |---|---|
@@ -483,12 +483,32 @@ odoo_functional operation=approve / apply            # 批次路径，保持不�
 | `odoo_security_scan` | 本地静态安全审查（不需要实例）：拼接式原生 SQL、`eval`/`exec`/`pickle`、硬编码密钥、没有理由的 `sudo()`、`auth="none"`、被关闭的 CSRF、QWeb `t-raw`。发现项带有 `file:line` + 修复提示；任何 ERROR 都会阻止 `DONE`。 |
 | `odoo_manual` | 基于证据的叙述式用户手册。**`canon`** 从实例读取一个模型的功能 canon（视图、header 按钮以及显示它们的状态、必填字段、notebook 页、动作、菜单、访问规则、用户组、`raise UserError`/`ValidationError` 与 `_sql_constraints` 位置）并连同指纹持久化：手册只能描述 canon 说过的话。**`plan`** 把 canon 变成一份分镜（流程、有序步骤、每步一句话）：再次运行会**合并**，已经写好的叙述、截图和散文都会保留。**`lint`** 用 canon 校验分镜和渲染后的散文（`CANON-STALE`、`TARGET-UNKNOWN`、`PLACEHOLDER-UNBOUND`、`ACTS-MISSING`、`RECOVERY-MISSING`、西语和英语的 AI 腔模式 → 带确切行号的 ERROR/WARN）。**`explore`** 返回真实屏幕的 ARIA 快照，因此不会去猜任何 xml id 或标签。**`capture`** 驱动浏览器：只读步骤总是执行，而动作步骤（`new`/`fill`/`select`/`press`/`click`）需要 `allow_actions=true` —— 守卫会把它当作一次变更。**`render`** 写出手册和一个 Apps 页面（只创建，除非 `overwrite=true`）。**`import`** 把 Playwright `codegen` 录制转换成一条流程，并拒绝任何携带凭据的录制。手册存放在「设置」指定的位置（`manualsMode`：`specs` 与 spec 同目录、`docs` 在 `manualsDir` 下、`module` 作为模块 `readme/manual/` 下的 OCA 片段）；没有 spec 的独立工作绝不会因此被阻塞。**`canon`** 接收访谈——`as_user`（手册写给谁）、`admin`、`module`/`modules` 与 `groups`——并把它记录下来：清单随即覆盖该模块拥有的**每一个菜单和每一个动作**（菜单打开的动作，即使是原生的），每个模型都会带上它的字段（标签、类型、必填、关联/选择、用户组）、表单和列表按钮、statusbar 状态以及按用户组的访问行。**`plan`** 为每个菜单开一条流程、为每个用户组的巡览开一条流程，并播种一份 `docs` 清单：每个字段、每个按钮一格空白。**`lint`** 在菜单、动作、字段、按钮、工作流或用户组仍未被覆盖时报告 `MODULE-COVERAGE`、`INTERVIEW-MISSING`、`FIELD-COVERAGE`、`BUTTON-COVERAGE`、`WORKFLOW-COVERAGE` 与 `GROUP-COVERAGE` —— 带理由的 `skip` 属于已记录的覆盖，而 `ROLE-UNVERIFIED` 只是警告，因为截图是以已连接用户的身份跑的。**`render`** 为每个模型加一张表（类型、必填、关联、用户组，以及你写的那句话）并为每个访问组加一节。只要分镜已存在，`odoo_docs` 就会在文档结论中加入 `## User manual` 一节 —— 没有分镜时则保持不变。 |
 | `odoo_video` | 流程的配音**视频**文档，与 `odoo_manual` 并列的独立工具（绝不写 `MANUAL.md`）。**`plan`** 从实例 canon 起草分镜 —— 或用 `from_manual=<slug>` 复制既有手册的 `canon.json` + `storyboard.json`（import-once：拒绝覆盖已有视频分镜）。带模块 canon 时还会**播种覆盖**：静默的 `v*` `highlight` 流程，使系列覆盖模块全部菜单、动作、视图、字段、按钮、页面、定时任务、自动化、模板、规则与向导。**`audit`** 打印覆盖矩阵 —— 只有**已叙述**的步骤（或 `covers[]`）才算覆盖，播种未叙述的步骤为 pending，`videoSkip`（ref → 理由）是有记录的跳过；`VIDEO-COVERAGE` 在读到 100% 前是 ERROR。**`voice`** 按 `_hook` → 步骤 → `_outro` 朗读，使用你选择的语音预设（`ttsPreset`：推荐 `viral-male`/`viral-female`、`calm-male`/`calm-female`、`offline-piper`、或 `custom` 自带 `ttsCommand`/`ttsVoice`）—— 无默认值：`NEEDS_TTS` 列出预设并提示云端预设会把配音文本发给 Microsoft（开发者的显式决定）。**`capture`** 在真实浏览器中执行流程，录制**始终开启**：`video/raw/<flow>.webm`、每步 `startMs`/`endMs`/`focus`、仅在录制时注入光标/点击波纹/焦点环覆盖层，且每步按配音时长在**活动页面**上保持 —— `highlight` 步骤圈出字段、按钮、标签页或菜单项，不可见时报错。**`assemble`** 在工作区根目录写出编号系列：`NN-标题.mp4|.srt|.vtt`（按 `flow.group` 分组），对每个 `focus` 做入场缩放、默认烧录药丸字幕（`captions=false` 关闭）、章节药丸、hook 标题卡、outro "下一步" 药丸、合成音效 + 闪避音乐床（参数/配置 `music`/`sfx`、`videoMusic`/`videoSfx`），以及两遍 `loudnorm` 至 −14 LUFS。**`index`** 重新生成 `README.md`（分组、时长、进度勾选框、覆盖率小节、推荐路线），报告孤立的 `NN-*` 媒体文件，并在系列不完整时返回 `ok:false`/`COVERAGE GAPS n`。语言在 `plan` 时固定；lint（`HOOK-LONG`、`SENTENCE-LONG`、`FILLER`、`COVERS-UNKNOWN`……）保证脚本口语化。 |
+| `odoo_ui_verify` | 基于与 `odoo_manual capture` **同一引擎**的浏览器端 QA 验证 —— RPC 证据看不到的那一层。**`plan`** 起草 `ui-verify/flows.json`（`test-plan.md` 中每个 `ui` 行对应一个骨架流程，create-only），**`lint`** 检查流程与 AC 覆盖，**`crawl`** 对模块自身 canon 做只读冒烟（每个菜单 → 各视图 → 首条记录 → notebook 页；表头按钮只用 `expect_visible` 检查，绝不点击），**`run`** 执行已编写的流程，**`matrix`** 运行 `flows.json` 中声明的角色矩阵（每个组一个经批准的临时用户，运行后删除），**`status`** 汇总报告。每一步之后都会排空探针：错误对话框、危险通知、无效字段、未捕获的 js 错误、同源 5xx 或 HTTP-200 但带 `error` 的 JSON-RPC 响应体，都会把该步标记为 `error` 并冻结一张用户实际所见的 `*-error.png` —— 这正是普通截图从未做过的检查。只读步骤默认可运行；ACTION 步骤（`fill`/`select`/`press`/`click`/`save`/`discard`/`click_text`/`add_line`）需要 `allow_actions=true` 且 `confirm_destructive=true` —— 守卫按变更记录 —— `production` 环境则直接拒绝运行。`ignore` 模式会被丢弃但仍计数；没有浏览器时工具写出 `NEEDS_BROWSER` 报告而不是编造通过。报告落在 `<spec>/ui-verify/`，`sdd_phase succeed` 门禁会读取它们。 |
 | `odoo_tests` | 管道的测试一侧，可**独立使用**（不需要 spec、阶段、checkpoint 或实例）：`check` 扫描 Python 测试中安装日志看不到的问题 —— `tests/__init__.py` 从未导入的 `tests/*.py`（Odoo 只加载被导入的模块，因此该测试从不运行）、不是 Odoo 测试用例的类、没有任何断言或断言恒真的 `test_*`、被吞掉的异常、`time.sleep`、显式 skip、测试内的 `cr.commit()`（破坏每个测试的回滚）、17+ 上的 `SavepointCase`、没有 `start_tour` 的 `HttpCase`，并以断言密度作为参考指标。`plan` 把 spec 的每个验收标准映射到提到它的测试（按 AC id 或按其需求的 `REQ-<AREA>-NN`），并列出没有任何测试的标准。`scaffold` 为每个未覆盖的标准写一个 **RED stub**（函数体抛出 `NotImplementedError`，绝不是空洞的通过），只创建且幂等，并追加 import 让文件真正被加载。 |
 | `sdd_handoff` | 在运行收尾时写入 `specs/<id>/handoff.md`（最终阶段、结论、决策、blockers、checkpoint、**完整的**按 spec 的数据日志、生效配置、下一步）。只列出**本 spec** 的 checkpoint（同一容器中其他 spec 的只计数、不列举），并概括项目级的变更允许列表而不是整段粘贴。 |
 | `odoo_config` | 读取或更新持久化配置，并回答**"我现在在哪个项目里？"**：解析出的根目录、它的来源（会话 cwd / 已配置 / 进程 cwd）、specs 基础目录、生效的 spec 目录和正在使用的配置文件。 |
 | `odoo_i18n` | 使用 **Odoo 自身的模型** 处理翻译：`base.language.export` 提供可翻译术语，`base.language.install` 激活语言。`export` 写入 `<模块>/i18n/<lang>.po`（缺失时创建 `i18n/` 目录）并与已有文件**合并** —— 已写好的译文绝不会被导出的内容替换，新术语会被追加，模块已删除的术语保留为 `#~` 而不是删除。`status` 报告每种语言的覆盖率，`check` 在仍有条目缺少文本、或缺少 OCA `oca-checks-po` 要求的 `#. module: <名称>` 注释时失败（导出会写入该注释，Odoo 自身的 POT 不会）。它不翻译：导出给出消息 ID，文本由人来写。感知版本（Odoo 16 是分界，也正是移除 `ir.translation` 的版本）。 |
 | `odoo_import` | 通过 Odoo **自己的**导入器（`base_import`）准备 CSV/XLS/XLSX 导入，绝不使用本插件自己的解析器：`prepare` 用 web 会话和它自己的审批上传被授权的文件，`preview` 报告 Odoo 读到了什么（工作表、表头、有界样本、可导入字段），`map` 为每一列记录一个决定，`plan` 把它变成一个 `apply` 批次 —— 再由 `odoo_functional` 像其他批次一样批准并执行，所以这个工具自己永远不会应用导入。JSONP 应答会作为数据解析（绝不执行），会话 cookie 永不离开插件，不在已验证版本族内的版本会被拒绝并告知该调查什么。 |
 | `odoo_functional` | 功能路径的批次执行器：`plan`（以 fail-closed 方式校验并存储一个批次）、`approve`（绑定 spec、设计、计划和批次哈希的原生人工审批）、`apply`（一次一个操作地执行，在调用前后持久化每个状态，并且**只有在回读该操作声明的状态之后**才记为已应用 —— 一个返回了应答却没有改变记录状态的调用是失败，不是成功）、`inspect`（在其自身范围内的只读发现）、`status`、`reconcile`（裁决返回为未知的结果）、`verify`（按验收标准给出证据）和 `compensate`（从日志构建撤销批次）。声明的环境会为运行设门禁，生产环境还需要一份声明的备份；批次运行期间，所有其他变更路径都会被拒绝。 |
+
+---
+
+## 🔍 UI 验证
+
+RPC 证据与 UI 证据是互补的：`search_read` 返回 OK 时屏幕可能正显示
+traceback。`odoo_ui_verify` 补上这一层 —— 与 `odoo_manual capture` 同一个
+浏览器引擎，但每一步之后都会排空探针（错误对话框、危险通知、无效字段、
+js 错误、5xx、带 `error` 的 JSON-RPC 响应体），并把失败的画面冻结成
+`*-error.png`。当 spec 有 UI 界面 —— `architecture.md` 的 `## Views` 有
+真实内容，或 `test-plan.md` 中有 `ui` 行 —— `sdd_phase succeed` 就要求这份
+证据。没有浏览器时报告为 `NEEDS_BROWSER`，`ui` 行保持 pending 等人来验：
+绝不编造一个通过。
+
+当流程声明 `roles`（每个组的预期结果：`ok` 或 `denied`）时，
+`operation=matrix` 会验证它：经原生批准后为每个组创建一个
+`sddqa_*` 临时用户，只运行声明该组的流程，并始终删除这些用户 ——
+若删除失败，`CLEANUP_PENDING` 会列出幸存者。随机密码绝不离开进程内存，
+这些创建也不经过审批日志（原生批准本身就是控制）。
 
 ---
 
@@ -795,7 +815,7 @@ spec*：没有自己指针的会话，在它足够新（< 12 小时）且该 spe
 
 ## 🤖 模型体验
 
-agent 看到 19 个自包含描述的工具。典型流程：
+agent 看到 20 个自包含描述的工具。典型流程：
 `sdd_phase init` → 安全访谈 + `odoo_connect` → 带 `APPROVED` 的门禁阶段 →
 `sdd_checkpoint create` → 写代码 → `odoo_security_scan` →
 `odoo_module install` → 出现 traceback 时用 `odoo_errors` + `sdd_phase fail`
@@ -896,7 +916,7 @@ JS ModuleLoader bundle，它贡献 **Odoo SDD** 设置区块。
 
 | 文件 | 作用 |
 |---|---|
-| `src/index.ts` | 插件入口：注册 19 个工具、解析配置和策略守卫 |
+| `src/index.ts` | 插件入口：注册 20 个工具、解析配置和策略守卫 |
 | `src/types.ts` | 公开的 payload 类型（绝不包含密钥材料） |
 | `src/credentials.ts` | 凭据级联、`.env` 加载/校验、权限验证、`redact()`、fail-closed |
 | `src/odoo-client.ts` | JSON-RPC 客户端：`common.version`、`authenticate`、`execute_kw`、`button_immediate_*`、`ir.logging`、`/web/session/authenticate` |
@@ -929,6 +949,9 @@ JS ModuleLoader bundle，它贡献 **Odoo SDD** 设置区块。
 | `src/prose-lint.ts` | 西语和英语的建议性散文规则（AI 腔模式、句子长度、可读性）以及 OCA 格式所依赖的两条结构性 ERROR 规则 |
 | `src/manual-render.ts` | 确定性的 Markdown + Apps 页面渲染、逐文件 `sha256`，以及一个绝不会被覆盖（除非 `overwrite=true`）的手工编辑文件 |
 | `src/manual-capture.ts` | 浏览器引擎：源锁定、只读优先的步骤门禁、带标注的 PNG（1440×900，标注层已移除）、ARIA 快照、`capture.json` |
+| `src/ui-probe.ts` | UI 错误探针：`pageerror`/console/5xx/JSON-RPC `error`/request-failed 事件加 DOM 扫描（错误对话框、危险 toast、无效字段）；`ignore` 模式被丢弃但计数，消息经脱敏并截断 |
+| `src/ui-verify.ts` | 验证执行器：基于版本化选择器族的基础步骤 + 验证专用步骤、逐步排空探针、`-error.png` 证据、canon 冒烟爬取与流程 lint |
+| `src/ui-verify-tool.ts` | `odoo_ui_verify` 工具：plan / lint / crawl / run / matrix / status，双重动作闸门、生产环境拒绝、`NEEDS_BROWSER` 报告、角色矩阵的经批准临时用户 |
 | `src/manual-import.ts` | Playwright `codegen` 方言读取器：canon 标签映射、以 WARN 代替猜测的通用步骤、按行拒绝凭据 |
 | `src/manual-audit.ts` | 只读审计，让文档结论能覆盖一份已有手册（截图覆盖率、canon 新旧、散文健康度），没有手册时不改动任何东西 |
 | `src/project-conventions.ts` | 从项目自己的规则解析文档语言，默认英文 |

@@ -11,6 +11,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { extname, join } from "node:path";
 import { createHash } from "node:crypto";
+import { stripHtmlComments } from "./markdown-text.js";
 import type { RpcResult } from "./odoo-client.js";
 
 /** The only client surface the canon needs (read-only executeKw). */
@@ -152,7 +153,7 @@ export function simpleVisibleStates(expr: string | undefined, statesRaw?: string
 /** Parse one compiled view arch (form, list/tree or search). */
 export function parseArch(arch: string): ArchCanon {
 	const canon: ArchCanon = { buttons: [], fields: [], pages: [], listColumns: [], filters: [] };
-	const noComments = arch.replace(/<!--[\s\S]*?-->/g, "");
+	const noComments = stripHtmlComments(arch);
 	// Scope stack of open tag names; `header` and `notebook` only matter as
 	// direct containers, so a flat set check is enough.
 	const stack: string[] = [];
@@ -1013,7 +1014,7 @@ async function collectModuleInventory(
 		for (const r of got.rows) {
 			const adds = new Set<string>();
 			const modifies = new Set<string>();
-			const arch = String(r["arch_db"] ?? "").replace(/<!--[\s\S]*?-->/g, "");
+			const arch = stripHtmlComments(String(r["arch_db"] ?? ""));
 			for (const m of arch.matchAll(TAG_RE)) {
 				if (m[1] === "/") continue;
 				const tag = m[2].toLowerCase();

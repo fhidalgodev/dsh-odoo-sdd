@@ -93,6 +93,10 @@ const CARDS: Record<string, (args: Record<string, unknown>) => CallCard> = {
 		title: fields("Video", text(a["operation"]) ?? "plan", text(a["model"]) ?? text(a["flow"])),
 		kind: "execute",
 	}),
+	odoo_ui_verify: (a) => ({
+		title: fields("UI verify", text(a["operation"]) ?? "run", text(a["spec_id"]) ?? text(a["flow"])),
+		kind: "execute",
+	}),
 	sdd_phase: (a) => ({
 		title: fields(text(a["spec_id"]) ?? "project", text(a["operation"]) ?? "status"),
 		kind: "execute",

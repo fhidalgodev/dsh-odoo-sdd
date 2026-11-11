@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: every job reads the checkout and nothing else, so the token
+# carries no write scope. CodeQL flags a job that inherits the default.
+permissions:
+  contents: read
+
 jobs:
   # Main matrix: the contract with the CURRENT host, on both supported Node lines
   # and both supported operating systems. The plugin claims cross-platform

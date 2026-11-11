@@ -28,7 +28,7 @@
  *
  * @module dsh-odoo-sdd/sdd-state
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, renameSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { readJsonWithRecovery, quarantinedSiblings, writeFileAtomic } from "./atomic.js";
@@ -528,7 +528,7 @@ export function transition(
 		}
 		// And the coverage the verdict claimed has to still hold: a criterion that
 		// appeared in test-plan.md after the verdict was recorded was never tested.
-		const coverage = evidenceGaps(state.specDir);
+		const coverage = evidenceGaps(state.specDir, state.mode);
 		if (coverage.length > 0) {
 			return {
 				ok: false,
@@ -746,7 +746,7 @@ export function recordSuccess(state: SddState, detail: string): { ok: boolean; s
 			],
 		};
 	}
-	const gaps = evidenceGaps(state.specDir);
+	const gaps = evidenceGaps(state.specDir, state.mode);
 	if (gaps.length > 0) {
 		return { ok: false, state, gaps };
 	}
@@ -781,11 +781,35 @@ export function artifactHashes(specDir: string): Record<string, string> {
 		}
 		out[name] = createHash("sha256").update(text, "utf8").digest("hex");
 	}
+	// The UI-verification report joins the fingerprint ONLY when it exists: a
+	// spec without UI evidence keeps the same artifact set it had before, so a
+	// verdict recorded with no report is not retroactively invalidated.
+	const uiReport = join(specDir, "ui-verify", "report.json");
+	if (existsSync(uiReport)) {
+		out["ui-verify/report.json"] = createHash("sha256").update(readFileSync(uiReport, "utf8"), "utf8").digest("hex");
+	}
+	const uiMatrix = join(specDir, "ui-verify", "matrix-report.json");
+	if (existsSync(uiMatrix)) {
+		out["ui-verify/matrix-report.json"] = createHash("sha256").update(readFileSync(uiMatrix, "utf8"), "utf8").digest("hex");
+	}
 	return out;
 }
 
 /** Record a failed verification (persists the honest FAILED verdict). */export function recordFailedVerdict(state: SddState, detail: string): SddState {
 	writeVerdict(state, false, detail);
+	// A FAILED verdict invalidates the UI evidence too: the ui-verify reports
+	// are archived aside (never deleted) so the FIX_LOOP must re-run the
+	// browser verification instead of reusing a report written before the fix.
+	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+	for (const name of ["report.json", "crawl-report.json", "matrix-report.json"]) {
+		const file = join(state.specDir, "ui-verify", name);
+		if (!existsSync(file)) continue;
+		try {
+			renameSync(file, file.replace(/\.json$/, `.${stamp}.json`));
+		} catch {
+			// Archival is best-effort: a locked file must not brick the verdict.
+		}
+	}
 	// A failed verification invalidates the green one: the evidence changed, so
 	// the stored PASSED must not stay available to a later DONE.
 	state.verdictArtifacts = undefined;
@@ -1061,11 +1085,13 @@ function normalizeAcStatus(cell: string): string {
  * one format are two answers to "what does this plan say", and the gate that
  * closes a criterion would then disagree with the one that opens it.
  */
-interface PlanRow {
+export interface PlanRow {
 	/** AC cell exactly as written (used in messages, so the author can find it). */
 	rawAc: string;
 	/** Normalized AC id (comparable with spec.md). */
 	ac: string;
+	/** Layer cell exactly as written (`static`, `server`, `rpc`, `ui`, `manual`, combos). */
+	layer: string;
 	/** Status cell exactly as written. */
 	rawStatus: string;
 	/** Normalized status token (`pass`, `red`, …). */
@@ -1077,7 +1103,7 @@ interface PlanRow {
  * @param specDir - spec directory holding test-plan.md.
  * @returns the rows in file order (empty when the file is missing).
  */
-function planRows(specDir: string): PlanRow[] {
+export function planRows(specDir: string): PlanRow[] {
 	const path = join(specDir, "test-plan.md");
 	if (!existsSync(path)) return [];
 	const out: PlanRow[] = [];
@@ -1088,7 +1114,7 @@ function planRows(specDir: string): PlanRow[] {
 		if (cols.length < 4) continue;
 		if (/^[-: ]+$/.test(cols[0])) continue; // markdown separator row
 		if (/^ac$/i.test(cols[0])) continue; // header row
-		out.push({ rawAc: cols[0], ac: normalizeAcId(cols[0]), rawStatus: cols[3], status: normalizeAcStatus(cols[3]) });
+		out.push({ rawAc: cols[0], ac: normalizeAcId(cols[0]), layer: cols[2] ?? "", rawStatus: cols[3], status: normalizeAcStatus(cols[3]) });
 	}
 	return out;
 }
@@ -1156,9 +1182,11 @@ export function redEvidenceGaps(specDir: string): string[] {
  * criterion. A pending, failed, unknown, manual-without-confirmation or
  * unrecognized status is a gap; a missing row set is a gap.
  * @param specDir - spec directory holding test-plan.md.
+ * @param mode - pipeline mode; the UI-verification gate only applies to
+ *   create/bug specs (functional runs keep their own verification contract).
  * @returns the list of unmet evidence requirements (empty when complete).
  */
-export function evidenceGaps(specDir: string): string[] {
+export function evidenceGaps(specDir: string, mode: PipelineMode | null = null): string[] {
 	if (!existsSync(join(specDir, "test-plan.md"))) {
 		return ["test-plan.md is missing: a PASSED verdict needs per-AC evidence."];
 	}
@@ -1208,6 +1236,122 @@ export function evidenceGaps(specDir: string): string[] {
 		gaps.push(
 			"spec.md declares no acceptance criteria this gate can find: name them with an AC id " +
 				"(`- [ ] AC1: …` under `## Acceptance Criteria`), because otherwise there is nothing to be complete against.",
+		);
+	}
+	gaps.push(...uiVerifyGaps(specDir, mode));
+	return gaps;
+}
+
+/**
+ * Whether `architecture.md` `## Views` declares real UI surface. The section
+ * reuses the same "template comments are not a decision" rule as `##
+ * Documentation`, and an explicit "none"-class answer (`none`, `n/a`, `no
+ * views`, `ninguna`, …) counts as NO interface — the honest opt-out of the
+ * UI-verification gate for a module that ships no screens.
+ */
+function hasUiViews(specDir: string): boolean {
+	const path = join(specDir, "architecture.md");
+	if (!existsSync(path)) return false;
+	const section = sectionBody(readFileSync(path, "utf8"), "## Views");
+	if (section === "") return false;
+	return !/^(none|n\/a|no\s+views?|ninguna|sin\s+vistas?|not\s+applicable)\b/i.test(section);
+}
+
+interface UiVerifyReportShape {
+	verdict?: string;
+	mode?: string;
+	flows?: Array<{ id?: string; status?: string; steps?: Array<{ findings?: Array<{ kind?: string; message?: string }> }> }>;
+	/** matrix-report.json: flows nested per group. */
+	groups?: Array<{ flows?: Array<{ id?: string; steps?: Array<{ findings?: Array<{ kind?: string; message?: string }> }> }> }>;
+}
+
+/**
+ * The UI-verification gate inside {@link evidenceGaps}: when the spec has UI
+ * surface — `## Views` with real content, or a `ui` row in test-plan.md — a
+ * PASSED verdict needs `odoo_ui_verify` evidence, not only RPC evidence.
+ *
+ * Reading of the reports: a missing `ui-verify/report.json` is a gap (run the
+ * tool; without a browser the run still records a NEEDS_BROWSER report — the
+ * requirement is documented, never guessed); `FAILED`/`PARTIAL` are gaps with
+ * the first findings named; `NEEDS_BROWSER` and `PASSED` close this check.
+ * `crawl-report.json` only speaks when it exists and failed.
+ * @param specDir - spec directory holding the ui-verify workspace.
+ * @param mode - pipeline mode; functional specs are exempt.
+ * @returns the list of gaps (empty when the gate does not apply or is met).
+ */
+export function uiVerifyGaps(specDir: string, mode: PipelineMode | null = null): string[] {
+	if (mode !== "create" && mode !== "bug") return [];
+	const uiRows = planRows(specDir).filter((row) => /\bui\b/i.test(row.layer));
+	if (!hasUiViews(specDir) && uiRows.length === 0) return [];
+
+	const gaps: string[] = [];
+	const readReport = (name: string): UiVerifyReportShape | null => {
+		const path = join(specDir, "ui-verify", name);
+		if (!existsSync(path)) return null;
+		try {
+			return JSON.parse(readFileSync(path, "utf8")) as UiVerifyReportShape;
+		} catch {
+			return { verdict: "UNREADABLE" };
+		}
+	};
+	const findingsOf = (report: UiVerifyReportShape): string[] =>
+		[...(report.flows ?? []), ...(report.groups ?? []).flatMap((g) => g.flows ?? [])].flatMap((flow) =>
+			(flow.steps ?? []).flatMap((step) => (step.findings ?? []).map((f) => `${flow.id ?? "?"}: ${f.kind ?? "ui"} ${f.message ?? ""}`)),
+		);
+
+	const run = readReport("report.json");
+	if (run === null) {
+		gaps.push(
+			"the spec declares UI surface but ui-verify/report.json is missing: run `odoo_ui_verify operation=run` " +
+				"(plan first if flows.json is not written). Without a browser the run still records a NEEDS_BROWSER " +
+				"report — the requirement stays documented instead of becoming an invented pass.",
+		);
+	} else if (run.verdict === "FAILED" || run.verdict === "PARTIAL" || run.verdict === "UNREADABLE") {
+		const findings = findingsOf(run).slice(0, 5);
+		gaps.push(
+			`ui-verify recorded ${run.verdict}${findings.length > 0 ? ` (${findings.join(" | ")})` : ""}: ` +
+				"fix the UI errors and re-run `odoo_ui_verify operation=run` — never edit flows.json to hide them.",
+		);
+	}
+	const crawl = readReport("crawl-report.json");
+	if (crawl !== null && (crawl.verdict === "FAILED" || crawl.verdict === "PARTIAL" || crawl.verdict === "UNREADABLE")) {
+		const findings = findingsOf(crawl).slice(0, 5);
+		gaps.push(
+			`the canon crawl recorded ${crawl.verdict}${findings.length > 0 ? ` (${findings.join(" | ")})` : ""}: ` +
+				"a screen the module's own menus open is erroring — fix it and re-run `odoo_ui_verify operation=crawl`.",
+		);
+	}
+	// Role matrix: only flows that declare `roles` create this gate.
+	const hasRoles = (() => {
+		try {
+			const parsed = JSON.parse(readFileSync(join(specDir, "ui-verify", "flows.json"), "utf8")) as {
+				flows?: Array<{ roles?: Record<string, string> }>;
+			};
+			return (parsed.flows ?? []).some((f) => f.roles !== undefined && Object.keys(f.roles).length > 0);
+		} catch {
+			return false;
+		}
+	})();
+	const matrix = readReport("matrix-report.json");
+	if (matrix === null) {
+		if (hasRoles) {
+			gaps.push(
+				"the UI role matrix was never run — flows.json declares per-role expectations (roles) but there is no " +
+					"matrix-report.json: run `odoo_ui_verify operation=matrix` (it creates one approved temporary user " +
+					"per group and deletes it afterwards).",
+			);
+		}
+	} else if (matrix.verdict === "FAILED" || matrix.verdict === "PARTIAL" || matrix.verdict === "CLEANUP_PENDING" || matrix.verdict === "UNREADABLE") {
+		const findings = findingsOf(matrix).slice(0, 5);
+		gaps.push(
+			`the UI role matrix recorded ${matrix.verdict}${findings.length > 0 ? ` (${findings.join(" | ")})` : ""}: ` +
+				"fix the role expectations or the interface and re-run `odoo_ui_verify operation=matrix`.",
+		);
+	} else if (matrix.verdict === "NOT_APPROVED" && hasRoles) {
+		// A refused approval still leaves the declared roles unverified.
+		gaps.push(
+			"the UI role matrix was NOT_APPROVED — the per-role expectations declared in flows.json stay unverified " +
+				"until `odoo_ui_verify operation=matrix` is approved and runs.",
 		);
 	}
 	return gaps;

@@ -191,13 +191,23 @@ jobs:
       # failure is never "the image happened to ship a different ffmpeg": the
       # version that ran is printed in the log either way.
       - name: Video E2E (ffmpeg required)
+        # ffmpeg is NOT in the ubuntu runner image, and apt is not dependable:
+        # when the ubuntu mirrors stop answering, apt spends tens of minutes in
+        # resolver retries. A static build from the official BtbN releases ships
+        # both binaries the suite reads (ffmpeg for the assembly, ffprobe for the
+        # stream durations), so the step never depends on apt at all.
         run: |
-          if ! command -v ffmpeg >/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq ffmpeg
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            dir="${RUNNER_TEMP:-/tmp}/ffmpeg-static"
+            mkdir -p "$dir"
+            curl -fsSL --retry 5 --retry-all-errors -o "$dir/ffmpeg.tar.xz" \
+              "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+            tar -xJf "$dir/ffmpeg.tar.xz" -C "$dir" --strip-components=1
+            rm -f "$dir/ffmpeg.tar.xz"
+            export PATH="$dir/bin:$PATH"
           fi
-          command -v ffmpeg
           ffmpeg -version | head -1
+          ffprobe -version | head -1
           # Through ci-test.sh so a failing check is NAMED in the annotations:
           # the job log needs a token to read, the check run does not.
           ODOO_SDD_FFMPEG="$(command -v ffmpeg)" ODOO_SDD_REQUIRE_FFMPEG=1 bash scripts/ci-test.sh tests/video.mjs

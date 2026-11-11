@@ -38,19 +38,40 @@ export const FX_INIT_SCRIPT = String.raw`
 		"@keyframes sdd-wave { from { transform: scale(1); opacity: .95; } to { transform: scale(4.5); opacity: 0; } }",
 		"@keyframes sdd-pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.035); } }",
 	].join("\n");
+	let hostEl = null;
+	function mount() {
+		if (!hostEl || hostEl.isConnected) return;
+		const root = document.documentElement;
+		// document_start runs before the parser creates <html>: appending the
+		// host to document there makes the OVERLAY the document root and the
+		// page is never parsed. Mount as soon as the parser gives us a root.
+		if (!root) return;
+		root.appendChild(hostEl);
+	}
 	function host() {
-		let h = document.getElementById("__sddFxHost");
-		if (h) return h;
-		h = document.createElement("div");
-		h.id = "__sddFxHost";
-		h.attachShadow({ mode: "open" });
+		if (hostEl) return hostEl;
+		const existing = document.getElementById("__sddFxHost");
+		if (existing) {
+			hostEl = existing;
+			return hostEl;
+		}
+		hostEl = document.createElement("div");
+		hostEl.id = "__sddFxHost";
+		hostEl.attachShadow({ mode: "open" });
 		const style = document.createElement("style");
 		style.textContent = CSS;
-		h.shadowRoot.appendChild(style);
+		hostEl.shadowRoot.appendChild(style);
 		const layer = document.createElement("div");
-		h.shadowRoot.appendChild(layer);
-		(document.documentElement || document).appendChild(h);
-		return h;
+		hostEl.shadowRoot.appendChild(layer);
+		mount();
+		if (!hostEl.isConnected) {
+			const obs = new MutationObserver(() => {
+				mount();
+				if (hostEl?.isConnected) obs.disconnect();
+			});
+			obs.observe(document, { childList: true, subtree: true });
+		}
+		return hostEl;
 	}
 	const layer = () => host().shadowRoot.lastElementChild;
 	const cursor = () => {

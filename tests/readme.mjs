@@ -70,7 +70,7 @@ plugin.apply(
 	{},
 );
 const toolNames = [...registered.keys()].sort();
-check("the plugin registers 19 tools", toolNames.length === 19, `got ${toolNames.length}`);
+check("the plugin registers 20 tools", toolNames.length === 20, `got ${toolNames.length}`);
 
 /**
  * Line indexes that are OUTSIDE fenced code blocks. Every structural assertion

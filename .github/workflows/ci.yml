@@ -160,7 +160,21 @@ jobs:
         run: npm run build
 
       - name: Install Chromium + bundled ffmpeg for playwright-core
-        run: npx playwright-core install --with-deps chromium ffmpeg
+        # The hosted runners occasionally lose DNS mid-install ("Temporary
+        # failure resolving 'security.ubuntu.com'") and apt aborts the whole
+        # browser download. Retry; when --with-deps keeps failing on apt, fall
+        # back to the browser alone — the ubuntu image already ships the shared
+        # libraries headless chromium needs.
+        run: |
+          for attempt in 1 2 3; do
+            if npx playwright-core install --with-deps chromium ffmpeg; then
+              exit 0
+            fi
+            echo "attempt ${attempt} failed; retrying in 10s"
+            sleep 10
+          done
+          echo "the --with-deps install kept failing on apt; installing the browsers only"
+          npx playwright-core install chromium ffmpeg
 
       - name: Capture E2E (browser required)
         run: ODOO_SDD_REQUIRE_BROWSER=1 node tests/capture.mjs

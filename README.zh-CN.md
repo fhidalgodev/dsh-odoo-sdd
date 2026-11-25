@@ -810,6 +810,13 @@ spec*：没有自己指针的会话，在它足够新（< 12 小时）且该 spe
 显示隐私提示）、`videoMusic`/`videoSfx` 开关与 `videosDir` 目录，以及预设为
 `custom`/`offline-piper` 时需要的命令字段。
 
+选择云端预设时会播放一段该音色的简短示例，每张云端卡片还有一个**试听**按钮，可在不改变
+选择的情况下重播。示例跟随界面语言（西班牙文，否则英文），并由 `odoo_video` 实际使用的
+同一音色朗读。示例随客户端 bundle 一起发布，因此试听不会向 Microsoft 发送任何内容；
+`offline-piper` 与 `custom` 没有示例，因为它们的音色是你自己的模型或命令。维护者用
+`node scripts/voice-samples.mjs` 重新生成（需要 `edge-tts`、`ffmpeg`，并先执行
+`npm run build`）；若示例音色与 `src/video-voices.ts` 不一致，`tests/client.mjs` 会失败。
+
 > [!IMPORTANT]
 > 有两个配置存储，更具体的那一个获胜：**Settings**（用户级，
 > `~/.dsh/settings.yaml`）和项目的 **`.sdd/config.json`**（由

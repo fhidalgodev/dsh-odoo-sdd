@@ -870,6 +870,14 @@ presets para copiar y pegar donde los necesites.
 > pipeline siguen funcionando, y `odoo_config mode=read|set` edita los mismos valores
 > desde la conversación.
 
+> **Idioma de la interfaz:** el panel y las preguntas de aprobación siguen el idioma
+> global del host (**Ajustes → General**); el plugin no añade un selector de idioma
+> propio. Trae textos en chino, inglés y español; cualquier otro idioma del host cae a
+> inglés. El español requiere un host que lo traiga de forma nativa (verificado en
+> **dsh 0.2.2-rc.5**); en un host anterior la opción simplemente no aparece.
+> `documentationLanguage` es otro ajuste: el idioma de la documentación del módulo que
+> genera el pipeline, no el de la interfaz.
+
 
 <p align="center">
   <img src="assets/settings-panel.jpg" alt="Ajustes → Odoo SDD: dónde viven las specs, quién aprueba las fases, licencia y el allowlist de mutaciones" width="640" />

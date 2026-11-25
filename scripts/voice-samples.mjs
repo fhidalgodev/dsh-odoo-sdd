@@ -34,9 +34,9 @@ const SAMPLE_TEXT = {
 	es: "Así sonará la narración de tus vídeos de Odoo.",
 	en: "This is how your Odoo videos will sound.",
 };
-const CLOUD_PRESETS = ["viral-male", "viral-female", "calm-male", "calm-female"];
-
-const { resolveVoiceEngine } = await import(new URL("../lib/video-voices.js", import.meta.url).href);
+const { resolveVoiceEngine, VOICE_PRESETS } = await import(new URL("../lib/video-voices.js", import.meta.url).href);
+/** Every cloud preset of the server catalog gets a sample. */
+const CLOUD_PRESETS = VOICE_PRESETS.filter((preset) => preset.cloud).map((preset) => preset.id);
 
 /**
  * Run a command without a shell and fail loudly on a non-zero exit.

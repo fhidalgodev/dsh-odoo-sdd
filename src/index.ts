@@ -86,6 +86,7 @@ import { isReadMethod, isCallableMethodName } from "./method-classification.js";
 import { registerDocsTool } from "./docs-tool.js";
 import { registerManualTool, type WebSessionResult } from "./manual-tool.js";
 import { registerVideoTool } from "./video-tool.js";
+import { VOICE_PRESET_IDS } from "./video-voices.js";
 import { registerUiVerifyTool } from "./ui-verify-tool.js";
 import { registerTestsTool } from "./tests-tool.js";
 import { registerI18nTools } from "./odoo-i18n.js";
@@ -345,8 +346,8 @@ interface OdooSddConfig {
 	/** Folder for odoo_video workspaces, relative to the project root (default docs/videos). */
 	videosDir?: string;
 	/**
-	 * The voice PRESET odoo_video narrates with (viral-male, viral-female,
-	 * calm-male, calm-female, offline-piper, custom). Empty means undecided:
+	 * The voice PRESET odoo_video narrates with (any id of VOICE_PRESET_IDS in
+	 * src/video-voices.ts). Empty means undecided:
 	 * a preset wins over ttsCommand, and nothing configured → NEEDS_TTS.
 	 */
 	ttsPreset?: string;
@@ -3154,7 +3155,7 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			manualsMode: { type: "string", enum: ["specs", "docs", "module"], description: "Where odoo_manual keeps the manuals: specs (default, next to the spec), docs (a documentation tree under manualsDir) or module (OCA fragments under the module's readme/manual/)." },
 			manualsDir: { type: "string", description: "Folder for the manuals in docs mode, relative to the project root (default docs/manuals)." },
 			videosDir: { type: "string", description: "Folder for odoo_video workspaces, relative to the project root (default docs/videos)." },
-			ttsPreset: { type: "string", enum: ["", "viral-male", "viral-female", "calm-male", "calm-female", "offline-piper", "custom"], description: "Voice preset for odoo_video narration: the character (viral/calm, male/female) picks a concrete neural voice per storyboard language; offline-piper is local (needs ttsVoice = .onnx model path); custom uses ttsCommand. Empty = undecided (NEEDS_TTS until a preset or ttsCommand exists). Cloud presets send the narration text to Microsoft." },
+			ttsPreset: { type: "string", enum: ["", ...VOICE_PRESET_IDS], description: "Voice preset for odoo_video narration: the character (viral/calm, male/female, viral-co-* for a Colombian Spanish accent) picks a concrete neural voice per storyboard language; offline-piper is local (needs ttsVoice = .onnx model path); custom uses ttsCommand. Empty = undecided (NEEDS_TTS until a preset or ttsCommand exists). Cloud presets send the narration text to Microsoft." },
 			ttsCommand: { type: "string", description: "The TTS command odoo_video narrates with, argv-split (no shell), placeholders {text}/{textFile}/{voice}/{out}. Example (cloud): edge-tts --voice {voice} --text {text} --write-media {out}. Example (offline): piper --model {voice} --output_file {out} (uses {textFile})." },
 			ttsVoice: { type: "string", description: "Engine-specific voice string passed as {voice} (e.g. es-ES-AlvaroNeural for edge-tts, a .onnx path for piper)." },
 			ffmpegPath: { type: "string", description: "ffmpeg binary for the video assembly (default ffmpeg)." },
@@ -3484,10 +3485,10 @@ export function apply(ctx: { tools: ToolRegistry } & HostContextServices, config
 			if (args.videosDir !== undefined) updates["videosDir"] = args.videosDir;
 			if (args.ttsPreset !== undefined) {
 				const preset = args.ttsPreset.trim();
-				if (!["", "viral-male", "viral-female", "calm-male", "calm-female", "offline-piper", "custom"].includes(preset)) {
+				if (preset !== "" && !VOICE_PRESET_IDS.includes(preset)) {
 					return {
 						mode: "set" as string, ok: false, config: normalize(current), resolved: resolution(),
-						detail: `ttsPreset must be one of viral-male, viral-female, calm-male, calm-female, offline-piper, custom (or empty), not ${JSON.stringify(args.ttsPreset)}. Nothing was written.`,
+						detail: `ttsPreset must be one of ${VOICE_PRESET_IDS.join(", ")} (or empty), not ${JSON.stringify(args.ttsPreset)}. Nothing was written.`,
 					};
 				}
 				updates["ttsPreset"] = preset;

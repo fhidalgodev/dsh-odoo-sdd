@@ -435,7 +435,7 @@ check(
 	"the voice catalog mirrors the server contract (ids, cloud flags, recommended)",
 	(() => {
 		const ids = [...source.matchAll(/id: "([a-z-]+)", style:/g)].map((m) => m[1]);
-		return ["viral-male", "viral-female", "calm-male", "calm-female", "offline-piper", "custom"].every((id) => ids.includes(id));
+		return ["viral-male", "viral-female", "viral-co-male", "viral-co-female", "calm-male", "calm-female", "offline-piper", "custom"].every((id) => ids.includes(id));
 	})(),
 	"expected the six preset ids in client.js",
 );
@@ -449,7 +449,7 @@ check("the voice presets carry no hard-coded copy", !/label:\s*"/.test(source.sl
 		.flatMap((m) => [`voiceLabel_${m[1]}`, `voiceStyle_${m[2]}`, `voiceNote_${m[3]}`]);
 	const manualHints = ["specs", "docs", "module"].map((mode) => `manualsModeHint_${mode}`);
 	const missing = [...staticKeys, ...presetKeys, ...manualHints].filter((key) => !Object.prototype.hasOwnProperty.call(dict, key));
-	check("every key the panel translates exists in the dictionary", presetKeys.length === 18 && missing.length === 0, missing.join(", "));
+	check("every key the panel translates exists in the dictionary", presetKeys.length === 24 && missing.length === 0, missing.join(", "));
 }
 {
 	// The branches the default render never reaches: the docs-mode folder
@@ -466,11 +466,14 @@ check("the voice presets carry no hard-coded copy", !/label:\s*"/.test(source.sl
 // would advertise a narration the developer never gets.
 console.log("== voice preview samples ==");
 {
-	const { resolveVoiceEngine } = await import(new URL("../lib/video-voices.js", import.meta.url).href);
+	const { resolveVoiceEngine, VOICE_PRESETS: SERVER_PRESETS } = await import(new URL("../lib/video-voices.js", import.meta.url).href);
 	const block = /\/\* voice-samples:begin[\s\S]*?\*\/\s*var VOICE_SAMPLES = (\{[\s\S]*?\n\t\});\s*\/\* voice-samples:end \*\//.exec(source);
 	check("the samples sit inside the generator's markers", block !== null);
 	const samples = block === null ? {} : Function(`return ${block[1]};`)();
-	const cloud = ["viral-male", "viral-female", "calm-male", "calm-female"];
+	const cloud = SERVER_PRESETS.filter((p) => p.cloud).map((p) => p.id);
+	const clientIds = [...source.matchAll(/id: "([a-z-]+)", style:/g)].map((m) => m[1]);
+	check("the panel lists exactly the server catalog, in order", clientIds.join(",") === SERVER_PRESETS.map((p) => p.id).join(","), clientIds.join(","));
+	check("the catalog offers the Colombian viral pair", ["viral-co-male", "viral-co-female"].every((id) => cloud.includes(id)));
 	const pairs = cloud.flatMap((id) => ["es", "en"].map((lang) => [id, lang]));
 	const drift = pairs.filter(([id, lang]) => samples[id]?.[lang]?.voice !== resolveVoiceEngine({ ttsPreset: id, language: lang })?.voice);
 	check("every cloud preset has an es and en sample read by the server's own voice", drift.length === 0, drift.map((p) => p.join("/")).join(", "));
@@ -495,20 +498,22 @@ console.log("== voice preview samples ==");
 	const voiceTree = render({ ...baseSnapshot, ttsPreset: "" });
 	const playButtons = findByClass(voiceTree, "odoo-sdd-voice-play");
 	const pickButtons = findByClass(voiceTree, "odoo-sdd-voice-pick");
-	check("a Listen button is offered for the four cloud presets only", playButtons.length === 4 && pickButtons.length === 6, `${playButtons.length} play, ${pickButtons.length} pick`);
+	check("a Listen button is offered for every cloud preset only", playButtons.length === cloud.length && pickButtons.length === SERVER_PRESETS.length, `${playButtons.length} play, ${pickButtons.length} pick`);
+	const playFor = (label) => playButtons.find((b) => b.props["aria-label"] === `Listen: ${label}`);
+	const pickFor = (label) => pickButtons.find((b) => textsOf(b).join("").startsWith(label));
 	check(
 		"each Listen button names its voice for screen readers",
 		playButtons.every((b) => typeof b.props["aria-label"] === "string" && b.props["aria-label"].startsWith("Listen: ")),
 	);
 	check("Listen stays usable when the form is read-only", playButtons.every((b) => b.props.disabled === undefined));
-	pickButtons[0].props.onClick();
+	pickFor("Viral — male").props.onClick();
 	check("picking a cloud voice plays its sample in the host language", played.length === 1 && played[0] === samples["viral-male"].es.src);
-	playButtons[2].props.onClick();
-	check("Listen replays a sample without picking it", played.length === 2 && played[1] === samples["calm-male"].es.src);
+	playFor("Viral (Colombian) — female").props.onClick();
+	check("Listen replays a sample without picking it (Colombian accent in Spanish)", played.length === 2 && played[1] === samples["viral-co-female"].es.src);
 	context.locale.getSnapshot = () => ({ active: "ja", locales: [], revision: 2 });
-	playButtons[0].props.onClick();
+	playFor("Viral — male").props.onClick();
 	check("a host language without samples falls back to English", played[2] === samples["viral-male"].en.src);
-	pickButtons[5].props.onClick();
+	pickFor("Custom command").props.onClick();
 	check("picking piper/custom plays nothing", played.length === 3);
 	delete context.locale.getSnapshot;
 	delete globalThis.Audio;

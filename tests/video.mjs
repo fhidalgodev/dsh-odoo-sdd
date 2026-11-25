@@ -467,6 +467,18 @@ check("voice resolution follows the storyboard language", (() => {
 	const de = vvoices.resolveVoiceEngine({ ttsPreset: "viral-male", language: "de" });
 	return fr?.voice === "fr-FR-DeniseNeural" && de?.voice === "en-US-AndrewNeural";
 })(), JSON.stringify([vvoices.resolveVoiceEngine({ ttsPreset: "calm-female", language: "fr" }), vvoices.resolveVoiceEngine({ ttsPreset: "viral-male", language: "de" })]));
+check("the Colombian viral pair speaks es-CO in Spanish at the viral rate", (() => {
+	const male = vvoices.resolveVoiceEngine({ ttsPreset: "viral-co-male", language: "es_CO" });
+	const female = vvoices.resolveVoiceEngine({ ttsPreset: "viral-co-female", language: "es" });
+	return male?.voice === "es-CO-GonzaloNeural" && male.command.includes("--rate=+10%") && male.cloud === true &&
+		female?.voice === "es-CO-SalomeNeural" && female.command.includes("--rate=+8%");
+})());
+check("outside Spanish the Colombian pair keeps the viral voice (no accent bug)", (() => {
+	const pairs = [["viral-co-male", "viral-male"], ["viral-co-female", "viral-female"]];
+	return pairs.every(([co, viral]) => ["en", "pt", "fr", "de"].every((language) =>
+		vvoices.resolveVoiceEngine({ ttsPreset: co, language })?.voice === vvoices.resolveVoiceEngine({ ttsPreset: viral, language })?.voice));
+})());
+check("the preset id list is derived from the catalog (config validation reads it)", vvoices.VOICE_PRESET_IDS.join(",") === vvoices.VOICE_PRESETS.map((p) => p.id).join(",") && vvoices.VOICE_PRESET_IDS.includes("viral-co-female"));
 check("offline-piper resolves with a null voice until ttsVoice is set", (() => {
 	const noVoice = vvoices.resolveVoiceEngine({ ttsPreset: "offline-piper", language: "es" });
 	const withVoice = vvoices.resolveVoiceEngine({ ttsPreset: "offline-piper", ttsVoice: "/models/es_ES.onnx", language: "es" });

@@ -931,6 +931,16 @@ cloud/offline badges, and a privacy notice while a cloud preset is selected),
 the `videoMusic`/`videoSfx` switches and the `videosDir` folder, plus the
 `custom`/`offline-piper` command fields when the preset needs them.
 
+Picking a cloud preset plays a short sample of its voice, and each cloud card
+has a **Listen** button to replay it without changing the selection. The
+sample follows the interface language (Spanish, else English) and is read by
+the same voice `odoo_video` would use. The samples ship inside the client
+bundle, so listening sends nothing to Microsoft; `offline-piper` and `custom`
+have none, because their voice is your own model or command. Maintainers
+regenerate them with `node scripts/voice-samples.mjs` (needs `edge-tts`,
+`ffmpeg` and a prior `npm run build`); `tests/client.mjs` fails if a sample's
+voice drifts from `src/video-voices.ts`.
+
 > [!IMPORTANT]
 > There are two configuration stores, and the more specific one wins:
 > **Settings** (user-wide, `~/.dsh/settings.yaml`) and the project's

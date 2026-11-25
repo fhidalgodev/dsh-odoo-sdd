@@ -28,23 +28,19 @@ export interface VoicePreset {
 	note: string;
 }
 
-export const VOICE_PRESET_IDS: readonly string[] = [
-	"viral-male",
-	"viral-female",
-	"calm-male",
-	"calm-female",
-	"offline-piper",
-	"custom",
-];
-
 export const VOICE_PRESETS: VoicePreset[] = [
 	{ id: "viral-male", label: "Viral — male", style: "viral", gender: "male", cloud: true, recommended: true, note: "Fast-paced neural voice for short, punchy narration." },
 	{ id: "viral-female", label: "Viral — female", style: "viral", gender: "female", cloud: true, recommended: true, note: "Fast-paced neural voice for short, punchy narration." },
+	{ id: "viral-co-male", label: "Viral (Colombian) — male", style: "viral", gender: "male", cloud: true, note: "Fast-paced voice with a Colombian accent for Spanish scripts; other languages use the viral voice." },
+	{ id: "viral-co-female", label: "Viral (Colombian) — female", style: "viral", gender: "female", cloud: true, note: "Fast-paced voice with a Colombian accent for Spanish scripts; other languages use the viral voice." },
 	{ id: "calm-male", label: "Calm — male", style: "calm", gender: "male", cloud: true, note: "Even, documentary pace for long walkthroughs." },
 	{ id: "calm-female", label: "Calm — female", style: "calm", gender: "female", cloud: true, note: "Even, documentary pace for long walkthroughs." },
 	{ id: "offline-piper", label: "Offline — Piper", style: "offline", cloud: false, note: "Local engine (more robotic): the text never leaves the machine. Needs ttsVoice set to a .onnx model file." },
 	{ id: "custom", label: "Custom command", style: "offline", cloud: false, note: "Your own ttsCommand/ttsVoice, exactly as configured." },
 ];
+
+/** Every preset id, in catalog order: the one list config validation accepts. */
+export const VOICE_PRESET_IDS: readonly string[] = VOICE_PRESETS.map((preset) => preset.id);
 
 /**
  * The concrete engine voice + speaking rate per preset and language prefix.
@@ -52,19 +48,26 @@ export const VOICE_PRESETS: VoicePreset[] = [
  * storyboard language is pinned at plan time, so a missing prefix degrades
  * to a working voice, never to silence).
  */
+const VIRAL_MALE = {
+	es: { voice: "es-MX-JorgeNeural", rate: "+10%" },
+	en: { voice: "en-US-AndrewNeural", rate: "+8%" },
+	pt: { voice: "pt-BR-AntonioNeural", rate: "+8%" },
+	fr: { voice: "fr-FR-HenriNeural", rate: "+8%" },
+};
+const VIRAL_FEMALE = {
+	es: { voice: "es-MX-DaliaNeural", rate: "+8%" },
+	en: { voice: "en-US-AvaNeural", rate: "+8%" },
+	pt: { voice: "pt-BR-FranciscaNeural", rate: "+8%" },
+	fr: { voice: "fr-FR-DeniseNeural", rate: "+8%" },
+};
+
 const VOICE_TABLE: Record<string, Record<string, { voice: string; rate: string }>> = {
-	"viral-male": {
-		es: { voice: "es-MX-JorgeNeural", rate: "+10%" },
-		en: { voice: "en-US-AndrewNeural", rate: "+8%" },
-		pt: { voice: "pt-BR-AntonioNeural", rate: "+8%" },
-		fr: { voice: "fr-FR-HenriNeural", rate: "+8%" },
-	},
-	"viral-female": {
-		es: { voice: "es-MX-DaliaNeural", rate: "+8%" },
-		en: { voice: "en-US-AvaNeural", rate: "+8%" },
-		pt: { voice: "pt-BR-FranciscaNeural", rate: "+8%" },
-		fr: { voice: "fr-FR-DeniseNeural", rate: "+8%" },
-	},
+	"viral-male": VIRAL_MALE,
+	"viral-female": VIRAL_FEMALE,
+	// The Colombian accent only exists for Spanish: every other language
+	// keeps the viral voice, so a non-Spanish script never reads as an accent bug.
+	"viral-co-male": { ...VIRAL_MALE, es: { voice: "es-CO-GonzaloNeural", rate: "+10%" } },
+	"viral-co-female": { ...VIRAL_FEMALE, es: { voice: "es-CO-SalomeNeural", rate: "+8%" } },
 	"calm-male": {
 		es: { voice: "es-ES-AlvaroNeural", rate: "+0%" },
 		en: { voice: "en-US-GuyNeural", rate: "+0%" },

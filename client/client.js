@@ -83,6 +83,7 @@ var zh = {
 	"manualsModeHint_specs": "每份手册位于 <specs>/manuals/<manual>，与记录该变更的规范放在一起。这是默认选项，也覆盖没有规范的独立工作：它绝不会因为缺少规范而被阻塞。",
 	"manualsModeHint_docs": "每份手册位于项目文档树中的 <project>/<folder>/<manual>（默认为 docs/manuals）。canon 仍然从实例读取；改变的只是文件落地位置。",
 	"manualsModeHint_module": "每份手册都是 <module>/readme/manual/<manual> 下的一个 OCA 片段，可与模块的 README 一起编译。每次调用都必须指定 module_dir。",
+	"manualsDir": "手册文件夹",
 	"videos": "视频",
 	"videosHint": "odoo_video 为脚本配音并把视频组装成编号系列。请选择配音、存放文件夹和收尾选项。",
 	"voice": "配音音色",
@@ -96,6 +97,16 @@ var zh = {
 	"voiceStyle_offline": "离线",
 	"genderMale": "男声",
 	"genderFemale": "女声",
+	"voiceLabel_viral-male": "快节奏 — 男声",
+	"voiceLabel_viral-female": "快节奏 — 女声",
+	"voiceLabel_calm-male": "沉稳 — 男声",
+	"voiceLabel_calm-female": "沉稳 — 女声",
+	"voiceLabel_offline-piper": "离线 — Piper",
+	"voiceLabel_custom": "自定义命令",
+	"voiceNote_viral": "快节奏的神经网络音色，适合简短有力的旁白。",
+	"voiceNote_calm": "平稳的纪录片节奏，适合较长的操作演示。",
+	"voiceNote_offline-piper": "本地引擎（更机械）：文本不会离开本机。需要把 ttsVoice 设为一个 .onnx 模型文件。",
+	"voiceNote_custom": "使用你自己的 ttsCommand/ttsVoice，完全按配置执行。",
 	"ttsCommand": "TTS 命令",
 	"ttsCommandHint": "不带 shell 的 argv；占位符 {text} {textFile} {voice} {out}。",
 	"ttsVoice": "音色",
@@ -109,7 +120,7 @@ var zh = {
 	"docOptional": "可选",
 	"docOff": "关闭",
 	"docLanguage": "文档语言",
-	"docLanguageHint": "留空 = 默认英文，除非 AGENTS.md 或项目的其他文件另有规定。",
+	"docLanguageHint": "生成的模块文档所用的语言，而不是本界面的语言（界面语言跟随「设置 → 通用」）。留空 = 默认英文，除非 AGENTS.md 或项目的其他文件另有规定。",
 	"yes": "是",
 	"no": "否",
 	"checkpointRequired": "变更前要求创建检查点",
@@ -192,6 +203,7 @@ var zh = {
 		"manualsModeHint_specs": "Each manual lives at <specs>/manuals/<manual>, next to the spec documenting the change. This is the default and also covers standalone work without a spec: it never blocks on a missing one.",
 		"manualsModeHint_docs": "Each manual lives at <project>/<folder>/<manual> inside the project's documentation tree (default docs/manuals). The canon is still read from the instance; only where files land changes.",
 		"manualsModeHint_module": "Each manual is an OCA fragment at <module>/readme/manual/<manual>, ready to compile with the module's README. Each call must name a module_dir.",
+		"manualsDir": "Manuals folder",
 		"videos": "Videos",
 		"videosHint": "odoo_video narrates the storyboard and assembles a numbered series. Pick the voice, the folder and the finishing touches.",
 		"voice": "Narration voice",
@@ -200,11 +212,21 @@ var zh = {
 		"voiceCloud": "Cloud",
 		"voiceOffline": "Offline",
 		"voiceRecommended": "Recommended",
-		"voiceStyle_viral": "viral",
-		"voiceStyle_calm": "calm",
-		"voiceStyle_offline": "offline",
-		"genderMale": "male",
-		"genderFemale": "female",
+		"voiceStyle_viral": "Viral",
+		"voiceStyle_calm": "Calm",
+		"voiceStyle_offline": "Offline",
+		"genderMale": "Male",
+		"genderFemale": "Female",
+		"voiceLabel_viral-male": "Viral — male",
+		"voiceLabel_viral-female": "Viral — female",
+		"voiceLabel_calm-male": "Calm — male",
+		"voiceLabel_calm-female": "Calm — female",
+		"voiceLabel_offline-piper": "Offline — Piper",
+		"voiceLabel_custom": "Custom command",
+		"voiceNote_viral": "Fast-paced neural voice for short, punchy narration.",
+		"voiceNote_calm": "Even, documentary pace for long walkthroughs.",
+		"voiceNote_offline-piper": "Local engine (more robotic): the text never leaves the machine. Needs ttsVoice set to a .onnx model file.",
+		"voiceNote_custom": "Your own ttsCommand/ttsVoice, exactly as configured.",
 		"ttsCommand": "TTS command",
 		"ttsCommandHint": "argv without a shell; placeholders {text} {textFile} {voice} {out}.",
 		"ttsVoice": "Voice",
@@ -218,7 +240,7 @@ var zh = {
 		"docOptional": "Optional",
 		"docOff": "Off",
 		"docLanguage": "Documentation language",
-		"docLanguageHint": "Empty = English by default, unless AGENTS.md or another project file says otherwise.",
+		"docLanguageHint": "Language of the generated module documentation, not of this interface (that one follows Settings → General). Empty = English by default, unless AGENTS.md or another project file says otherwise.",
 		"yes": "Yes",
 		"no": "No",
 		"checkpointRequired": "Require a checkpoint before mutating",
@@ -248,6 +270,126 @@ var zh = {
 		"pickClose": "Close",
 		"pickError": "Could not list the folder",
 		"pickUnavailable": "The host folder browser is unavailable"
+	};
+	var es = {
+		"nav": "Odoo SDD",
+		"editable": "Editable",
+		"readonly": "Solo lectura",
+		"readonlyHint": "Este host no ofrece formularios de configuración; cambia los ajustes desde la conversación con odoo_config.",
+		"delegation": "Delegación",
+		"delegationHint": "Quién aprueba las fases del pipeline.",
+		"supervised": "Supervisado",
+		"autonomous": "Autónomo",
+		"license": "Licencia",
+		"licenseHint": "OCA/Community se busca siempre, en ambos casos.",
+		"adoptHint": "Una sesión nueva adopta la última spec del proyecto como pista",
+		"adoptHintHint": "Con Sí (por defecto), una sesión que aún no tiene puntero propio continúa donde el proyecto "
+			+ "se quedó, siempre que la pista sea reciente y la spec siga existiendo. Con No, cada sesión empieza sin "
+			+ "spec hasta que declara una: así dos sesiones nunca pueden autorizar cambios con la spec de la otra.",
+		"licensePerSpec": "La edición de Odoo no es un ajuste del plugin: se responde por spec en CLARIFY "
+			+ "(operation=clarify licensed=community|enterprise), porque un mismo espacio de trabajo puede tener proyectos "
+			+ "EE y CE a la vez. No existe una edición para todo el espacio de trabajo.",
+		"community": "Community",
+		"enterprise": "Enterprise",
+		"allowlist": "Modelos modificables",
+		"allowlistHint": "Modelos en los que odoo_execute puede hacer create/write/unlink. Vacío = solo lectura.",
+		"methods": "Acciones de negocio",
+		"methodsHint": "Pares model.method que un lote funcional puede llamar: cualquier acción de cualquier modelo (en Odoo suelen ser action_*, button_*, do_*). Cada par necesita una precondición y una postcondición. Vacío = ninguna.",
+		"noMethods": "No se permite ninguna acción de negocio",
+		"repoCommunity": "Repositorio de Odoo Community",
+		"repoEnterprise": "Repositorio de Odoo Enterprise",
+		"repoHint": "Elige una URL de git o una ruta local del sistema operativo.",
+		"useUrl": "URL",
+		"usePath": "Ruta local",
+		"browse": "Examinar…",
+		"pipeline": "Pipeline",
+		"pipelineHint": "Estado SDD en vivo: usa la herramienta sdd_phase status en la sesión.",
+		"policy": "Política",
+		"specs": "Specs",
+		"specsHint": "El proyecto es la carpeta abierta en esta sesión, por eso no se configura aquí. Elige dónde se guardan los documentos de spec.",
+		"specsMode": "Ubicación",
+		"specsModeProject": "Dentro del proyecto",
+		"specsModeCentral": "Carpeta central",
+		"specsRoot": "Carpeta central de specs",
+		"specsSubdir": "Subcarpeta dentro del proyecto",
+		"specsProjectResolved": "Cada proyecto guarda sus specs en <project>/<subfolder>/<spec>.",
+		"specsCentralResolved": "Cada proyecto guarda sus specs en <central folder>/<project>/<spec>, cada uno en su propia subcarpeta identificada por un archivo .dsh-project-root.",
+		"manuals": "Manuales",
+		"manualsHint": "Dónde guarda odoo_manual los manuales narrados y qué produce.",
+		"manualsMode": "Ubicación de los manuales",
+		"manualsSpecs": "Junto a la spec",
+		"manualsDocs": "Árbol de documentación",
+		"manualsModule": "Fragmentos del módulo",
+		"manualsModeHint_specs": "Cada manual vive en <specs>/manuals/<manual>, junto a la spec que documenta el cambio. Es la opción por defecto y también cubre el trabajo independiente sin spec: nunca se bloquea porque falte una.",
+		"manualsModeHint_docs": "Cada manual vive en <project>/<folder>/<manual> dentro del árbol de documentación del proyecto (por defecto docs/manuals). El canon se sigue leyendo de la instancia; solo cambia dónde se escriben los archivos.",
+		"manualsModeHint_module": "Cada manual es un fragmento OCA en <module>/readme/manual/<manual>, listo para compilarse con el README del módulo. Cada llamada debe indicar un module_dir.",
+		"manualsDir": "Carpeta de manuales",
+		"videos": "Vídeos",
+		"videosHint": "odoo_video narra el storyboard y monta una serie numerada. Elige la voz, la carpeta y los acabados.",
+		"voice": "Voz de narración",
+		"voiceNone": "Elige una voz para narrar los vídeos",
+		"voicePrivacy": "Las voces en la nube envían el texto de la narración a Microsoft: elegir una es una decisión explícita tuya.",
+		"voiceCloud": "Nube",
+		"voiceOffline": "Sin conexión",
+		"voiceRecommended": "Recomendada",
+		"voiceStyle_viral": "Viral",
+		"voiceStyle_calm": "Pausada",
+		"voiceStyle_offline": "Local",
+		"genderMale": "Masculina",
+		"genderFemale": "Femenina",
+		"voiceLabel_viral-male": "Viral — masculina",
+		"voiceLabel_viral-female": "Viral — femenina",
+		"voiceLabel_calm-male": "Pausada — masculina",
+		"voiceLabel_calm-female": "Pausada — femenina",
+		"voiceLabel_offline-piper": "Local — Piper",
+		"voiceLabel_custom": "Comando propio",
+		"voiceNote_viral": "Voz neuronal de ritmo rápido para narraciones cortas y directas.",
+		"voiceNote_calm": "Ritmo uniforme, de documental, para recorridos largos.",
+		"voiceNote_offline-piper": "Motor local (más robótico): el texto nunca sale de la máquina. Requiere que ttsVoice apunte a un modelo .onnx.",
+		"voiceNote_custom": "Tu propio ttsCommand/ttsVoice, tal como esté configurado.",
+		"ttsCommand": "Comando TTS",
+		"ttsCommandHint": "argv sin shell; marcadores {text} {textFile} {voice} {out}.",
+		"ttsVoice": "Voz",
+		"ttsVoiceHint": "Cadena de voz propia del motor (p. ej. es-ES-AlvaroNeural para edge-tts, una ruta .onnx para piper).",
+		"videoMusic": "Música de fondo",
+		"videoSfx": "Efectos de sonido",
+		"videosDir": "Carpeta de vídeos",
+		"policyHint": "Guardas fail-closed del plugin: bloquean cualquier cambio (mutaciones en la instancia y ediciones de archivos del proyecto) hasta que se cumplan.",
+		"docPolicy": "Documentación del módulo",
+		"docRequired": "Obligatoria",
+		"docOptional": "Opcional",
+		"docOff": "Desactivada",
+		"docLanguage": "Idioma de la documentación",
+		"docLanguageHint": "Idioma de la documentación generada del módulo, no de esta interfaz (que sigue Ajustes → General). Vacío = inglés por defecto, salvo que AGENTS.md u otro archivo del proyecto diga otra cosa.",
+		"yes": "Sí",
+		"no": "No",
+		"checkpointRequired": "Exigir un checkpoint antes de modificar",
+		"specRequired": "Exigir una spec para cada cambio",
+		"specScope": "Dónde se pregunta",
+		"specScopeHint": "\"Solo trabajo Odoo\" pregunta únicamente en carpetas con trabajo Odoo (un .sdd con estado, un __manifest__.py o una herramienta Odoo ya usada allí). \"En todas partes\" pregunta en cualquier carpeta.",
+		"scopeOdoo": "Solo trabajo Odoo",
+		"scopeEverywhere": "En todas partes",
+		"securityReview": "Exigir la revisión de seguridad antes de DONE",
+		"securityInterview": "Exigir la entrevista de seguridad (grupos/ACL)",
+		"auditAll": "Auditar cada llamada a herramienta",
+		"maxCheckpoints": "Checkpoints que se conservan",
+		"save": "Guardar",
+		"saving": "Guardando…",
+		"saved": "Cambios guardados",
+		"discard": "Descartar",
+		"error": "No se pudo guardar",
+		"noModels": "Ningún modelo permitido (solo lectura)",
+		"pickTitle": "Seleccionar carpeta",
+		"pickUp": "Subir",
+		"pickHere": "Usar esta carpeta",
+		"pickCancel": "Cancelar",
+		"pickLoading": "Cargando…",
+		"pickEmpty": "Sin subcarpetas",
+		"pickPath": "Ruta",
+		"pickGo": "Ir",
+		"pickClose": "Cerrar",
+		"pickError": "No se pudo listar la carpeta",
+		"pickUnavailable": "El explorador de carpetas del host no está disponible"
 	};
 
 	/** Theme-aware stylesheet, injected once. Uses host tokens with fallbacks. */
@@ -374,16 +516,17 @@ var zh = {
 	 * The voice presets offered by the picker. This MIRRORS the catalog in
 	 * src/video-voices.ts — the client bundle cannot import the compiled lib
 	 * (it loads standalone via the ModuleLoader), so the contract is kept here
-	 * and pinned by tests/client.mjs. `note` is data (shown as-is), while the
-	 * badges localize through the dictionaries.
+	 * and pinned by tests/client.mjs. Only the data lives here: the name is
+	 * `voiceLabel_<id>` and the caveat `voiceNote_<noteKey>` in the
+	 * dictionaries, so both follow the host's interface language.
 	 */
 	var VOICE_PRESETS = [
-		{ id: "viral-male", label: "Viral — male", style: "viral", gender: "male", cloud: true, recommended: true, note: "Fast-paced neural voice for short, punchy narration." },
-		{ id: "viral-female", label: "Viral — female", style: "viral", gender: "female", cloud: true, recommended: true, note: "Fast-paced neural voice for short, punchy narration." },
-		{ id: "calm-male", label: "Calm — male", style: "calm", gender: "male", cloud: true, note: "Even, documentary pace for long walkthroughs." },
-		{ id: "calm-female", label: "Calm — female", style: "calm", gender: "female", cloud: true, note: "Even, documentary pace for long walkthroughs." },
-		{ id: "offline-piper", label: "Offline — Piper", style: "offline", cloud: false, note: "Local engine (more robotic): the text never leaves the machine. Needs a .onnx model file." },
-		{ id: "custom", label: "Custom command", style: "offline", cloud: false, note: "Your own ttsCommand/ttsVoice, exactly as configured." }
+		{ id: "viral-male", style: "viral", gender: "male", cloud: true, recommended: true, noteKey: "viral" },
+		{ id: "viral-female", style: "viral", gender: "female", cloud: true, recommended: true, noteKey: "viral" },
+		{ id: "calm-male", style: "calm", gender: "male", cloud: true, noteKey: "calm" },
+		{ id: "calm-female", style: "calm", gender: "female", cloud: true, noteKey: "calm" },
+		{ id: "offline-piper", style: "offline", cloud: false, noteKey: "offline-piper" },
+		{ id: "custom", style: "offline", cloud: false, noteKey: "custom" }
 	];
 	var VOICE_IDS = VOICE_PRESETS.map(function (p) { return p.id; });
 
@@ -783,13 +926,13 @@ var zh = {
 				"aria-pressed": on,
 				onClick: function () { var patch = {}; patch.ttsPreset = on ? "" : p.id; edit(patch); }
 			},
-				h("span", { className: "odoo-sdd-voice-name" }, p.label,
+				h("span", { className: "odoo-sdd-voice-name" }, t("voiceLabel_" + p.id),
 					p.recommended ? h("span", { className: "odoo-sdd-voice-tag odoo-sdd-voice-tag--rec" }, t("voiceRecommended")) : null),
 				h("span", { className: "odoo-sdd-voice-meta" },
 					h("span", { className: "odoo-sdd-voice-tag" + (p.cloud ? "" : " odoo-sdd-voice-tag--off") }, p.cloud ? t("voiceCloud") : t("voiceOffline")),
 					p.gender ? h("span", { className: "odoo-sdd-voice-tag" }, t(p.gender === "male" ? "genderMale" : "genderFemale")) : null,
 					h("span", { className: "odoo-sdd-voice-tag" }, t("voiceStyle_" + p.style))),
-				h("span", { className: "odoo-sdd-voice-note" }, p.note));
+				h("span", { className: "odoo-sdd-voice-note" }, t("voiceNote_" + p.noteKey)));
 		};
 		var selectedVoice = VOICE_PRESETS.filter(function (p) { return p.id === form.ttsPreset; })[0] || null;
 
@@ -940,37 +1083,13 @@ var zh = {
 
 	function apply(ctx) {
 		try {
-			// Spanish as a FIRST-CLASS language for the approval card. The host
-			// ships only zh/en dictionaries for the `approval` namespace
-			// (Waiting for approval / Reject / Allow once); the untyped register
-			// overload exists precisely for language-pack contributions, and
-			// `addLanguage` makes `es` selectable (and browser-derivable). The
-			// plugin also sends `displayReason {en, es, zh}` on every approval,
-			// so the QUESTION text localizes even without this registration —
-			// this one localizes the CARD around it. Degrades silently on hosts
-			// where the namespace or the seam is shaped differently.
-			if (ctx.locale && typeof ctx.locale.addLanguage === "function") {
-				ctx.effect(function () {
-					var disposers = [];
-					try { disposers.push(ctx.locale.addLanguage({ id: "es", label: "Español", fallback: "en" })); }
-					catch (e) { /* id already occupied by another contributor: fine */ }
-					try { disposers.push(ctx.locale.register("approval", "es", {
-						waiting: "Esperando aprobación",
-						"detail.aria": "Detalles de la aprobación",
-						escalation: "La herramienta {toolName} solicita ejecución privilegiada",
-						reject: "Rechazar",
-						allowOnce: "Permitir una vez"
-					})); }
-					catch (e) { /* namespace shaped differently on this host: the card stays zh/en */ }
-					return function () { disposers.forEach(function (d) { try { d(); } catch (e2) { /* noop */ } }); };
-				}, "odoo-sdd: spanish approval card");
-			}
-			// NOTE: `es` above is registered as a first-class language pack
-			// (`addLanguage`), so the Spanish copy lives under its own id — the
-			// card localizes for real. The settings-panel dictionaries below stay
-			// zh/en because the panel predates language packs; a follow-up can
-			// migrate them the same way.
-			ctx.effect(function () { ctx.locale.register(NS, { zh: zh, en: en }); }, "odoo-sdd: dictionaries");
+			// The interface language is the HOST'S global setting (Settings →
+			// General, `locale.preference`), and the host ships `es` natively —
+			// for its own copy and for the approval card. The plugin therefore
+			// neither adds a language nor overrides host namespaces: it only
+			// contributes its own dictionaries. A locale without one here walks
+			// the host's fallback chain to `en`.
+			ctx.effect(function () { ctx.locale.register(NS, { zh: zh, en: en, es: es }); }, "odoo-sdd: dictionaries");
 			var t = ctx.locale.bind(NS);
 			// Registered as an effect so dispose/HMR removes the stylesheet it
 			// injected instead of leaking it into the document head forever.

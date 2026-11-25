@@ -59,8 +59,8 @@
         # manualsDir: 'docs/manuals'
         # Where odoo_video keeps the video workspaces: default docs/videos.
         # videosDir: 'docs/videos'
-        # Narration voice preset: viral-male | viral-female | calm-male |
-        # calm-female | offline-piper | custom. Cloud presets send the
+        # Narration voice preset: viral-male | viral-female | viral-co-male |
+        # viral-co-female | calm-male | calm-female | offline-piper | custom. Cloud presets send the
         # narration text to Microsoft — an explicit decision.
         # ttsPreset: ''
         # Assembly: synthesized music bed and UI sfx, on by default.

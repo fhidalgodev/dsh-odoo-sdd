@@ -174,28 +174,45 @@ function dictionaries() {
 	return globalThis.__odooSddDictEn;
 }
 
-// Capture the English dictionary and the Spanish approval-card registration by
-// intercepting register()/addLanguage() before apply().
-const esLanguagePacks = [];
-const esApprovalDictionaries = [];
+// Capture every dictionary and language registration by intercepting
+// register()/addLanguage() before apply().
+const languagePacks = [];
+const registeredNamespaces = [];
+let pluginDictionaries = null;
 const baseRegister = context.locale.register.bind(context.locale);
 context.locale.register = (ns, a, b) => {
-	if (ns === "odoo-sdd") globalThis.__odooSddDictEn = a.en;
-	if (ns === "approval" && a === "es") esApprovalDictionaries.push(b);
+	registeredNamespaces.push(ns);
+	if (ns === "odoo-sdd") {
+		pluginDictionaries = a;
+		globalThis.__odooSddDictEn = a.en;
+	}
 	return baseRegister(ns, a, b);
 };
 context.locale.addLanguage = (pack) => {
-	esLanguagePacks.push(pack);
+	languagePacks.push(pack);
 	return () => {};
 };
 client.apply(context);
 check("applying the bundle registers the settings section", typeof registered === "function");
-check("apply registers Spanish as a first-class language pack", esLanguagePacks.some((p) => p && p.id === "es" && p.label === "Español" && p.fallback === "en"), JSON.stringify(esLanguagePacks));
+// The interface language is the host's global setting, and the host ships `es`
+// natively (copy and approval card). Adding a language or overriding a host
+// namespace from here would shadow the host's own translations.
+check("apply adds no language of its own (the host owns the selector)", languagePacks.length === 0, JSON.stringify(languagePacks));
 check(
-	"apply installs the Spanish approval card keys",
-	esApprovalDictionaries.some((d) => d && d.waiting === "Esperando aprobación" && d.reject === "Rechazar" && d.allowOnce === "Permitir una vez" && d.escalation.includes("{toolName}")),
-	JSON.stringify(esApprovalDictionaries),
+	"apply registers only its own namespace (never overrides host copy)",
+	registeredNamespaces.length > 0 && registeredNamespaces.every((ns) => ns === "odoo-sdd"),
+	registeredNamespaces.join(", "),
 );
+{
+	const dicts = pluginDictionaries ?? {};
+	const keysOf = (d) => Object.keys(d ?? {}).sort().join(",");
+	check("the panel ships zh, en and es dictionaries", ["zh", "en", "es"].every((id) => dicts[id] !== undefined), Object.keys(dicts).join(", "));
+	check("zh and es carry exactly the en keys", keysOf(dicts.zh) === keysOf(dicts.en) && keysOf(dicts.es) === keysOf(dicts.en));
+	check(
+		"no dictionary leaves a value empty",
+		["zh", "en", "es"].every((id) => Object.values(dicts[id] ?? {}).every((v) => typeof v === "string" && v.trim() !== "")),
+	);
+}
 
 /**
  * Render the section once with a given settings snapshot.
@@ -417,11 +434,31 @@ check("the custom command fields only show for the custom/piper presets", /form\
 check(
 	"the voice catalog mirrors the server contract (ids, cloud flags, recommended)",
 	(() => {
-		const ids = [...source.matchAll(/id: "([a-z-]+)", label:/g)].map((m) => m[1]);
+		const ids = [...source.matchAll(/id: "([a-z-]+)", style:/g)].map((m) => m[1]);
 		return ["viral-male", "viral-female", "calm-male", "calm-female", "offline-piper", "custom"].every((id) => ids.includes(id));
 	})(),
 	"expected the six preset ids in client.js",
 );
+// Every visible string goes through a dictionary: a hard-coded English name or
+// caveat would stay English whatever language the host is set to.
+check("the voice presets carry no hard-coded copy", !/label:\s*"/.test(source.slice(source.indexOf("var VOICE_PRESETS"), source.indexOf("var VOICE_IDS"))) && !/note:\s*"/.test(source));
+{
+	const dict = dictionaries();
+	const staticKeys = [...source.matchAll(/\bt\("([A-Za-z_-]+)"\)/g)].map((m) => m[1]);
+	const presetKeys = [...source.matchAll(/id: "([a-z-]+)", style: "([a-z]+)"[^}]*noteKey: "([a-z-]+)"/g)]
+		.flatMap((m) => [`voiceLabel_${m[1]}`, `voiceStyle_${m[2]}`, `voiceNote_${m[3]}`]);
+	const manualHints = ["specs", "docs", "module"].map((mode) => `manualsModeHint_${mode}`);
+	const missing = [...staticKeys, ...presetKeys, ...manualHints].filter((key) => !Object.prototype.hasOwnProperty.call(dict, key));
+	check("every key the panel translates exists in the dictionary", presetKeys.length === 18 && missing.length === 0, missing.join(", "));
+}
+{
+	// The branches the default render never reaches: the docs-mode folder
+	// field (whose label was once missing) and every voice card.
+	const docsTree = render({ ...baseSnapshot, manualsMode: "docs", ttsPreset: "custom" });
+	const docsText = textsOf(docsTree);
+	check("the docs-mode manuals render resolves every label", !docsText.some((s) => s === undefined || s.includes("undefined")) && docsText.includes("Manuals folder"));
+	check("the voice cards render their localized names", docsText.includes("Viral — male") && docsText.includes("Custom command"));
+}
 check(
 	"the narrow-input rule is actually shipped in the stylesheet",
 	/\.odoo-sdd-input--short\{width:min\(100%,200px\)\}/.test(source),
@@ -531,8 +568,8 @@ console.log("== host contract edges (configForms presence) ==");
 		/adoptHintHint/.test(source) && /against each other/.test(source),
 	);
 	check(
-		"the explanation is translated in both languages",
-		count(source, "\"adoptHintHint\":") === 2,
+		"the explanation is translated in every shipped language (zh, en, es)",
+		count(source, "\"adoptHintHint\":") === 3,
 		String(count(source, "\"adoptHintHint\":")),
 	);
 	check(

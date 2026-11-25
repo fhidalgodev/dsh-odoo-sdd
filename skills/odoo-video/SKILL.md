@@ -23,10 +23,12 @@ hooks, didactics, rhythm and the spoken register every sentence must meet.
   the DEVELOPER chooses:
   - `viral-male`, `viral-female` (recommended) — edge-tts voices tuned for
     punchy narration, per-language voice + rate resolved for you.
+  - `viral-co-male`, `viral-co-female` — the viral voices with a Colombian
+    accent for Spanish scripts (es-CO); other languages keep the viral voice.
   - `calm-male`, `calm-female` — same engine, flat-rate voices.
   - `offline-piper` — local Piper; set `ttsVoice` to the `.onnx` path.
   - `custom` — your own `ttsCommand`/`ttsVoice` template, verbatim.
-  The four edge presets are CLOUD: the narration text goes to Microsoft. That
+  The six edge presets are CLOUD: the narration text goes to Microsoft. That
   is an explicit developer decision, never yours — NEEDS_TTS says so too.
   `edge-tts` installs with `pipx install edge-tts` (or `pip install edge-tts`).
 - **ffmpeg**: system ffmpeg 4.x+ (config `ffmpegPath`). `NEEDS_FFMPEG` → report

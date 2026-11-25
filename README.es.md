@@ -932,6 +932,16 @@ nube elegido), los interruptores `videoMusic`/`videoSfx` y la carpeta
 `videosDir`, más los campos de comando cuando el preset `custom`/`offline-piper`
 los necesita.
 
+Al elegir un preset de nube suena una muestra corta de su voz, y cada tarjeta de
+nube tiene un botón **Escuchar** para repetirla sin cambiar la selección. La
+muestra sigue el idioma de la interfaz (español; si no, inglés) y la lee la misma
+voz que usaría `odoo_video`. Las muestras viajan dentro del bundle del cliente, así
+que escucharlas no envía nada a Microsoft; `offline-piper` y `custom` no tienen,
+porque su voz es tu propio modelo o comando. Los mantenedores las regeneran con
+`node scripts/voice-samples.mjs` (requiere `edge-tts`, `ffmpeg` y un `npm run build`
+previo); `tests/client.mjs` falla si la voz de una muestra se desvía de
+`src/video-voices.ts`.
+
 > [!IMPORTANT]
 > Hay dos almacenes de configuración y gana el más específico: **Ajustes**
 > (global del usuario, `~/.dsh/settings.yaml`) y el **`.sdd/config.json`** del

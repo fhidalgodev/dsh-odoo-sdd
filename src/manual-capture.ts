@@ -38,7 +38,7 @@ export interface PwPage {
 	click(selector: string, options?: { timeout?: number }): Promise<void>;
 	fill(selector: string, value: string, options?: { timeout?: number }): Promise<void>;
 	press(selector: string, key: string, options?: { timeout?: number }): Promise<void>;
-	keyboard: { press(key: string): Promise<void> };
+	keyboard: { press(key: string): Promise<void>; type?(text: string, options?: { delay?: number }): Promise<void> };
 	/**
 	 * The real pointer, used only while recording: `mouse.move(cx,cy,{steps})`
 	 * paints the cursor travel the overlay then replays, and `mouse.click(x,y)`
@@ -387,7 +387,7 @@ export interface CaptureStepResult {
 	endMs?: number;
 	/**
 	 * The element the step acted on, in CSS px of the 1440x900 viewport —
-	 * what the assembler's zoom pushes toward. Rounded ints; absent when the
+	 * what the assembler boxes on screen. Rounded ints; absent when the
 	 * step touched no element (goto/wait/assert) or the run did not record.
 	 */
 	focus?: { x: number; y: number; w: number; h: number };
@@ -505,7 +505,7 @@ export async function captureFlow(opts: CaptureOptions): Promise<RpcResult<Captu
 		// that follows (routes, cookies, first page) becomes the natural
 		// lead-in of the first segment cut by the video assembler.
 		const recordingStartedAt = Date.now();
-		// The video overlay (cursor, click wave, focus ring) is recording-only:
+		// The video overlay (cursor, click wave) is recording-only:
 		// init scripts re-run on every document, so it survives navigations
 		// without the runner re-injecting anything.
 		if (videoDir) await context.addInitScript({ content: FX_INIT_SCRIPT });
@@ -543,6 +543,8 @@ export async function captureFlow(opts: CaptureOptions): Promise<RpcResult<Captu
 		mkdirSync(imagesDir, { recursive: true });
 
 		for (const step of steps.slice(startIdx)) {
+			// Slides are drawn by the assembler: there is nothing to record.
+			if (step.kind === "slide") continue;
 			if (opts.signal?.aborted) {
 				report.steps.push({ id: step.id, kind: step.kind, status: "skipped", error: "aborted" });
 				break;
@@ -563,8 +565,6 @@ export async function captureFlow(opts: CaptureOptions): Promise<RpcResult<Captu
 						? RECORD_DWELL_MS
 						: Math.min(14000, Math.max(700, wanted - (Date.now() - stepWallStart)));
 				await page.waitForTimeout(dwell).catch(() => {});
-				// A highlight ring belongs to its own hold only.
-				await page.evaluate("window.__sddFx && window.__sddFx.clearRing()").catch(() => {});
 				result.startMs = startMs;
 				result.endMs = Date.now() - recordingStartedAt;
 			}
@@ -641,7 +641,7 @@ export async function runStep(
 	const base: CaptureStepResult = { id: step.id, kind: step.kind, status: "ok" };
 	// Recording only: the pointer moves visibly to the element and clicks it
 	// for real (the overlay cursor follows; the click wave fires on screen).
-	// Returns the element rect for the assembler's focus zoom — the manual
+	// Returns the element rect for the assembler's highlight box — the manual
 	// path is untouched: instant selector clicks, no overlay, no focus.
 	const canMouse = typeof page.mouse?.move === "function";
 	const moveAndClick = async (selector: string, timeout = 10_000): Promise<DomRect | undefined> => {
@@ -724,7 +724,14 @@ export async function runStep(
 			case "fill": {
 				const sel = family.selectors.field(step.field ?? "");
 				base.focus = roundRect(await moveAndClick(sel));
-				await page.fill(sel, step.value ?? "", { timeout: 10_000 });
+				if (env.recording && base.focus && typeof page.keyboard.type === "function") {
+					// The viewer must SEE the field being filled: clear it, then
+					// type key by key into the focused input.
+					await page.fill(sel, "", { timeout: 10_000 });
+					await page.keyboard.type(step.value ?? "", { delay: 55 });
+				} else {
+					await page.fill(sel, step.value ?? "", { timeout: 10_000 });
+				}
 				break;
 			}
 			case "select": {
@@ -775,8 +782,8 @@ export async function runStep(
 				return { ...base, aria: aria.slice(0, 8000) };
 			}
 			case "highlight": {
-				// The visual ring belongs to the video recorder, not to this
-				// shared engine: a manual capture must not silently succeed on a
+				// The highlight box is painted by the assembler (theme color) from
+				// the focus rect: a manual capture must not silently succeed on a
 				// step it cannot render.
 				if (!env.recording) {
 					return { ...base, status: "error", error: "highlight is implemented by the recorder (odoo_video capture)" };
@@ -802,9 +809,6 @@ export async function runStep(
 				base.focus = roundRect(rect);
 				if (canMouse) await page.mouse.move(rect.x + rect.w / 2, rect.y + rect.h / 2, { steps: 18 }).catch(() => {});
 				await page.waitForTimeout(150);
-				await page.evaluate(
-					`window.__sddFx && window.__sddFx.ring(${JSON.stringify({ x: rect.x, y: rect.y, w: rect.w, h: rect.h })}, ${JSON.stringify(step.value ?? "")})`,
-				).catch(() => {});
 				break;
 			}
 			case "screenshot": {
@@ -826,7 +830,7 @@ export async function runStep(
 				) as unknown as (l: unknown) => void;
 				if (annotate) await page.evaluate(annotate, step.procedure ?? step.id);
 				// The FX overlay is DOM too: it would photobomb the PNG (cursor +
-				// ring over the screenshot the manual ships). Hide → shoot → show.
+				// the click wave over the screenshot the manual ships). Hide → shoot → show.
 				if (env.recording) await page.evaluate("window.__sddFx && window.__sddFx.hide()").catch(() => {});
 				const buf = await page.screenshot({ type: "png" });
 				if (env.recording) await page.evaluate("window.__sddFx && window.__sddFx.show()").catch(() => {});

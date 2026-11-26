@@ -34,7 +34,7 @@ const check = (name, cond, extra) => {
 // ---------------------------------------------------------------------------
 // Unit layer: families, lint, safety, gates (no browser needed)
 // ---------------------------------------------------------------------------
-for (const major of [16, 17, 18, 19]) {
+for (const major of [16, 17, 18, 19, 20]) {
 	const fam = capture.UI_FAMILIES[major];
 	check(
 		`family ${major} carries the UI error + step selectors`,
@@ -52,7 +52,7 @@ for (const major of [16, 17, 18, 19]) {
 	);
 }
 check("16 names its own error dialog (not .o_error_dialog)", !capture.UI_FAMILIES[16].selectors.errorDialog.includes("o_error_dialog"));
-check("17/18/19 share .o_error_dialog", [17, 18, 19].every((m) => capture.UI_FAMILIES[m].selectors.errorDialog === ".o_error_dialog"));
+check("17/18/19/20 share .o_error_dialog", [17, 18, 19, 20].every((m) => capture.UI_FAMILIES[m].selectors.errorDialog === ".o_error_dialog"));
 
 // ---- lintUiFlows -----------------------------------------------------------
 {
@@ -126,7 +126,14 @@ check("a tab-pinned click is read-only, a header click is an action", uiv.uiStep
 	const flows = uiv.crawlFlowsFromCanon(canon);
 	check("the crawl emits one flow per menu that opens an act_window", flows.length === 1 && flows[0].id.startsWith("crawl-1-"));
 	const kinds = flows[0].steps.map((s) => s.kind);
-	check("the crawl navigates then visits every viewMode", kinds[0] === "menu" && kinds.filter((k) => k === "switch_view").length === 2);
+	// The switcher only offers multi-record views, and only when there are two
+	// or more: list,form has NO switcher, the form is reached through open_row.
+	check("the crawl navigates and never switches to a view the switcher does not offer", kinds[0] === "menu" && kinds.filter((k) => k === "switch_view").length === 0);
+	const multi = uiv.crawlFlowsFromCanon({ module: { ...canon.module, actions: [{ ...canon.module.actions[0], viewMode: "list,kanban,form" }] } });
+	check(
+		"with two multi-record views the crawl visits both, never the form",
+		JSON.stringify(multi[0].steps.filter((s) => s.kind === "switch_view").map((s) => s.view)) === JSON.stringify(["list", "kanban"]),
+	);
 	check("the crawl opens a record and visits every notebook page", kinds.includes("open_row") && flows[0].steps.filter((s) => s.tab === true).length === 2);
 	check("the crawl never runs a header button — only expect_visible on the visible ones", flows[0].steps.filter((s) => s.kind === "expect_visible").length === 1);
 	check("the whole crawl is read-only", flows[0].steps.every((s) => uiv.uiStepSafety(s) === "read-only"));
@@ -261,6 +268,8 @@ const mkMatrixClient = ({ groupRows, unlinkFails = false, writeFails = false }) 
 					if (model === "ir.model") return { ok: true, value: [{ id: 1, model: "my.model", modules: "my_mod" }] };
 					if (model === "ir.model.data" && method === "search_read") {
 						const domain = args[0] ?? [];
+						// the module's models come from ir.model.data (ir.model.modules is not searchable)
+						if (domain.some((d) => Array.isArray(d) && d[0] === "model" && d[2] === "ir.model")) return { ok: true, value: [{ res_id: 1 }] };
 						const isGroups = domain.some((d) => Array.isArray(d) && d[0] === "model" && d[2] === "res.groups");
 						const byXmlid = domain.some((d) => Array.isArray(d) && d[0] === "name" && d[1] === "in");
 						return { ok: true, value: isGroups && byXmlid ? groupRows : [] };

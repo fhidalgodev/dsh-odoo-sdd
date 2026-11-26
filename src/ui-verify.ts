@@ -249,7 +249,10 @@ async function runUiStep(page: PwPage, step: UiStep, family: UiFamily, env: Step
 				break;
 			}
 			case "add_line": {
-				const selector = step.field ? `[name="${step.field}"] ${family.selectors.addRow}` : family.selectors.addRow;
+				// Scope EVERY alternative of the add-row selector to the x2many field.
+				const selector = step.field
+					? family.selectors.addRow.split(",").map((alt) => `[name="${step.field}"] ${alt.trim()}`).join(", ")
+					: family.selectors.addRow;
 				await page.click(selector, { timeout: 10_000 });
 				await waitIdle();
 				break;
@@ -540,7 +543,11 @@ export function crawlFlowsFromCanon(canon: Canon): UiFlow[] {
 			const sid = (): string => `s${String((s += 1)).padStart(2, "0")}`;
 			const steps: UiStep[] = [{ id: sid(), kind: "menu", target: { kind: "menu", xmlid: menu.xmlid } }];
 			const viewTypes = (action.viewMode ?? "list").split(",").map((v) => v.trim()).filter((v) => v !== "");
-			for (const view of viewTypes) steps.push({ id: sid(), kind: "switch_view", view });
+			// The control panel only offers the MULTI-record views, and only when
+			// there are two or more (action_service `_getViewInfo`): the form is
+			// reached by opening a row, never through the switcher.
+			const switchable = viewTypes.filter((v) => v !== "form");
+			if (switchable.length > 1) for (const view of switchable) steps.push({ id: sid(), kind: "switch_view", view });
 			if (viewTypes.includes("form") && viewTypes.includes("list")) {
 				steps.push({ id: sid(), kind: "open_row", index: 0 });
 				const doc = inv.models.find((m) => m.model === (action.model ?? menu.model));

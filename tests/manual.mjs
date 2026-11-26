@@ -138,21 +138,25 @@ function fakeClient(major, options = {}) {
 			}
 			if (lang === "") return { ok: false, error: "no context lang sent", errorKind: "protocol" };
 			if (m === "ir.model" && method === "search_count") return { ok: true, value: options.module ? 1 : 0 };
-			if (m === "ir.model" && method === "search_read" && JSON.stringify(args[0] ?? []).includes('"id","in"')) return { ok: true, value: [row({ id: 3, model: "sale.order" })] };
+			if (m === "ir.model" && method === "search_read" && JSON.stringify(args[0] ?? []).includes('"id","in"')) {
+				// ids → models: the module inventory reads what ir.model.data named,
+				// the m2o resolver reads model ids (3 = sale.order).
+				const table = {
+					3: { model: "sale.order", name: "Sales Order", modules: "sale, sale_stock" },
+					4: { model: "sale.report", name: "Sales Analysis", modules: "sale" },
+					5: { model: "stock.picking", name: "Transfer", modules: "sale_stock" },
+				};
+				const ids = (JSON.stringify(args[0]).match(/"id","in",\[([^\]]*)\]/)?.[1] ?? "").split(",").map(Number).filter((n) => table[n]);
+				return { ok: true, value: ids.map((id) => row({ id, ...table[id] })) };
+			}
+			// ir.model.modules is NOT stored: searching it raises on 20 (and is
+			// ignored before). The collector must use ir.model.data instead.
+			if (m === "ir.model" && JSON.stringify(args[0] ?? []).includes('"modules"')) return { ok: false, error: "ValueError: Field has no SQL representation because it is not stored", errorKind: "protocol" };
 			if (m === "ir.model") {
 				if (kwargs?.context?.model !== undefined) throw new Error("ir.model must carry context.lang");
 				// the collector filters by model; only sale.order exists here
 				const [domain] = args;
 				if (JSON.stringify(domain).includes('"no.model"')) return { ok: true, value: [] };
-				// Module scope asks "what does this module implement" with a
-				// `like` prefilter the collector then confirms exactly.
-				if (options.module && JSON.stringify(domain).includes('"like"')) {
-					return { ok: true, value: [
-						row({ model: "sale.order", name: "Sales Order", modules: "sale,sale_stock" }),
-						row({ model: "sale.report", name: "Sales Analysis", modules: "sale" }),
-						row({ model: "stock.picking", name: "Transfer", modules: "sale_stock" }),
-					] };
-				}
 				return { ok: true, value: [row({ modules: "sale" })] };
 			}
 			if (m === "ir.actions.act_window" && args[1]?.length === 1) {
@@ -182,7 +186,27 @@ function fakeClient(major, options = {}) {
 				return { ok: true, value: [row({ complete_name: "Sales/Orders/Quotations" })] };
 			}
 			if (m === "res.users" && method === "read") {
-				return { ok: true, value: [row({ login: options.connectedUser, groups_id: options.connectedAdmin ? [[4, "Settings"], [5, "User"]] : [[5, "User"]] })] };
+				// The groups field is `group_ids` from 19 (`groups_id` before): answer
+				// only under the name the collector asked for, like the ORM does.
+				const key = major >= 19 ? "group_ids" : "groups_id";
+				if (!(args[1] ?? []).includes(key)) return { ok: false, error: `Invalid field ${args[1]} on res.users`, errorKind: "protocol" };
+				// A many2many read answers BARE ids, never [id, name] pairs.
+				return { ok: true, value: [row({ login: options.connectedUser, [key]: options.connectedAdmin ? [4, 5] : [5] })] };
+			}
+			// Odoo 20 has neither ir.model.access nor ir.rule: ir.access replaces both.
+			if (major >= 20 && (m === "ir.model.access" || m === "ir.rule")) return { ok: false, error: `KeyError: '${m}'`, errorKind: "protocol" };
+			if (m === "ir.access" && major < 20) return { ok: false, error: "KeyError: 'ir.access'", errorKind: "protocol" };
+			if (m === "ir.access" && options.module && method === "search_read" && JSON.stringify(args[0]).includes('"id","in"')) {
+				return { ok: true, value: [
+					row({ id: 74, name: "Own orders", model_id: [3, "Sale Order"], domain: "[('user_id','=',uid)]" }),
+					row({ id: 75, name: "Order user", model_id: [3, "Sale Order"], domain: false }),
+				] };
+			}
+			if (m === "ir.access") {
+				return { ok: true, value: [
+					row({ name: "sale.order.user", group_id: [5, "User"], operation: "cru", domain: "[('user_id','=',uid)]", active: true }),
+					row({ name: "company restriction", group_id: false, operation: "r", domain: "[('company_id','in',company_ids)]", active: true }),
+				] };
 			}
 			if (m === "ir.model.access") return { ok: true, value: [row({ name: "sale.order.user", group_id: [5, "User"], perm_read: true, perm_write: true, perm_create: true, perm_unlink: false })] };
 			if (m === "ir.ui.view" && options.module) {
@@ -197,6 +221,12 @@ function fakeClient(major, options = {}) {
 			if (m === "ir.rule" && options.module) return { ok: true, value: [row({ id: 74, name: "Own orders", model_id: [3, "Sale Order"], domain_force: "[('user_id','=',uid)]" })] };
 			if (m === "ir.rule") return { ok: true, value: [row({ name: "own orders", groups: [[5, "User"]], domain_force: "[('user_id','=',uid)]", active: true })] };
 			if (m === "res.groups") return { ok: true, value: [row({ full_name: "Sales/User" })] };
+			if (m === "ir.model.data" && JSON.stringify(args[0]).includes('["model","=","ir.model"]')) {
+				// the models a module defines or extends (what ir.model.modules is computed from)
+				const byModule = { sale: [3, 4], sale_stock: [3, 5] };
+				const mod = JSON.stringify(args[0]).match(/\["module","=","([^"]+)"\]/)?.[1] ?? "";
+				return { ok: true, value: (byModule[mod] ?? []).map((id) => row({ res_id: id })) };
+			}
 			if (m === "ir.model.data") {
 				// Module scope: what the module OWNS. The ir.qweb row proves
 				// ownership is read from data, not matched by name.
@@ -213,7 +243,8 @@ function fakeClient(major, options = {}) {
 						row({ module: options.module, model: "ir.cron", res_id: 71, name: "cron_prune" }),
 						row({ module: options.module, model: "base.automation", res_id: 72, name: "auto_confirm" }),
 						row({ module: options.module, model: "mail.template", res_id: 73, name: "tmpl_confirm" }),
-						row({ module: options.module, model: "ir.rule", res_id: 74, name: "rule_own" }),
+						row({ module: options.module, model: major >= 20 ? "ir.access" : "ir.rule", res_id: 74, name: "rule_own" }),
+						...(major >= 20 ? [row({ module: options.module, model: "ir.access", res_id: 75, name: "access_order_user" })] : []),
 					] };
 				}
 				// echo the res_ids the domain asks for, so xmlids map back; a
@@ -246,7 +277,7 @@ function fakeClient(major, options = {}) {
 	return client;
 }
 
-for (const major of [15, 17, 19]) {
+for (const major of [15, 17, 19, 20]) {
 	const client = fakeClient(major);
 	const r = await canon.collectCanon(client, { model: "sale.order", serverVersion: `${major}.0`, language: "es", moduleName: "sale", moduleDir: modDir });
 	check(`collectCanon v${major} succeeds against the fixed read list`, r.ok === true, r.ok ? "" : r.blocked);
@@ -261,6 +292,25 @@ for (const major of [15, 17, 19]) {
 }
 const r19 = await canon.collectCanon(fakeClient(19), { model: "sale.order", serverVersion: "19.0", language: "es", moduleName: "sale", moduleDir: modDir });
 check("collectCanon v19 uses group_ids", r19.ok && r19.canon.groupsAttr === "group_ids");
+// Odoo 20: ir.access replaces ir.model.access AND ir.rule (one row per group and
+// "crud" subset, optional domain; no group = a restriction on every user).
+const client20 = fakeClient(20);
+const r20 = await canon.collectCanon(client20, { model: "sale.order", serverVersion: "20.0", language: "es", moduleName: "sale", moduleDir: modDir });
+check(
+	"collectCanon v20 reads ir.access, never the retired models",
+	r20.ok && r20.canon.access.access.length === 2 && client20.calls.includes("ir.access.search_read") && !client20.calls.some((c) => c.startsWith("ir.model.access.") || c.startsWith("ir.rule.")),
+);
+check("collectCanon v20 marks a group-less ir.access row as a restriction", r20.ok && /restriction/.test(r20.canon.access.access[1]?.group ?? "") && r20.canon.access.access[1]?.perms === "r---");
+check("collectCanon v20 lists the domain rows as rules", r20.ok && r20.canon.access.rules.length === 2 && r20.canon.access.rules[1]?.groups.length === 0);
+check("accessFromOperation maps a crud subset", JSON.stringify(canon.accessFromOperation("cru")) === JSON.stringify({ read: true, write: true, create: true, unlink: false }) && canon.accessFromOperation("d").unlink === true && canon.accessFromOperation(false).read === false);
+const r20m = await canon.collectCanon(fakeClient(20, { module: "sale", connectedUser: "fhidalgo", connectedAdmin: true }), { model: "sale.order", serverVersion: "20.0", language: "es", module: "sale", moduleDir: modDir });
+check("a v20 module canon succeeds", r20m.ok === true, r20m.ok ? "" : r20m.blocked);
+if (r20m.ok) {
+	const doc20 = r20m.canon.modules?.[0]?.models.find((m) => m.model === "sale.order");
+	check("v20 model access rows carry the rights, the domain and the restriction flag", doc20?.access.some((a) => a.group === "sales_team.group_sale_salesman" && a.write && !a.unlink && a.domain !== undefined) && doc20.access.some((a) => a.restriction === true && a.read && !a.write), JSON.stringify(doc20?.access));
+	check("v20 owned rules are the ir.access rows WITH a domain", (r20m.canon.modules?.[0]?.rules ?? []).map((r) => r.xmlid).join() === "sale.rule_own", JSON.stringify(r20m.canon.modules?.[0]?.rules));
+	check("v20 interview reads the connected user's group_ids", r20m.canon.interview?.connectedLogin === "fhidalgo" && r20m.canon.interview.admin === true);
+}
 const r17 = await canon.collectCanon(fakeClient(17), { model: "sale.order", serverVersion: "17.0", language: "es" });
 check("collectCanon v17 uses groups_id", r17.ok && r17.canon.groupsAttr === "groups_id");
 const rLang = await canon.collectCanon(fakeClient(17), { model: "sale.order", serverVersion: "17.0", language: "de" });

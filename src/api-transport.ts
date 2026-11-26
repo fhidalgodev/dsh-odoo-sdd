@@ -60,6 +60,7 @@ export const JSON2_METHODS: ReadonlySet<string> = new Set([
 	"search_read",
 	"search_count",
 	"read_group",
+	"formatted_read_group",
 	"fields_get",
 	"read",
 	"create",
@@ -134,6 +135,14 @@ export function planJson2Body(
 				...pick(kwargs, ["offset", "limit", "orderby", "lazy"]),
 				...contextOf(kwargs),
 			};
+		}
+		case "formatted_read_group": {
+			// formatted_read_group(domain, groupby=(), aggregates=(), having=(), offset=0, limit=None, order=None)
+			// — @api.model since 19: the 20 replacement for the old read_group shape.
+			if (args.length !== 3) return null;
+			const [domain, groupby, aggregates] = args;
+			if (!Array.isArray(domain) || !Array.isArray(groupby) || !Array.isArray(aggregates)) return null;
+			return { domain, groupby, aggregates, ...pick(kwargs, ["offset", "limit", "order"]), ...contextOf(kwargs) };
 		}
 		case "fields_get": {
 			// fields_get(allfields=None, attributes=None) — @api.model: no ids.

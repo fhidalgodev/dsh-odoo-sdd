@@ -194,12 +194,12 @@ it runs `pnpm add` inside the profile directory and then registers the bundle
 
 - **pnpm must be on your `PATH`** (`dsh plugin` reports it when it is not).
 - Any pnpm spec works, so you can pin a version:
-  `dsh plugin --profile web add dsh-odoo-sdd@0.21.0`.
+  `dsh plugin --profile web add dsh-odoo-sdd@0.22.0`.
 
 Prefer plain npm — a project that depends on the plugin, or a CI job?
 
 ```bash
-npm install dsh-odoo-sdd        # 0.21.0
+npm install dsh-odoo-sdd        # 0.22.0
 ```
 
 > [!IMPORTANT]

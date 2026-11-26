@@ -56,7 +56,7 @@ acceptance criterion.
   fixtures, demonstration/training). State the consequence explicitly: the
   **functionality must never depend on demo data**, because a production database
   is created without it. If none, write exactly: "no demo data".
-- `## Security` — groups, `ir.model.access.csv`, record rules.
+- `## Security` — groups, `ir.model.access.csv`, record rules (20+:`ir.access.csv`).
 - `## Manifest` — directory layout and exact `__manifest__.py` depends + data.
 - `## Reports` (fill when any) — enumerate every report the module must deliver:
   - **Medium/type**: PDF via an Odoo report (`<report>` xml action +

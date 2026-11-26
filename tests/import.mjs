@@ -44,7 +44,14 @@ function check(label, cond, detail) {
 console.log("== capabilities: the contract is per family, never guessed ==");
 {
 	const v17 = caps.importCapabilities("17.0");
-	check("17 resolves to the modern family", v17.ok === true && v17.capabilities.family === "17-19");
+	check("17 resolves to the modern family", v17.ok === true && v17.capabilities.family === "17-20");
+	const v20 = caps.importCapabilities("20.0");
+	check("20 resolves to the modern family (ufile/id, JSON, execute_import)", v20.ok === true && v20.capabilities.upload.fileField === "ufile" && v20.capabilities.apply.method === "execute_import");
+	// get_fields only exists up to 14; 15+ only has get_fields_tree (base_import.py).
+	check("15+ reads fields with get_fields_tree, 10-14 with get_fields", ["15.0", "17.0", "19.0", "20.0"].every((v) => caps.importCapabilities(v).capabilities.fieldsMethod === "get_fields_tree") && ["10.0", "14.0"].every((v) => caps.importCapabilities(v).capabilities.fieldsMethod === "get_fields"));
+	// 15/16 still bind set_file(file, import_id, jsonp) and answer JSONP.
+	const v16 = caps.importCapabilities("16.0");
+	check("15-16 upload file/import_id and parse JSONP", v16.capabilities.upload.fileField === "file" && v16.capabilities.upload.idField === "import_id" && v16.capabilities.upload.response === "jsonp");
 	check("the modern upload uses ufile/id and JSON", v17.capabilities.upload.fileField === "ufile" && v17.capabilities.upload.response === "json");
 	check("the modern apply is execute_import", v17.capabilities.apply.method === "execute_import");
 	const v14 = caps.importCapabilities("14.0");
@@ -91,6 +98,7 @@ console.log("== JSONP and CSRF are data, never code ==");
 	check("the CSRF token is read from odoo.csrf_token", imp.extractCsrfToken('var x; odoo.csrf_token = "abc123";') === "abc123");
 	check("the CSRF token is read from a meta tag", imp.extractCsrfToken('<meta name="csrf-token" content="tok-9">') === "tok-9");
 	check("a page without a token returns null", imp.extractCsrfToken("<html></html>") === null);
+	check("the CSRF token is read from 20's unquoted session-info key", imp.extractCsrfToken('odoo.__session_info__ = { csrf_token: "tok20o123", uid: 2 };') === "tok20o123");
 }
 
 console.log("== the session stays private ==");
@@ -238,6 +246,14 @@ console.log("== the session stays private ==");
 		check("preview reports the headers Odoo read", preview.ok === true && preview.headers.includes("vat"));
 		check("preview reports the sheets and the importable fields", preview.sheets.length === 1 && preview.fields.includes("name"));
 		check("preview does not apply anything", !rpc.some((c) => c.method === "execute_import" || c.method === "do"));
+		const fieldsCall = rpc.find((c) => c.method === "get_fields_tree");
+		check("preview asks get_fields_tree for the TARGET model", fieldsCall !== undefined && fieldsCall.args[0] === "res.partner", JSON.stringify(fieldsCall));
+		const parseCall = rpc.find((c) => c.method === "parse_preview");
+		check(
+			"parse_preview runs on the importer record with the options (never the sheet as count)",
+			parseCall !== undefined && Array.isArray(parseCall.args[0]) && parseCall.args[0].length === 1 && parseCall.args.length === 2 && typeof parseCall.args[1] === "object",
+			JSON.stringify(parseCall),
+		);
 
 		const badMap = await tool.execute({ use: "map", spec_id: "001-imp", batch_id: "b1", columns: [{ column: "name", field: "name" }, { column: "vat" }] });
 		check("a column without a decision blocks the mapping", badMap.status === "incomplete-mapping" && /vat/.test(badMap.detail));

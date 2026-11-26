@@ -80,7 +80,7 @@ const VAGUE_TEST_NAME = /^test_(\d+|it|case|ok|test|foo|bar)$/;
  * @param manifestText - contents of `__manifest__.py`.
  * @returns the major (e.g. 17) or null when it cannot be read.
  */
-function manifestMajor(manifestText: string): number | null {
+export function manifestMajor(manifestText: string): number | null {
 	const m = /['"]version['"]\s*:\s*["'](\d+)\./.exec(manifestText);
 	return m === null ? null : Number.parseInt(m[1]!, 10);
 }

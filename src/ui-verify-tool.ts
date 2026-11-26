@@ -20,7 +20,7 @@ import { presentCall } from "./present.js";
 import { sanitizeForPersist, type OdooCredentials } from "./credentials.js";
 import { planRows } from "./sdd-state.js";
 import { familyFor, loadPlaywright, resolveBrowser, type PwBrowser, type RpcResult } from "./manual-capture.js";
-import { collectCanon, type CanonClient, type Row } from "./manual-canon.js";
+import { collectCanon, moduleModelRows, type CanonClient, type Row } from "./manual-canon.js";
 import type { WebSessionResult } from "./manual-tool.js";
 import { uiVerifyUsersReason, type ApprovalReason } from "./approval-i18n.js";
 import {
@@ -442,11 +442,11 @@ async function browserOp(
 		}
 		// The canon is read per model: the module's first model anchors it, same
 		// rule odoo_manual uses for a module-first request.
-		const pick = await client.executeKw<Row[]>("ir.model", "search_read", [[["modules", "like", moduleName]], ["model", "modules"]], { limit: 200 });
+		const pick = await moduleModelRows(client, moduleName, ["model", "modules"]);
 		if (!pick.ok) return blocked("crawl", `BLOCKED — could not list the module's models: ${pick.error}`);
-		const first = pick.value.find((r) => String(r["modules"] ?? "").split(",").map((x) => x.trim()).includes(moduleName));
+		const first = pick.value[0];
 		if (!first) {
-			return blocked("crawl", `BLOCKED — module "${moduleName}" declares no model in ir.model.modules: check the technical name.`);
+			return blocked("crawl", `BLOCKED — module "${moduleName}" declares or extends no model (ir.model.data): check the technical name and that it is installed.`);
 		}
 		const requestedModules = [...new Set([moduleName, ...(args.modules ?? [])])].filter((m) => m.trim() !== "");
 		const result = await collectCanon(client, {
@@ -665,11 +665,11 @@ async function matrixOp(
 
 	// The canon is read per model: the module's first model anchors it, same
 	// rule odoo_manual uses for a module-first request.
-	const pick = await client.executeKw<Row[]>("ir.model", "search_read", [[["modules", "like", moduleName]], ["model", "modules"]], { limit: 200 });
+	const pick = await moduleModelRows(client, moduleName, ["model", "modules"]);
 	if (!pick.ok) return blocked("matrix", `BLOCKED — could not list the module's models: ${pick.error}`);
-	const first = pick.value.find((r) => String(r["modules"] ?? "").split(",").map((x) => x.trim()).includes(moduleName));
+	const first = pick.value[0];
 	if (!first) {
-		return blocked("matrix", `BLOCKED — module "${moduleName}" declares no model in ir.model.modules: check the technical name.`);
+		return blocked("matrix", `BLOCKED — module "${moduleName}" declares or extends no model (ir.model.data): check the technical name and that it is installed.`);
 	}
 	const versionProbe = await client.version();
 	if (!versionProbe.ok) {

@@ -234,10 +234,9 @@ try {
 		// on every document, and setContent rewrites the document the overlay
 		// was mounted into. A parsed page is what a recording actually meets.
 		await fxPage.goto(`${baseUrl}/web`, { waitUntil: "load" });
-		check("the injected page exposes window.__sddFx", await fxPage.evaluate("typeof window.__sddFx === 'object' && typeof window.__sddFx.ring === 'function'"));
+		check("the injected page exposes window.__sddFx", await fxPage.evaluate("typeof window.__sddFx === 'object' && typeof window.__sddFx.hide === 'function'"));
 		check("the injected page is the real page, not the overlay alone", await fxPage.evaluate("document.querySelector('.o_form_view') !== null && document.getElementById('__sddFxHost') !== null"));
-		await fxPage.evaluate("window.__sddFx.ring({x:100,y:100,w:50,h:30}, 'label')");
-		check("ring() paints inside the shadow host", await fxPage.evaluate("Boolean(document.getElementById('__sddFxHost')?.shadowRoot?.lastElementChild?.querySelector('.ring'))"));
+		check("the overlay paints no highlight of its own (the assembler draws it)", await fxPage.evaluate("typeof window.__sddFx.ring === 'undefined'"));
 		const shotBuf = await (async () => { await fxPage.evaluate("window.__sddFx.hide()"); const b = await fxPage.screenshot({ type: "png" }); await fxPage.evaluate("window.__sddFx.show()"); return b; })();
 		check("the overlay host hides around a screenshot", shotBuf.length > 100 && (await fxPage.evaluate("document.getElementById('__sddFxHost').style.display === ''")) === true);
 		await fxCtx.close();

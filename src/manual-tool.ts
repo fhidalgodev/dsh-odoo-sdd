@@ -18,6 +18,7 @@ import {
 	planStoryboard,
 	validateStoryboard,
 	type ManualsMode,
+	type Step,
 	type Storyboard,
 	type StoryboardFinding,
 } from "./manual-model.js";
@@ -596,10 +597,15 @@ export function mergeStoryboards(existing: Storyboard, planned: Storyboard): Sto
 			summary: old.summary ?? flow.summary,
 			hook: old.hook ?? flow.hook,
 			outro: old.outro ?? flow.outro,
-			steps: flow.steps.map((step) => {
-				const prev = oldSteps.get(step.id);
-				return prev && prev.kind === step.kind ? { ...step, procedure: prev.procedure ?? null, note: step.note ?? prev.note, covers: step.covers ?? prev.covers } : step;
-			}),
+			steps: keepSlides(
+				old.steps,
+				flow.steps.map((step) => {
+					const prev = oldSteps.get(step.id);
+					return prev && prev.kind === step.kind
+						? { ...step, procedure: prev.procedure ?? null, note: step.note ?? prev.note, covers: step.covers ?? prev.covers, chapter: prev.chapter, caption: prev.caption }
+						: step;
+				}),
+			),
 		};
 	});
 	// Flows the canon no longer evidences are KEPT (their narration is work) and
@@ -613,8 +619,25 @@ export function mergeStoryboards(existing: Storyboard, planned: Storyboard): Sto
 		language: existing.language ?? planned.language,
 		// Declared coverage exceptions are authored state: a re-plan keeps them.
 		videoSkip: existing.videoSkip ?? planned.videoSkip,
+		video: existing.video ?? planned.video,
 		updatedAt: planned.updatedAt,
 	};
+}
+
+/**
+ * Video slides are authored, never planned: put each one back right after
+ * the step it followed (at the start when it opened the flow, at the end when
+ * that step is gone).
+ */
+function keepSlides(oldSteps: Step[], steps: Step[]): Step[] {
+	const out = [...steps];
+	oldSteps.forEach((step, i) => {
+		if (step.kind !== "slide") return;
+		const prevId = i > 0 ? oldSteps[i - 1]?.id : undefined;
+		const prevAt = prevId === undefined ? -1 : out.findIndex((s) => s.id === prevId);
+		out.splice(prevId === undefined ? 0 : prevAt >= 0 ? prevAt + 1 : out.length, 0, step);
+	});
+	return out;
 }
 
 /** Planned docs are the checklist; the written prose and skip reasons survive. */

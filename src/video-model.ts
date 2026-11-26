@@ -12,9 +12,10 @@
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { isSafeSegment, isWithinRoot, readStoryboard, type Flow, type Storyboard, type StoryboardFinding } from "./manual-model.js";
+import { isSafeSegment, isWithinRoot, readStoryboard, type Flow, type Step, type Storyboard, type StoryboardFinding } from "./manual-model.js";
 import { ES_FILLER, EN_FILLER } from "./prose-lint.js";
 import { computeCoverage } from "./video-coverage.js";
+import { openLookQuestions, styleProblems } from "./video-theme.js";
 import type { RpcResult } from "./manual-capture.js";
 
 const CANON_FILE = "canon.json";
@@ -168,8 +169,31 @@ export function readVideoCanonSurface(dir: string): VideoCanonSurface | null {
  * video only owes a navigable script (targets the canon knows) and knows
  * which steps will stay silent (fixed dwell instead of narration).
  */
-export function validateVideoStoryboard(sb: Storyboard, canon: VideoCanonSurface | null): StoryboardFinding[] {
+export function validateVideoStoryboard(sb: Storyboard, canon: VideoCanonSurface | null, workspace?: string): StoryboardFinding[] {
 	const findings: StoryboardFinding[] = [];
+	// The look is a series decision the USER makes: never assume it.
+	const open = openLookQuestions(sb.video);
+	if (open.includes("theme")) {
+		findings.push({
+			rule: "VIDEO-THEME-UNSET",
+			severity: "ERROR",
+			message:
+				"the series has no theme yet: ASK the user whether to keep the Odoo colors (default) or use their own base colors " +
+				"(primary, background, text as #RRGGBB), then run operation=style.",
+		});
+	}
+	if (open.includes("logo")) {
+		findings.push({
+			rule: "VIDEO-LOGO-UNSET",
+			severity: "ERROR",
+			message:
+				"the series has no logo decision yet: ASK the user whether the videos carry a logo (PNG/JPG path) or none, " +
+				"then run operation=style logo=<path> or logo=none.",
+		});
+	}
+	for (const problem of styleProblems(sb.video, workspace)) {
+		findings.push({ rule: "VIDEO-STYLE", severity: "ERROR", message: problem });
+	}
 	if (canon && sb.canonFingerprint && canon.fingerprint && sb.canonFingerprint !== canon.fingerprint) {
 		findings.push({
 			rule: "CANON-STALE",
@@ -228,6 +252,19 @@ export function validateVideoStoryboard(sb: Storyboard, canon: VideoCanonSurface
 				});
 			}
 			proseCheck(step.procedure, flow, step.id, "procedure");
+			if (step.chapter !== undefined && step.chapter.trim().length > 48) {
+				findings.push({ rule: "CHAPTER-LONG", severity: "WARN", flow: flow.id, step: step.id, message: `chapter is ${step.chapter.trim().length} characters (max 48): it is a one-line heading.` });
+			}
+			if (step.caption !== undefined && step.caption.trim().length > 70) {
+				findings.push({ rule: "CAPTION-LONG", severity: "WARN", flow: flow.id, step: step.id, message: `caption is ${step.caption.trim().length} characters (max 70): the pill is a short label, the narration carries the rest.` });
+			}
+			if (step.kind === "slide") {
+				for (const problem of slideProblems(step)) {
+					findings.push({ rule: "SLIDE-INVALID", severity: "ERROR", flow: flow.id, step: step.id, message: problem });
+				}
+			} else if (step.slide !== undefined) {
+				findings.push({ rule: "SLIDE-INVALID", severity: "ERROR", flow: flow.id, step: step.id, message: `only kind "slide" steps carry a slide (this step is "${step.kind}").` });
+			}
 			const t = step.target;
 			if (t && (t.kind === "action" || t.kind === "menu") && t.xmlid && known.size > 0 && !known.has(t.xmlid)) {
 				findings.push({
@@ -310,6 +347,25 @@ export function validateVideoStoryboard(sb: Storyboard, canon: VideoCanonSurface
 		}
 	}
 	return findings;
+}
+
+/** What is wrong with one slide step, as plain sentences (empty = valid). */
+function slideProblems(step: Step): string[] {
+	const slide = step.slide;
+	if (!slide) return ["a slide step needs slide: { layout, title, items }"];
+	const out: string[] = [];
+	if (slide.layout !== "cards" && slide.layout !== "checklist") out.push(`slide.layout must be "cards" or "checklist", got ${JSON.stringify(slide.layout)}`);
+	if (typeof slide.title !== "string" || slide.title.trim() === "") out.push("slide.title is empty");
+	else if (slide.title.trim().length > 48) out.push(`slide.title is ${slide.title.trim().length} characters (max 48)`);
+	const items = Array.isArray(slide.items) ? slide.items : [];
+	const max = slide.layout === "cards" ? 4 : 6;
+	if (items.length === 0 || items.length > max) out.push(`a ${slide.layout} slide takes 1–${max} items, got ${items.length}`);
+	items.forEach((item, i) => {
+		if (typeof item?.title !== "string" || item.title.trim() === "") out.push(`slide.items[${i}].title is empty`);
+		else if (item.title.trim().length > (slide.layout === "cards" ? 40 : 70)) out.push(`slide.items[${i}].title is too long for one ${slide.layout === "cards" ? "card heading" : "checklist line"}`);
+		if (item?.text !== undefined && item.text.trim().length > 120) out.push(`slide.items[${i}].text is ${item.text.trim().length} characters (max 120)`);
+	});
+	return out;
 }
 
 // ---------------------------------------------------------------------------

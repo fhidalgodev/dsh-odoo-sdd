@@ -21,7 +21,12 @@ const vassemble = await import(libUrl("video-assemble.js"));
 const vvoices = await import(libUrl("video-voices.js"));
 const vindex = await import(libUrl("video-index.js"));
 const vcov = await import(libUrl("video-coverage.js"));
+const vtheme = await import(libUrl("video-theme.js"));
+const vlayout = await import(libUrl("video-layout.js"));
+const mtool = await import(libUrl("manual-tool.js"));
 const mmodel = await import(libUrl("manual-model.js"));
+/** The series look every assembly needs (the user picked Odoo colors, no logo). */
+const STYLE = { theme: { preset: "odoo" }, logo: null };
 
 let passed = 0;
 const check = (name, cond, extra) => {
@@ -57,7 +62,7 @@ rm(proj);
 // ---------------------------------------------------------------------------
 // Video storyboard lint — a tolerant subset of the manual lint
 // ---------------------------------------------------------------------------
-const sbOf = (flows, fingerprint = "fp1") => ({ schema: "dsh-odoo-sdd/manual/1", slug: "s", flows, canonFingerprint: fingerprint });
+const sbOf = (flows, fingerprint = "fp1") => ({ schema: "dsh-odoo-sdd/manual/1", slug: "s", flows, canonFingerprint: fingerprint, video: STYLE });
 const canonSurface = { fingerprint: "fp1", model: "sale.order", actionXmlids: ["sale.action_quotations"], menuXmlids: ["sale.sale_menu_root"] };
 const cleanFindings = vmodel.validateVideoStoryboard(
 	sbOf([{ id: "f1", title: "t", steps: [{ id: "s01", kind: "goto", procedure: "Open the quotations list.", target: { kind: "action", xmlid: "sale.action_quotations" } }] }]),
@@ -231,15 +236,15 @@ if (canFakeBin) {
 	const flowThree = { ...flowEs, steps: [...flowEs.steps, { id: "s03", kind: "click", procedure: "Nunca llega.", field: "x" }] };
 	const narrated = await vvoice.voiceFlow({ workspace: aw, flow: flowThree, language: "es-ES", ttsCommand: ttsCmd, voice: "es-ES-test", ffmpegPath: fakeFfmpeg });
 	check("voice over the assemble workspace prepared 2 narrations", narrated.ok && narrated.value.items.length === 2, JSON.stringify(narrated.ok ? narrated.value.items : narrated.error));
-	const ares = await vassemble.assembleVideo({ workspace: aw, flow: flowThree, language: "es-ES", ffmpegPath: fakeFfmpeg, captions: false, stem: "01-flujo" });
+	const ares = await vassemble.assembleVideo({ workspace: aw, flow: flowThree, language: "es-ES", ffmpegPath: fakeFfmpeg, captions: false, stem: "01-flujo", title: "F", number: 1, style: STYLE });
 	check("assemble succeeds against the fake ffmpeg", ares.ok, JSON.stringify(ares.ok ? ares.value : ares.error));
 	if (ares.ok) {
-		check("the video truncates at the failed step and keeps prior segments", ares.value.truncatedAt === "s03" && ares.value.segments === 2 && ares.value.narrated === true);
+		check("the video truncates at the failed step and keeps prior segments (title + 2 steps)", ares.value.truncatedAt === "s03" && ares.value.segments === 3 && ares.value.narrated === true);
 		check("the report names the series stem at the workspace root", ares.value.file === "01-flujo.mp4", ares.value.file);
 		const mp4Abs = join(aw, ares.value.file);
 		check("01-flujo.mp4 exists at the root (fake ffmpeg wrote it)", existsSync(mp4Abs) && readFileSync(mp4Abs).toString("ascii").startsWith("FAKE"));
 		const srtText = readFileSync(join(aw, "01-flujo.srt"), "utf8");
-		check("the SRT ships next to the mp4 with the narrated steps", srtText.includes("Abrimos la lista") && srtText.includes("00:00:00,000"));
+		check("the SRT ships next to the mp4 with the narrated steps, after the silent title card", srtText.includes("Abrimos la lista") && srtText.includes("00:00:03,500 -->"));
 		check("video.json records the video schema with language/voice", (() => {
 			const report = JSON.parse(readFileSync(join(aw, "video", "video.json"), "utf8"));
 			return report.schema === "dsh-odoo-sdd/video/1" && report.language === "es-ES" && report.voice === "es-ES-test" && report.truncatedAt === "s03";
@@ -254,7 +259,7 @@ if (canFakeBin) {
 		// Re-assembling under a NEW stem must remove the previous artifacts:
 		// a rename that leaves the old file behind is exactly the orphan the
 		// index operation then reports.
-		const renamed = await vassemble.assembleVideo({ workspace: aw, flow: flowThree, language: "es-ES", ffmpegPath: fakeFfmpeg, captions: false, stem: "02-renombrado", previousFile: ares.value.file });
+		const renamed = await vassemble.assembleVideo({ workspace: aw, flow: flowThree, language: "es-ES", ffmpegPath: fakeFfmpeg, captions: false, stem: "02-renombrado", previousFile: ares.value.file, title: "F", number: 1, style: STYLE });
 		check("re-assembly under a new stem succeeds", renamed.ok, JSON.stringify(renamed.ok ? "" : renamed.error));
 		if (renamed.ok) {
 			check("the previous mp4/srt/vtt are removed on rename", !existsSync(join(aw, "01-flujo.mp4")) && !existsSync(join(aw, "01-flujo.srt")) && !existsSync(join(aw, "01-flujo.vtt")));
@@ -319,12 +324,13 @@ if (realFfmpeg.status !== 0) {
 	const vreal = await vvoice.voiceFlow({ workspace: ew, flow: flowTwo, language: "es-ES", ttsCommand: ttsCmd, voice: "es-ES-test", ffmpegPath: "ffmpeg" });
 	check("voice over real ffprobe reports true WAV durations", vreal.ok && vreal.value.items.length === 2 && vreal.value.items.every((i) => i.durationSeconds !== null && i.durationSeconds > 0.3), JSON.stringify(vreal.ok ? vreal.value.items : vreal.error));
 	check("the voice report stores POSIX paths", vreal.ok && vreal.value.items.every((i) => /^voice\/f1\/[^\\]+\.wav$/.test(i.file)), JSON.stringify(vreal.ok ? vreal.value.items.map((i) => i.file) : null));
-	const areal = await vassemble.assembleVideo({ workspace: ew, flow: flowTwo, language: "es-ES", ffmpegPath: "ffmpeg", captions: false, stem: "01-flujo" });
+	const areal = await vassemble.assembleVideo({ workspace: ew, flow: flowTwo, language: "es-ES", ffmpegPath: "ffmpeg", captions: false, stem: "01-flujo", title: flowTwo.title, number: 1, style: STYLE });
 	check("the REAL assembly produces a playable mp4 at the series root", areal.ok && areal.value.file === "01-flujo.mp4", JSON.stringify(areal.ok ? areal.value : areal.error));
 	if (areal.ok) {
 		const mp4Abs = join(ew, areal.value.file);
 		check("the mp4 is a real media file (synthetic testsrc compresses to ~20 KiB/s)", statSync(mp4Abs).size > 20_000);
-		const expected = vreal.value.items.reduce((a, i) => a + i.durationSeconds + 0.35, 0);
+		// The silent title card (no hook) holds 3.5 s before the narrated steps.
+		const expected = 3.5 + vreal.value.items.reduce((a, i) => a + i.durationSeconds + 0.35, 0);
 		const got = areal.value.durationSeconds;
 		check("the video duration matches the narration timeline (±0.6s, tpad included)", got !== null && Math.abs(got - expected) < 0.6, `expected ~${expected.toFixed(2)}s got ${got}`);
 		const streams = JSON.parse(spawnSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,duration", "-of", "json", mp4Abs], { encoding: "utf8" }).stdout || "{}").streams ?? [];
@@ -345,8 +351,9 @@ if (realFfmpeg.status !== 0) {
 	const acreative = vhook.ok
 		? await vassemble.assembleVideo({
 				workspace: ew, flow: flowHooked, language: "es-ES", ffmpegPath: "ffmpeg",
-				captions: true, stem: "02-creativo", title: flowHooked.title,
-				chapterLabel: "02 · Demo — Flujo demo", nextTitle: "Siguiente video",
+				captions: true, stem: "02-creativo", title: flowHooked.title, number: 2,
+				style: { theme: { preset: "custom", primary: "#0B4A8B", background: "#EEF3F8" }, logo: null },
+				nextTitle: "Tutorial 03 · Siguiente video",
 				music: true, sfx: true,
 			})
 		: vhook;
@@ -364,7 +371,14 @@ if (realFfmpeg.status !== 0) {
 			const srt = readFileSync(join(ew, "02-creativo.srt"), "utf8");
 			return srt.indexOf("Antes de empezar") < srt.indexOf("Abrimos la lista") && srt.indexOf("presupuesto cerrado") > srt.indexOf("Abrimos la lista");
 		})());
-		check("captions report as burned when a font exists", acreative.value.captions === true || acreative.value.captionsNote !== undefined);
+		check("the narration pills report as burned", acreative.value.captions === true);
+		// The theme reaches the pixels: the canvas corner of the title card is
+		// the custom background, never Odoo's or black.
+		const px = spawnSync("ffmpeg", ["-v", "error", "-ss", "0.5", "-i", mp4, "-frames:v", "1", "-vf", "crop=4:4:8:8", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], { maxBuffer: 1 << 20 });
+		const [r, g, b] = [...(px.stdout ?? Buffer.alloc(3)).subarray(0, 3)];
+		check("the title card paints the custom background (#EEF3F8 ±6)", Math.abs(r - 0xee) <= 6 && Math.abs(g - 0xf3) <= 6 && Math.abs(b - 0xf8) <= 6, `rgb(${r},${g},${b})`);
+		const size = JSON.parse(spawnSync("ffprobe", ["-v", "error", "-show_entries", "stream=width,height", "-select_streams", "v", "-of", "json", mp4], { encoding: "utf8" }).stdout || "{}").streams?.[0] ?? {};
+		check("the tutorial renders at 1920x1080", size.width === 1920 && size.height === 1080, JSON.stringify(size));
 		const black = spawnSync("ffmpeg", ["-i", mp4, "-vf", "blackdetect=d=1.2:pix_th=0.10", "-an", "-f", "null", "-"], { encoding: "utf8" });
 		check("blackdetect finds no black frame run ≥1.2s", !(black.stderr ?? "").includes("blackdetect"), (black.stderr ?? "").split("\n").find((l) => l.includes("blackdetect")) ?? "");
 	}
@@ -689,7 +703,7 @@ if (canFakeBin) {
 	);
 	mkdirSync(join(pw, "video", "raw"), { recursive: true });
 	writeFileSync(join(pw, "video", "raw", "f1.webm"), "fake-webm");
-	const opts = { workspace: pw, flow: hooked, language: "es-ES", ffmpegPath: fakeFfmpeg, captions: true, stem: "01-demo", title: hooked.title, chapterLabel: "01 · G — Flujo demo", nextTitle: "Otro", music: true, sfx: true };
+	const opts = { workspace: pw, flow: hooked, language: "es-ES", ffmpegPath: fakeFfmpeg, captions: true, stem: "01-demo", title: hooked.title, number: 1, style: STYLE, nextTitle: "Tutorial 02 · Otro", music: true, sfx: true };
 	const ar = await vassemble.assembleVideo(opts);
 	check("hook/outro/music/sfx flags land in the report", ar.ok && ar.value.hook === true && ar.value.outro === true && ar.value.music === true && ar.value.sfx === true, JSON.stringify(ar.ok ? ar.value : ar.error));
 	check("segments = steps + hook + outro, in order", ar.ok && ar.value.segments === hooked.steps.length + 2);
@@ -699,8 +713,99 @@ if (canFakeBin) {
 	check("music:false overrides the default on the report", arNoMusic.ok && arNoMusic.value.music === false);
 	const arNoCaps = await vassemble.assembleVideo({ ...opts, stem: "03-demo", captions: false });
 	check("captions:false skips burning but still writes srt/vtt", arNoCaps.ok && arNoCaps.value.captions === false && existsSync(join(pw, "03-demo.srt")) && existsSync(join(pw, "03-demo.vtt")));
+	const arNoTheme = await vassemble.assembleVideo({ ...opts, stem: "04-demo", style: undefined });
+	check("assemble without a theme → NEEDS_VIDEO_THEME (the user decides the colors)", !arNoTheme.ok && arNoTheme.errorKind === "needs_video_theme", JSON.stringify(arNoTheme));
+	const arNoLogo = await vassemble.assembleVideo({ ...opts, stem: "04-demo", style: { theme: { preset: "odoo" } } });
+	check("assemble without a logo decision → NEEDS_VIDEO_THEME (logo or none is asked)", !arNoLogo.ok && arNoLogo.errorKind === "needs_video_theme" && arNoLogo.error.includes("logo"), JSON.stringify(arNoLogo));
+	const arBadColor = await vassemble.assembleVideo({ ...opts, stem: "05-demo", style: { theme: { preset: "custom", primary: "red;drawtext" }, logo: null } });
+	check("a non-hex color never reaches ffmpeg", !arBadColor.ok && /#RRGGBB/.test(arBadColor.error), JSON.stringify(arBadColor));
+	// Slides are drawn, not recorded: they need no capture entry and count as segments.
+	const slideFlow = {
+		...hooked,
+		steps: [
+			{ ...hooked.steps[0], chapter: "Abre la lista" },
+			{ id: "x1", kind: "slide", procedure: null, slide: { layout: "checklist", title: "Recuerda", items: [{ title: "Uno" }, { title: "Dos" }] } },
+			hooked.steps[1],
+		],
+	};
+	const arSlides = await vassemble.assembleVideo({ ...opts, flow: slideFlow, stem: "06-demo" });
+	check("a slide between recorded steps becomes its own segment (title + 3 + outro)", arSlides.ok && arSlides.value.segments === 5 && !arSlides.value.truncatedAt, JSON.stringify(arSlides.ok ? arSlides.value : arSlides.error));
 	rm(pw);
 }
+
+// ---------------------------------------------------------------------------
+// Tutorial look: theme, layout graphs, slide/theme lint, re-plan merge
+// ---------------------------------------------------------------------------
+check("the Odoo theme is the default look", vtheme.resolveTheme(undefined).primary === "#714B67" && vtheme.resolveTheme({ preset: "odoo" }).background === "#F2F3F5");
+check("a custom theme overrides only the colors it names", (() => {
+	const t = vtheme.resolveTheme({ preset: "custom", primary: "#0B4A8B" });
+	return t.primary === "#0B4A8B" && t.background === "#F2F3F5" && t.accent === "#0B4A8B";
+})());
+check("styleProblems rejects non-hex colors and a custom theme without primary", (() => {
+	const a = vtheme.styleProblems({ theme: { preset: "custom", primary: "#12345" } });
+	const b = vtheme.styleProblems({ theme: { preset: "custom" } });
+	return a.some((p) => p.includes("theme.primary")) && b.some((p) => p.includes("needs at least theme.primary"));
+})());
+check("styleProblems keeps the logo inside the workspace and an image", (() => {
+	const lw = mkdtempSync(join(tmpdir(), "video-logo-"));
+	const out = vtheme.styleProblems({ theme: { preset: "odoo" }, logo: "../outside.png" }, lw).length === 1 && vtheme.styleProblems({ logo: "brand/logo.gif" }).length === 1 && vtheme.styleProblems({ logo: "brand/missing.png" }, lw).some((p) => p.includes("not found"));
+	rm(lw);
+	return out;
+})());
+check("pill text flips to dark on a light primary", vtheme.onColor("#FFE066", "#1F2937") === "#1F2937" && vtheme.onColor("#714B67", "#1F2937") === "#FFFFFF");
+check("layoutWords speaks the storyboard language", vtheme.layoutWords("es_VE").step === "Paso" && vtheme.layoutWords("fr").tutorial === "Tutoriel" && vtheme.layoutWords("ja").next === "Next");
+check("boxOnScreen maps the viewport rect into the framed screen", (() => {
+	const b = vlayout.boxOnScreen({ x: 0, y: 0, w: 1440, h: 900 });
+	return b.x === vlayout.SHOT.x && b.y === vlayout.SHOT.y && Math.round(b.w) === vlayout.SHOT.w && Math.round(b.h) === vlayout.SHOT.h;
+})());
+check("wrapText wraps by words and ellipsizes past maxLines", (() => {
+	const lines = vlayout.wrapText("uno dos tres cuatro cinco seis siete", 10, 2);
+	return lines.length === 2 && lines[0] === "uno dos" && lines[1].endsWith("…");
+})());
+check("revealAt staggers items inside the slide", vlayout.revealAt(0, 3, 6) < vlayout.revealAt(2, 3, 6) && vlayout.revealAt(2, 3, 6) < 6);
+{
+	const texts = [];
+	const ctx = {
+		theme: vtheme.resolveTheme({ preset: "custom", primary: "#0B4A8B" }), font: "/f/r.ttf", bold: "/f/b.ttf", check: null, logo: "/w/brand/logo.png",
+		words: vtheme.layoutWords("es"), title: "Acceso", number: 1, textFile: (c) => { texts.push(c); return `/tmp/t${texts.length}.txt`; },
+	};
+	const step = vlayout.segmentGraph({ kind: "step", stepKind: "fill", focus: { x: 100, y: 100, w: 200, h: 30 }, chapter: { number: 2, heading: "Ingresa" }, pill: "Escribe tu usuario" }, ctx, 4, 2);
+	check("a step graph frames the recording, boxes the field and draws the pill in the theme color", step.usesRaw && step.graph.includes("[0:v]tpad=") && step.graph.includes("drawbox=") && step.graph.includes("0x0B4A8B") && step.graph.includes("[1:v]scale=-1:44") && step.graph.endsWith("[out]"));
+	check("the step heading says \"Paso N\" and the pill text travels by file, never inline", texts.includes("Paso 2") && texts.includes("Ingresa") && texts.includes("Escribe tu usuario") && !step.graph.includes("Escribe tu usuario"));
+	const slide = vlayout.segmentGraph({ kind: "slide", slide: { layout: "cards", title: "T", items: [{ title: "A", text: "a" }, { title: "B" }] } }, { ...ctx, logo: null }, 5);
+	check("a slide graph is drawn from the canvas alone (no recording, no logo input)", !slide.usesRaw && slide.graph.startsWith("color=c=0xF2F3F5") && !slide.graph.includes("[0:v]") && slide.graph.endsWith("[out]"));
+}
+check("openLookQuestions asks the colors and the logo until both are decided", (() => {
+	const q = vtheme.openLookQuestions;
+	return q(undefined).join() === "theme,logo" && q({ theme: { preset: "odoo" } }).join() === "logo" && q({ logo: null }).join() === "theme" && q(STYLE).length === 0;
+})());
+check("logo: null (the user chose none) is a valid style", vtheme.styleProblems({ theme: { preset: "odoo" }, logo: null }, tmpdir()).length === 0);
+check("VIDEO-LOGO-UNSET is an ERROR until the user says logo or none", (() => {
+	const flows = [{ id: "f1", title: "t", steps: [{ id: "s01", kind: "goto", procedure: "x" }] }];
+	const unset = vmodel.validateVideoStoryboard({ ...sbOf(flows), video: { theme: { preset: "odoo" } } }, null);
+	const none = vmodel.validateVideoStoryboard(sbOf(flows), null);
+	return unset.some((f) => f.rule === "VIDEO-LOGO-UNSET" && f.severity === "ERROR") && !none.some((f) => f.rule === "VIDEO-LOGO-UNSET");
+})());
+check("VIDEO-THEME-UNSET is an ERROR until the user decides the colors", vmodel.validateVideoStoryboard({ ...sbOf([{ id: "f1", title: "t", steps: [{ id: "s01", kind: "goto", procedure: "x" }] }]), video: undefined }, null).some((f) => f.rule === "VIDEO-THEME-UNSET" && f.severity === "ERROR"));
+check("SLIDE-INVALID flags an empty slide and too many cards", (() => {
+	const fs = vmodel.validateVideoStoryboard(sbOf([{ id: "f1", title: "t", steps: [
+		{ id: "x1", kind: "slide", procedure: null },
+		{ id: "x2", kind: "slide", procedure: null, slide: { layout: "cards", title: "T", items: [1, 2, 3, 4, 5].map((i) => ({ title: `c${i}` })) } },
+	] }]), null);
+	return fs.filter((f) => f.rule === "SLIDE-INVALID").length === 2;
+})());
+check("the manual refuses slide steps (SLIDE-VIDEO-ONLY)", mmodel.validateStoryboard({ schema: "dsh-odoo-sdd/manual/1", slug: "m", flows: [{ id: "f1", title: "t", steps: [{ id: "x1", kind: "slide", procedure: null }] }] }, null).some((f) => f.rule === "SLIDE-VIDEO-ONLY"));
+check("a re-plan keeps the style, slides, chapters and captions", (() => {
+	const existing = { schema: "dsh-odoo-sdd/manual/1", slug: "s", video: { theme: { preset: "custom", primary: "#0B4A8B" } }, flows: [{ id: "f1", title: "t", steps: [
+		{ id: "s01", kind: "goto", procedure: "Abre.", chapter: "Entra", caption: "Abre la lista" },
+		{ id: "x1", kind: "slide", procedure: null, slide: { layout: "checklist", title: "R", items: [{ title: "a" }] } },
+		{ id: "s02", kind: "screenshot", procedure: null },
+	] }] };
+	const planned = { schema: "dsh-odoo-sdd/manual/1", slug: "s", flows: [{ id: "f1", title: "t", steps: [{ id: "s01", kind: "goto", procedure: null }, { id: "s02", kind: "screenshot", procedure: null }] }] };
+	const merged = mtool.mergeStoryboards(existing, planned);
+	const ids = merged.flows[0].steps.map((x) => x.id).join(",");
+	return merged.video?.theme?.primary === "#0B4A8B" && ids === "s01,x1,s02" && merged.flows[0].steps[0].chapter === "Entra" && merged.flows[0].steps[0].caption === "Abre la lista";
+})());
 
 rm(ws);
 console.log(`\nvideo: ${passed} checks passed`);

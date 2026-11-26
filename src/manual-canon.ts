@@ -331,7 +331,7 @@ export interface CanonField {
 	groups?: string[];
 }
 
-/** What one group may do with one model (from ir.model.access). */
+/** What one group may do with one model (ir.model.access; ir.access from 20). */
 export interface CanonModelAccess {
 	group: string;
 	groupName: string;
@@ -339,6 +339,31 @@ export interface CanonModelAccess {
 	write: boolean;
 	create: boolean;
 	unlink: boolean;
+	/** 20+: the records the row applies to (ir.access.domain). */
+	domain?: string;
+	/** 20+: a row with no group RESTRICTS every user instead of granting. */
+	restriction?: boolean;
+}
+
+/**
+ * First major where `ir.access` replaces both `ir.model.access` and `ir.rule`
+ * (`odoo/addons/base/models/ir_access.py`): one row per group and operation
+ * subset ("crud", "r", "cru"…), with an optional domain. A row WITH a group is
+ * a permission; a row WITHOUT one is a restriction on every user.
+ */
+export const IR_ACCESS_MAJOR = 20;
+
+/** The four rights an ir.access `operation` ("crud" subset) grants. */
+export function accessFromOperation(operation: unknown): { read: boolean; write: boolean; create: boolean; unlink: boolean } {
+	const op = typeof operation === "string" ? operation : "";
+	return { read: op.includes("r"), write: op.includes("u"), create: op.includes("c"), unlink: op.includes("d") };
+}
+
+/** A non-empty ir.access domain, or undefined ("[]" and blanks mean every record). */
+function accessDomain(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed === "" || trimmed === "[]" ? undefined : trimmed;
 }
 
 /**
@@ -610,19 +635,27 @@ export interface CanonRequest {
  * connected login the transport could read. `unknown` is an answer — the tool
  * never turns a missing declaration into an invented one.
  */
-async function collectInterview(client: CanonClient, request: CanonRequest, language: string, inventory: CanonModule[]): Promise<CanonInterview> {
+async function collectInterview(
+	client: CanonClient,
+	request: CanonRequest,
+	language: string,
+	inventory: CanonModule[],
+	groupsAttr: "groups_id" | "group_ids",
+): Promise<CanonInterview> {
 	const declared = typeof request.asUser === "string" && request.asUser.trim() !== "" ? request.asUser.trim() : null;
 	let connectedLogin: string | null = null;
 	/** Whether the connected user is a Settings administrator (base.group_system). */
 	let connectedIsAdmin: boolean | null = null;
 	const uid = client.currentUid?.() ?? null;
 	if (uid !== null) {
-		const rows = await read(client, "res.users", "read", [[uid], ["login", "groups_id"]], language, "res.users(login)");
+		// The user's groups field is `group_ids` from 19 (`groups_id` before).
+		const rows = await read(client, "res.users", "read", [[uid], ["login", groupsAttr]], language, "res.users(login)");
 		const row = rows.ok ? rows.value[0] : undefined;
 		if (row && typeof row["login"] === "string") connectedLogin = row["login"] as string;
-		if (row && Array.isArray(row["groups_id"])) {
-			const xmlids = await readGroupXmlids(client, (row["groups_id"] as unknown[]).map((g) => refId(g) ?? Number.NaN), language);
-			connectedIsAdmin = (row["groups_id"] as unknown[]).some((g) => {
+		if (row && Array.isArray(row[groupsAttr])) {
+			const groups = row[groupsAttr] as unknown[];
+			const xmlids = await readGroupXmlids(client, groups.map((g) => refId(g) ?? Number.NaN), language);
+			connectedIsAdmin = groups.some((g) => {
 				const id = refId(g);
 				return id !== undefined && xmlids.get(id) === "base.group_system";
 			});
@@ -654,6 +687,31 @@ export interface Row {
 }
 
 const READ_LIMIT = 200;
+
+/**
+ * The ir.model rows a module defines or extends. `ir.model.modules` is a
+ * computed, NON-stored field: a `modules like x` domain is ignored by 17-19
+ * and raises on 20. It is computed from the module's `ir.model.data` rows on
+ * `ir.model`, so that is what is searched here — on every version.
+ * @param client - any client with executeKw.
+ * @param module - the module technical name.
+ * @param fields - the ir.model fields to read.
+ * @param lang - optional context language.
+ */
+export async function moduleModelRows(
+	client: Pick<CanonClient, "executeKw">,
+	module: string,
+	fields: string[],
+	lang?: string,
+): Promise<RpcResult<Row[]>> {
+	const context = lang ? { context: { lang } } : {};
+	const data = await client.executeKw<Row[]>("ir.model.data", "search_read", [[["model", "=", "ir.model"], ["module", "=", module]]], { fields: ["res_id"], ...context });
+	if (!data.ok) return { ok: false, error: `ir.model.data(${module}): ${data.error}`, errorKind: data.errorKind };
+	const ids = [...new Set(data.value.map((r) => Number(r["res_id"])).filter(Number.isFinite))];
+	if (ids.length === 0) return { ok: true, value: [] };
+	const rows = await client.executeKw<Row[]>("ir.model", "search_read", [[["id", "in", ids]]], { fields, order: "model", ...context });
+	return rows.ok ? rows : { ok: false, error: `ir.model(${module}): ${rows.error}`, errorKind: rows.errorKind };
+}
 
 async function read(
 	client: CanonClient,
@@ -711,6 +769,8 @@ function actionDetail(kind: string, row: Row): string | undefined {
  */
 /** id part of a Reference ("res.groups,4" or [4, "name"] or false). */
 function refId(raw: unknown): number | undefined {
+	// A many2many read answers bare ids; a many2one answers [id, display_name].
+	if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) return raw;
 	if (Array.isArray(raw) && typeof raw[0] === "number") return raw[0];
 	if (typeof raw === "string") {
 		const comma = raw.indexOf(",");
@@ -840,18 +900,24 @@ async function collectModelDoc(
 		if (b.name && !byName.has(key)) byName.set(key, b);
 	}
 	doc.buttons = [...byName.values()];
-	const accessRows = await read(client, "ir.model.access", "search_read", [[["model_id", "=", Number(row["id"])]], ["name", "group_id", "perm_read", "perm_write", "perm_create", "perm_unlink"]], language, "ir.model.access");
+	const modern = major >= IR_ACCESS_MAJOR;
+	const accessRows = modern
+		? await read(client, "ir.access", "search_read", [[["model_id", "=", Number(row["id"])]], ["name", "group_id", "operation", "domain"]], language, "ir.access")
+		: await read(client, "ir.model.access", "search_read", [[["model_id", "=", Number(row["id"])]], ["name", "group_id", "perm_read", "perm_write", "perm_create", "perm_unlink"]], language, "ir.model.access");
 	if (accessRows.ok) {
 		const xmlids = await readGroupXmlids(client, accessRows.value.map((r) => refId(r["group_id"]) ?? Number.NaN), language);
 		doc.access = accessRows.value.slice(0, READ_LIMIT).map((r) => {
 			const gid = refId(r["group_id"]);
+			const rights = modern
+				? accessFromOperation(r["operation"])
+				: { read: r["perm_read"] === true, write: r["perm_write"] === true, create: r["perm_create"] === true, unlink: r["perm_unlink"] === true };
+			const domain = modern ? accessDomain(r["domain"]) : undefined;
 			return {
 				group: gid === undefined ? "everyone" : (xmlids.get(gid) ?? `res.groups,${gid}`),
-				groupName: refName(r["group_id"]) ?? (gid === undefined ? "Everyone" : `Group ${gid}`),
-				read: r["perm_read"] === true,
-				write: r["perm_write"] === true,
-				create: r["perm_create"] === true,
-				unlink: r["perm_unlink"] === true,
+				groupName: refName(r["group_id"]) ?? (gid === undefined ? (modern ? "All users (restriction)" : "Everyone") : `Group ${gid}`),
+				...rights,
+				...(domain !== undefined ? { domain } : {}),
+				...(modern && gid === undefined ? { restriction: true } : {}),
 			};
 		});
 	}
@@ -892,7 +958,7 @@ async function collectModuleInventory(
 		else if (model === "ir.cron") ownedCrons.push({ resId, name: String(r["name"] ?? "") });
 		else if (model === "base.automation") ownedAutomations.push({ resId, name: String(r["name"] ?? "") });
 		else if (model === "mail.template") ownedTemplates.push({ resId, name: String(r["name"] ?? "") });
-		else if (model === "ir.rule") ownedRules.push({ resId, name: String(r["name"] ?? "") });
+		else if (model === (major >= IR_ACCESS_MAJOR ? "ir.access" : "ir.rule")) ownedRules.push({ resId, name: String(r["name"] ?? "") });
 		else if (model.startsWith("ir.actions.")) {
 			const list = ownedActions.get(model) ?? [];
 			list.push({ resId, name: String(r["name"] ?? "") });
@@ -972,11 +1038,10 @@ async function collectModuleInventory(
 		menus.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.completeName.localeCompare(b.completeName));
 	}
 
-	// The models the module implements, read one by one: `ir.model.modules` is
-	// a comma-separated list, so the `like` prefilter is confirmed exactly.
-	const modelRows = await read(client, "ir.model", "search_read", [[["modules", "like", module]], ["id", "model", "name", "modules", "transient"]], language, `ir.model(${module})`);
+	// The models the module implements or extends, read one by one.
+	const modelRows = await moduleModelRows(client, module, ["id", "model", "name", "modules", "transient"], language);
 	if (!modelRows.ok) return { ok: false, blocked: modelRows.error };
-	const owned = modelRows.value.filter((r) => String(r["modules"] ?? "").split(",").map((s) => s.trim()).includes(module));
+	const owned = modelRows.value;
 	const models: CanonModelDoc[] = [];
 	for (const row of owned.sort((a, b) => String(a["model"]).localeCompare(String(b["model"])))) {
 		models.push(await collectModelDoc(client, row, major, language, groupsAttr));
@@ -1106,17 +1171,22 @@ async function collectModuleInventory(
 		templates.sort((a, b) => a.xmlid.localeCompare(b.xmlid));
 	}
 	if (ownedRules.length > 0) {
-		const got = await readOwnedRows("ir.rule", ownedRules, ["name", "model_id", "domain_force"]);
+		// 20+: the record rules ARE the ir.access rows that carry a domain; the
+		// rows without one are plain rights, already listed per model.
+		const modern = major >= IR_ACCESS_MAJOR;
+		const domainField = modern ? "domain" : "domain_force";
+		const got = await readOwnedRows(modern ? "ir.access" : "ir.rule", ownedRules, ["name", "model_id", domainField]);
 		if (!got.ok) return { ok: false, blocked: got.blocked };
 		await resolveModelIds(got.rows);
 		for (const r of got.rows) {
+			if (modern && accessDomain(r["domain"]) === undefined) continue;
 			const mid = refId(r["model_id"]);
 			rules.push({
 				xmlid: got.xmlByRes.get(Number(r["id"])) ?? `${module}.rule_${r["id"]}`,
 				resId: Number(r["id"]),
 				name: String(r["name"] ?? ""),
 				model: mid !== undefined ? modelNameById.get(mid) : undefined,
-				domain: typeof r["domain_force"] === "string" ? r["domain_force"] : undefined,
+				domain: typeof r[domainField] === "string" ? (r[domainField] as string) : undefined,
 			});
 		}
 		rules.sort((a, b) => a.xmlid.localeCompare(b.xmlid));
@@ -1234,10 +1304,15 @@ export async function collectCanon(client: CanonClient, request: CanonRequest): 
 		}
 	}
 
-	// 6. Access: ir.model.access + ir.rule + the group tree.
-	const accessRows = await read(client, "ir.model.access", "search_read", [[["model_id", "=", modelId]]], language, "ir.model.access");
+	// 6. Access: ir.model.access + ir.rule (ir.access from 20) + the group tree.
+	const modernAccess = major >= IR_ACCESS_MAJOR;
+	const accessRows = modernAccess
+		? await read(client, "ir.access", "search_read", [[["model_id", "=", modelId]], ["name", "group_id", "operation", "domain", "active"]], language, "ir.access")
+		: await read(client, "ir.model.access", "search_read", [[["model_id", "=", modelId]]], language, "ir.model.access");
 	if (!accessRows.ok) return { ok: false, blocked: accessRows.error };
-	const ruleRows = await read(client, "ir.rule", "search_read", [[["model_id", "=", modelId]]], language, "ir.rule");
+	const ruleRows = modernAccess
+		? { ok: true as const, value: accessRows.value.filter((r) => accessDomain(r["domain"]) !== undefined) }
+		: await read(client, "ir.rule", "search_read", [[["model_id", "=", modelId]]], language, "ir.rule");
 	if (!ruleRows.ok) return { ok: false, blocked: ruleRows.error };
 	const groupRows = await read(client, "res.groups", "search_read", [[], ["full_name"]], language, "res.groups");
 	if (!groupRows.ok) return { ok: false, blocked: groupRows.error };
@@ -1249,15 +1324,22 @@ export async function collectCanon(client: CanonClient, request: CanonRequest): 
 	if (groupXml.ok) for (const r of groupXml.value) groupXmlByRes.set(Number(r["res_id"]), `${r["module"]}.${r["name"]}`);
 	const access: CanonAccess = {
 		models: modelModules,
-		access: accessRows.value.slice(0, READ_LIMIT).map((r) => ({
-			name: String(r["name"] ?? ""),
-			group: typeof r["group_id"] === "object" && r["group_id"] !== null ? String((r["group_id"] as [number, string])[1]) : undefined,
-			perms: `${r["perm_read"] ? "r" : "-"}${r["perm_write"] ? "w" : "-"}${r["perm_create"] ? "c" : "-"}${r["perm_unlink"] ? "d" : "-"}`,
-		})),
+		access: accessRows.value.slice(0, READ_LIMIT).map((r) => {
+			const rights = modernAccess
+				? accessFromOperation(r["operation"])
+				: { read: r["perm_read"] === true, write: r["perm_write"] === true, create: r["perm_create"] === true, unlink: r["perm_unlink"] === true };
+			return {
+				name: String(r["name"] ?? ""),
+				group: refName(r["group_id"]) ?? (modernAccess ? "(restriction: all users)" : undefined),
+				perms: `${rights.read ? "r" : "-"}${rights.write ? "w" : "-"}${rights.create ? "c" : "-"}${rights.unlink ? "d" : "-"}`,
+			};
+		}),
 		rules: ruleRows.value.slice(0, READ_LIMIT).map((r) => ({
 			name: String(r["name"] ?? ""),
-			groups: Array.isArray(r["groups"]) ? (r["groups"] as Array<[number, string]>).map((g) => g[1]) : [],
-			domain: typeof r["domain_force"] === "string" ? r["domain_force"] : "[]",
+			groups: modernAccess
+				? (refName(r["group_id"]) !== undefined ? [refName(r["group_id"]) as string] : [])
+				: Array.isArray(r["groups"]) ? (r["groups"] as unknown[]).map((g) => refName(g) ?? String(g)) : [],
+			domain: modernAccess ? (accessDomain(r["domain"]) ?? "[]") : typeof r["domain_force"] === "string" ? r["domain_force"] : "[]",
 			active: r["active"] !== false,
 		})),
 		groups: groupRows.value.slice(0, READ_LIMIT).map((r) => ({
@@ -1276,7 +1358,7 @@ export async function collectCanon(client: CanonClient, request: CanonRequest): 
 		if (!inventory.ok) return { ok: false, blocked: inventory.blocked };
 		inventories.push(inventory.value);
 	}
-	const interview = await collectInterview(client, request, language, inventories);
+	const interview = await collectInterview(client, request, language, inventories, groupsAttr);
 
 	// 7. Error evidence: the project's own module first, then the native
 	//    checkouts when they are configured (never invented).

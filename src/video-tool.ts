@@ -8,8 +8,8 @@
  * command; assembly is ffmpeg. The storyboard's `procedure` sentences ARE the
  * script: one sentence per step becomes one narration and one caption.
  */
-import { join } from "node:path";
-import { existsSync, readdirSync } from "node:fs";
+import { extname, isAbsolute, join, relative, resolve } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { writeFileAtomic } from "./atomic.js";
 import {
@@ -22,6 +22,8 @@ import {
 	type Flow,
 	type ManualsMode,
 	type Storyboard,
+	type VideoStyle,
+	type VideoTheme,
 } from "./manual-model.js";
 import {
 	collectCanon,
@@ -44,6 +46,7 @@ import { assembleVideo, readSeries } from "./video-assemble.js";
 import { numberFlows, renderReadme, shouldWriteReadme, type SeriesMeta } from "./video-index.js";
 import { computeCoverage, formatCoverage, seedCoverageFlows } from "./video-coverage.js";
 import { presentCall } from "./present.js";
+import { layoutWords, openLookQuestions, styleProblems } from "./video-theme.js";
 
 export interface VideoToolDeps {
 	projectRoot: (exec?: unknown) => string;
@@ -104,21 +107,23 @@ export function registerVideoTool(
 				"operation=voice narrates it with the configured voice engine (ttsPreset, or a custom ttsCommand); " +
 				"operation=capture records the browser session (webm + per-step timestamps) — read-only steps always, " +
 				"ACTION steps only with allow_actions=true AND confirm_destructive=true on a DISPOSABLE database; " +
-				"operation=assemble cuts, pads to the narration and muxes <NN-slug>.mp4 at the workspace root with " +
+				"operation=style sets the look (colors, logo or none) — ASK the user first; " +
+				"operation=assemble renders a tutorial (title card, framed steps, boxed fields, pills, slides, outro) as <NN-slug>.mp4 with " +
 				"ffmpeg — SRT/VTT captions ALWAYS ship; operation=index regenerates the series README.md. " +
-				"It never writes MANUAL.md: odoo_manual stays untouched.",
+				"It never writes MANUAL.md.",
 			parameters: {
 				operation: {
 					type: "string",
 					required: true,
-					enum: ["plan", "voice", "capture", "assemble", "index", "audit"],
+					enum: ["plan", "style", "voice", "capture", "assemble", "index", "audit"],
 					description:
 						"plan: draft the video storyboard from the instance canon, or import a manual's canon+storyboard (from_manual). " +
+						"style: theme, colors, logo, eyebrow (ask the user). " +
 						"voice: narrate each step's procedure with the resolved voice engine (idempotent per .wav). " +
 						"capture: run the flow in a real browser and RECORD it (video always on); ACTION steps need allow_actions=true + confirm_destructive=true. " +
-						"assemble: cut the recording by step, freeze frames to fit the narration, mux <NN-slug>.mp4 + .srt/.vtt at the workspace root. " +
-						"index: regenerate the series README.md (groups, durations, progress) and report orphan media files. " +
-						"audit: print the coverage matrix of the module (read-only — what the series still owes).",
+						"assemble: render the tutorial <NN-slug>.mp4 + .srt/.vtt at the workspace root (needs the style). " +
+						"index: regenerate the series README.md and report orphan media. " +
+						"audit: the module coverage matrix (read-only).",
 				},
 				slug: {
 					type: "string",
@@ -180,9 +185,26 @@ export function registerVideoTool(
 					enum: ["auto", "chromium", "chrome", "msedge"],
 					description: "capture: which browser. auto = bundled Chromium → Chrome → Edge.",
 				},
+				theme: {
+					type: "string",
+					enum: ["odoo", "custom"],
+					description: "style: odoo (default look) or custom (needs primary_color).",
+				},
+				primary_color: { type: "string", description: "style: #RRGGBB for titles, boxes, pills." },
+				background_color: { type: "string", description: "style: #RRGGBB canvas." },
+				text_color: { type: "string", description: "style: #RRGGBB text." },
+				accent_color: { type: "string", description: "style: #RRGGBB checkmarks." },
+				logo: {
+					type: "string",
+					description: "style: PNG/JPG path (copied to brand/), or none.",
+				},
+				eyebrow: {
+					type: "string",
+					description: "style: line above the title card; \"\" removes it.",
+				},
 				captions: {
 					type: "boolean",
-					description: "assemble: BURN the captions in (drawtext; default true, needs a known font). SRT/VTT always ship regardless.",
+					description: "assemble: narration on the pill of steps without caption (default true). SRT/VTT always ship.",
 				},
 				music: {
 					type: "boolean",
@@ -208,8 +230,15 @@ export function registerVideoTool(
 				render: (_args: unknown, value: unknown) => [{ type: "text", text: (value as { detail: string }).detail }],
 			},
 			async execute(args: {
-				operation: "plan" | "voice" | "capture" | "assemble" | "index" | "audit";
+				operation: "plan" | "style" | "voice" | "capture" | "assemble" | "index" | "audit";
 				slug?: string;
+				theme?: "odoo" | "custom";
+				primary_color?: string;
+				background_color?: string;
+				text_color?: string;
+				accent_color?: string;
+				logo?: string;
+				eyebrow?: string;
 				from_manual?: string;
 				model?: string;
 				module?: string;
@@ -252,6 +281,7 @@ export function registerVideoTool(
 					return { ok: false, operation: args.operation, summary: "BLOCKED", artifacts, detail: `BLOCKED — ${ws.blocked}` };
 				}
 				if (args.operation === "plan") return planOp(args, ws.dir, slug, deps, artifacts, projectRoot, exec);
+				if (args.operation === "style") return styleOp(args, ws.dir, slug, artifacts, projectRoot);
 				if (args.operation === "voice") return voiceOp(args, ws.dir, slug, deps, artifacts, exec);
 				if (args.operation === "capture") return captureOp(args, ws.dir, slug, deps, artifacts, exec);
 				if (args.operation === "index") return indexOp(args, ws.dir, slug, deps, artifacts);
@@ -369,15 +399,16 @@ async function planOp(
 		const seeded = seedCoverageFlows(sb, readVideoCanonSurface(dir) ?? { actionXmlids: [], menuXmlids: [] });
 		writeStoryboard(dir, sb);
 		artifacts.push(`${slug}/storyboard.json`, `${slug}/canon.json`);
-		const findings = validateVideoStoryboard(sb, readVideoCanonSurface(dir));
+		const findings = validateVideoStoryboard(sb, readVideoCanonSurface(dir), dir);
 		lines.push(`Imported from manual "${args.from_manual}": ${imported.value.flows} flow(s), ${imported.value.steps} step(s), ${imported.value.narrated} narrated.`);
 		lines.push(`Language: ${sb.language} (inherited from the manual — narration and captions use it).`);
 		if (grouped > 0) lines.push(`Groups: ${grouped} flow(s) got a section name from the menu/model heuristic — re-group by feature if it fits the series better.`);
 		if (seeded > 0) lines.push(`Coverage: ${seeded} flow(s) seeded for the module's uncovered refs — narrate their steps (or videoSkip with a reason).`);
 		lines.push(...findingLines(findings));
 		lines.push("");
+		lines.push(...themeQuestion(sb));
 		lines.push("Next: fill any missing procedure sentence (the script), then voice → capture → assemble.");
-		return { ok: true, operation: "plan", summary: `imported ${imported.value.flows} flow(s) / ${imported.value.steps} step(s); ${findings.length} finding(s)`, artifacts, detail: lines.join("\n") };
+		return { ok: true, operation: "plan", summary: `${themeSummary(sb)}imported ${imported.value.flows} flow(s) / ${imported.value.steps} step(s); ${findings.length} finding(s)`, artifacts, detail: lines.join("\n") };
 	}
 
 	// Instance path: read the canon the same way odoo_manual does.
@@ -460,7 +491,7 @@ async function planOp(
 	writeStoryboard(dir, sb);
 	artifacts.push(`${slug}/storyboard.json`);
 
-	const findings = validateVideoStoryboard(sb, readVideoCanonSurface(dir));
+	const findings = validateVideoStoryboard(sb, readVideoCanonSurface(dir), dir);
 	const steps = sb.flows.reduce((a, f) => a + f.steps.length, 0);
 	lines.push(`Storyboard planned from the canon: ${sb.flows.length} flow(s), ${steps} step(s), fingerprint ${fingerprint.slice(0, 12)}….`);
 	lines.push(`Language: ${sb.language} (write every procedure sentence in it — it is the narration AND caption script).`);
@@ -468,8 +499,122 @@ async function planOp(
 	if (seeded > 0) lines.push(`Coverage: ${seeded} flow(s) seeded for the module's uncovered refs — narrate their steps (or videoSkip with a reason).`);
 	lines.push(...findingLines(findings));
 	lines.push("");
+	lines.push(...themeQuestion(sb));
 	lines.push("Next: write ONE sentence per step (procedure), then voice → capture → assemble per flow.");
-	return { ok: true, operation: "plan", summary: `planned ${sb.flows.length} flow(s), ${steps} step(s); ${findings.length} finding(s)`, artifacts, detail: lines.join("\n") };
+	return { ok: true, operation: "plan", summary: `${themeSummary(sb)}planned ${sb.flows.length} flow(s), ${steps} step(s); ${findings.length} finding(s)`, artifacts, detail: lines.join("\n") };
+}
+
+/** Summary prefix while the series look is still the user's open question. */
+const themeSummary = (sb: Storyboard): string => (openLookQuestions(sb.video).length > 0 ? "NEEDS_VIDEO_THEME — " : "");
+
+/** The questions plan hands to the agent until the look is decided. */
+function themeQuestion(sb: Storyboard): string[] {
+	const open = openLookQuestions(sb.video);
+	if (open.length === 0) return [];
+	const lines = ["NEEDS_VIDEO_THEME — ASK THE USER before assembling:"];
+	if (open.includes("theme")) {
+		lines.push(
+			"  Colors: keep the Odoo colors (default) or use their own base colors? " +
+				"Odoo: operation=style theme=odoo. Own: operation=style theme=custom primary_color=#RRGGBB [background_color text_color accent_color].",
+		);
+	}
+	if (open.includes("logo")) {
+		lines.push("  Logo: do the videos carry a logo? Yes: operation=style logo=<png/jpg path>. No: operation=style logo=none.");
+	}
+	lines.push("  Optional: eyebrow=\"…\" (the line above the title card; default: the flow group).", "");
+	return lines;
+}
+
+// ---------------------------------------------------------------------------
+// style — the series look (theme colors, logo, title-card eyebrow)
+// ---------------------------------------------------------------------------
+
+/** PNG / JPEG signatures: the logo must BE an image, not just be named like one. */
+function isImageFile(file: string): boolean {
+	const head = readFileSync(file).subarray(0, 8);
+	const png = head.length >= 8 && head.readUInt32BE(0) === 0x89504e47 && head.readUInt32BE(4) === 0x0d0a1a0a;
+	const jpeg = head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff;
+	return png || jpeg;
+}
+
+async function styleOp(
+	args: { theme?: "odoo" | "custom"; primary_color?: string; background_color?: string; text_color?: string; accent_color?: string; logo?: string; eyebrow?: string },
+	dir: string,
+	slug: string,
+	artifacts: string[],
+	projectRoot: string,
+): Promise<VideoToolResult> {
+	const loaded = needStoryboard(dir, "style", slug, artifacts);
+	if (!loaded.ok) return loaded.result;
+	const blocked = (why: string): VideoToolResult => ({ ok: false, operation: "style", summary: "BLOCKED", artifacts, detail: `BLOCKED — ${why}` });
+	const sb = loaded.sb;
+	const style: VideoStyle = { ...(sb.video ?? {}) };
+	const colors = { primary: args.primary_color, background: args.background_color, text: args.text_color, accent: args.accent_color };
+	const anyColor = Object.values(colors).some((c) => c !== undefined);
+	if (args.theme === "custom") {
+		const theme: VideoTheme = { preset: "custom" };
+		for (const [key, value] of Object.entries(colors) as [keyof typeof colors, string | undefined][]) {
+			if (value !== undefined) theme[key] = value.trim();
+		}
+		style.theme = theme;
+	} else if (args.theme === "odoo") {
+		if (anyColor) return blocked("colors only apply to theme=custom — drop them, or pass theme=custom.");
+		style.theme = { preset: "odoo" };
+	} else if (anyColor) {
+		return blocked("pass theme=custom together with the colors.");
+	}
+	if (args.logo !== undefined) {
+		const logo = args.logo.trim();
+		if (logo === "" || logo.toLowerCase() === "none") {
+			style.logo = null;
+		} else {
+			const src = isAbsolute(logo) ? logo : resolve(projectRoot, logo);
+			const ext = extname(src).toLowerCase();
+			if (!existsSync(src) || !statSync(src).isFile()) return blocked(`logo file not found: ${logo}`);
+			if (![".png", ".jpg", ".jpeg"].includes(ext) || !isImageFile(src)) return blocked(`logo must be a PNG or JPEG image: ${logo}`);
+			if (statSync(src).size > 5 * 1024 * 1024) return blocked(`logo is larger than 5 MiB: ${logo}`);
+			const rel = relative(resolve(dir), resolve(src));
+			if (!rel.startsWith("..") && !isAbsolute(rel)) {
+				style.logo = rel.split("\\").join("/");
+			} else {
+				mkdirSync(join(dir, "brand"), { recursive: true });
+				const name = `brand/logo${ext === ".jpeg" ? ".jpg" : ext}`;
+				copyFileSync(src, join(dir, name));
+				style.logo = name;
+				artifacts.push(`${slug}/${name}`);
+			}
+		}
+	}
+	if (args.eyebrow !== undefined) {
+		const eyebrow = args.eyebrow.replace(/\s+/g, " ").trim();
+		if (eyebrow === "") delete style.eyebrow;
+		else if (eyebrow.length > 80) return blocked(`eyebrow is ${eyebrow.length} characters (max 80): it is one short line.`);
+		else style.eyebrow = eyebrow;
+	}
+	const problems = styleProblems(style, dir);
+	if (problems.length > 0) return blocked(`the style is invalid: ${problems.join("; ")}.`);
+	sb.video = style;
+	writeStoryboard(dir, sb);
+	artifacts.push(`${slug}/storyboard.json`);
+	const theme = style.theme;
+	const open = openLookQuestions(style);
+	const look = !theme
+		? "no theme yet (NEEDS_VIDEO_THEME)"
+		: theme.preset === "odoo"
+			? "Odoo colors"
+			: `custom colors (primary ${theme.primary}${theme.background ? `, background ${theme.background}` : ""}${theme.text ? `, text ${theme.text}` : ""}${theme.accent ? `, accent ${theme.accent}` : ""})`;
+	return {
+		ok: open.length === 0,
+		operation: "style",
+		summary: `${open.length > 0 ? "NEEDS_VIDEO_THEME — " : ""}style: ${look}${style.logo ? ", logo" : ""}${style.eyebrow ? ", eyebrow" : ""}`,
+		artifacts,
+		detail: [
+			`Theme: ${look}.`,
+			`Logo: ${style.logo === undefined ? "not decided yet — ask the user (logo=<path> or logo=none)" : (style.logo ?? "none")}.`,
+			`Title-card eyebrow: ${style.eyebrow ?? "the flow group (default)"}.`,
+			"Re-assemble the flows to apply it: the recordings never need a re-capture for a style change.",
+		].join("\n"),
+	};
 }
 
 function findingLines(findings: { severity: string; rule: string; message: string; flow?: string; step?: string }[]): string[] {
@@ -792,13 +937,13 @@ async function assembleOp(
 		return { ok: false, operation: "assemble", summary: "BLOCKED", artifacts, detail: `BLOCKED — flow ${got.flow.id} is not in the storyboard numbering.` };
 	}
 	const previousFile = readSeries(dir).flows[got.flow.id]?.file;
-	// The series context the video dresses itself with: "NN · Group — Title"
-	// (no redundant group when it IS the storyboard name) and the next title
-	// for the outro's "next" pill.
+	// The series context the video dresses itself with: the title-card eyebrow
+	// (the style's, else the group — never the storyboard slug) and the next
+	// video for the outro.
 	const groupName = numberedFlow.group === loaded.sb.slug ? "" : numberedFlow.group;
-	const chapterLabel = `${String(numberedFlow.number).padStart(2, "0")} · ${groupName !== "" ? `${groupName} — ` : ""}${numberedFlow.flow.title}`;
 	const idx = numbered.items.findIndex((i) => i.flow.id === got.flow.id);
-	const nextTitle = idx >= 0 && idx + 1 < numbered.items.length ? numbered.items[idx + 1].flow.title : undefined;
+	const next = idx >= 0 && idx + 1 < numbered.items.length ? numbered.items[idx + 1] : undefined;
+	const nextTitle = next ? `${layoutWords(loaded.sb.language).tutorial} ${String(next.number).padStart(2, "0")} · ${next.flow.title}` : undefined;
 	const res = await assembleVideo({
 		workspace: dir,
 		flow: got.flow,
@@ -808,13 +953,22 @@ async function assembleOp(
 		stem: numberedFlow.stem,
 		previousFile,
 		title: got.flow.title,
-		chapterLabel,
+		number: numberedFlow.number,
+		eyebrow: loaded.sb.video?.eyebrow ?? (groupName !== "" ? groupName : undefined),
+		summary: got.flow.summary,
+		style: loaded.sb.video,
 		nextTitle,
 		music: args.music ?? deps.videoMusic(exec),
 		sfx: args.sfx ?? deps.videoSfx(exec),
 	});
 	if (!res.ok) {
-		const kind = res.errorKind === "needs_video_capture" ? "NEEDS_VIDEO_CAPTURE" : res.errorKind === "needs_ffmpeg" ? "NEEDS_FFMPEG" : "BLOCKED";
+		const kinds: Record<string, string> = {
+			needs_video_capture: "NEEDS_VIDEO_CAPTURE",
+			needs_ffmpeg: "NEEDS_FFMPEG",
+			needs_video_theme: "NEEDS_VIDEO_THEME",
+			needs_font: "NEEDS_FONT",
+		};
+		const kind = kinds[res.errorKind ?? ""] ?? "BLOCKED";
 		return { ok: false, operation: "assemble", summary: kind, artifacts, detail: `${kind} — ${res.error}` };
 	}
 	artifacts.push(
@@ -836,10 +990,9 @@ async function assembleOp(
 		detail:
 			[
 				`Video: ${res.value.file} (${(res.value.bytes / 1_048_576).toFixed(2)} MiB, language track ${(res.value.language ?? "en").split(/[-_]/)[0]}).`,
-				`Assembly: ${[res.value.hook ? "hook" : null, res.value.outro ? "outro" : null, "zoom", res.value.captions ? "captions" : null, res.value.music ? "music" : null, res.value.sfx ? "sfx" : null].filter(Boolean).join(", ")}${res.value.loudnessLufs !== undefined ? ` — ${res.value.loudnessLufs.toFixed(1)} LUFS` : ""}.`,
+				`Assembly: ${["tutorial layout", res.value.hook ? "narrated title" : null, res.value.outro ? "outro" : null, res.value.captions ? "pills" : null, res.value.music ? "music" : null, res.value.sfx ? "sfx" : null].filter(Boolean).join(", ")}${res.value.loudnessLufs !== undefined ? ` — ${res.value.loudnessLufs.toFixed(1)} LUFS` : ""}.`,
 				`Captions: ${numberedFlow.stem}.srt + .vtt next to the video (always shipped — they are also the export path to external video platforms).`,
 				res.value.truncatedAt ? `TRUNCATED at step ${res.value.truncatedAt}: the capture failed there; fix the storyboard and re-run capture with from_step.` : "Full flow assembled.",
-				res.value.captionsNote ? `NOTE: ${res.value.captionsNote}` : "",
 				indexed.readme ? "Series guide: README.md regenerated." : "",
 				indexed.error ? `WARNING: the series index could not be refreshed: ${indexed.error}` : "",
 				(indexed.orphans ?? []).length > 0 ? `ORPHANS at the workspace root: ${(indexed.orphans ?? []).join(", ")} — no current flow owns them; delete them by hand if obsolete.` : "",
@@ -899,7 +1052,7 @@ async function auditOp(dir: string, slug: string, artifacts: string[]): Promise<
 	const coverage = computeCoverage(loaded.sb, surface ?? { actionXmlids: [], menuXmlids: [] });
 	const total = coverage.items.length;
 	const covered = coverage.items.filter((i) => coverage.covered.has(i.ref) || coverage.skipped[i.ref] !== undefined).length;
-	const findings = validateVideoStoryboard(loaded.sb, surface);
+	const findings = validateVideoStoryboard(loaded.sb, surface, dir);
 	return {
 		ok: true,
 		operation: "audit",

@@ -1,5 +1,5 @@
 /**
- * video-fx.ts — the recording overlay (cursor, click wave, focus ring).
+ * video-fx.ts — the recording overlay (cursor and click wave).
  *
  * Injected with `context.addInitScript` ONLY when a video capture is running
  * (`opts.video`); manual captures never see it. The script is a string on
@@ -14,9 +14,11 @@
  * re-run on every document, and each run builds its own host.
  *
  * window.__sddFx is the handle the runner drives:
- *   ring(rect, label?)  — dim the screen around rect + draw a pulsing ring
- *   clearRing()         — remove the ring and the dim
  *   hide() / show()     — around screenshots (never captured in a PNG)
+ *
+ * The highlight box is NOT painted here: the assembler draws it from each
+ * step's focus rect in the series theme color, so a theme change never
+ * needs a re-capture.
  */
 export const FX_INIT_SCRIPT = String.raw`
 (() => {
@@ -29,14 +31,7 @@ export const FX_INIT_SCRIPT = String.raw`
 		".wave { position: fixed; width: 12px; height: 12px; margin: -6px 0 0 -6px;",
 		"	border-radius: 50%; border: 3px solid rgba(56,132,255,.95);",
 		"	animation: sdd-wave .55s ease-out forwards; }",
-		".ring { position: fixed; border: 3px solid #ffd43b; border-radius: 8px;",
-		"	box-shadow: 0 0 0 9999px rgba(0,0,0,.45), 0 0 14px rgba(255,212,59,.8);",
-		"	animation: sdd-pulse 1.1s ease-in-out infinite; }",
-		".tag { position: fixed; left: 0; top: 100%; margin-top: 8px; padding: 3px 10px;",
-		"	background: #ffd43b; color: #1a1a1a; font: 600 15px/1.4 system-ui, sans-serif;",
-		"	border-radius: 6px; white-space: nowrap; }",
 		"@keyframes sdd-wave { from { transform: scale(1); opacity: .95; } to { transform: scale(4.5); opacity: 0; } }",
-		"@keyframes sdd-pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.035); } }",
 	].join("\n");
 	let hostEl = null;
 	function mount() {
@@ -99,25 +94,7 @@ export const FX_INIT_SCRIPT = String.raw`
 		layer().appendChild(w);
 		setTimeout(() => w.remove(), 650);
 	}, true);
-	let ringEl = null;
 	window.__sddFx = {
-		ring(rect, label) {
-			this.clearRing();
-			ringEl = document.createElement("div");
-			ringEl.className = "ring";
-			const pad = 8;
-			ringEl.style.left = (rect.x - pad) + "px";
-			ringEl.style.top = (rect.y - pad) + "px";
-			ringEl.style.width = (rect.w + 2 * pad) + "px";
-			ringEl.style.height = (rect.h + 2 * pad) + "px";
-			if (label) {
-				const t = document.createElement("span");
-				t.className = "tag"; t.textContent = label;
-				ringEl.appendChild(t);
-			}
-			layer().appendChild(ringEl);
-		},
-		clearRing() { if (ringEl) { ringEl.remove(); ringEl = null; } },
 		hide() { host().style.display = "none"; },
 		show() { host().style.display = ""; },
 	};

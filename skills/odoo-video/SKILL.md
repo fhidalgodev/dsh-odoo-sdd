@@ -1,6 +1,6 @@
 ---
 name: odoo-video
-description: Produce a narrated VIDEO SERIES of Odoo flows with odoo_video — plan the storyboard (from the instance or imported from a manual with from_manual) which seeds coverage flows and groups, audit until 100% of the module is covered or reasoned away, narrate hook/steps/outro with a selectable voice preset (viral-male/viral-female/calm-male/calm-female/offline-piper/custom), capture the browser session with recording always on and the live page held per narration, and assemble numbered NN-title.mp4 files plus a README series index. Use when the user asks for a video, screencast or voiced walkthrough of a model or flow, alone or after a manual.
+description: Produce a narrated VIDEO SERIES of Odoo flows with odoo_video — plan the storyboard (from the instance or imported from a manual with from_manual) which seeds coverage flows and groups, audit until 100% of the module is covered or reasoned away, narrate hook/steps/outro with a selectable voice preset (viral-male/viral-female/calm-male/calm-female/offline-piper/custom), ask the user for the series colors (Odoo by default) and whether to use a logo, and set them with operation=style, capture the browser session with recording always on and the live page held per narration, and assemble numbered NN-title.mp4 tutorials (title card, framed steps with boxed fields and pills, card/checklist slides, outro) plus a README series index. Use when the user asks for a video, screencast or voiced walkthrough of a model or flow, alone or after a manual.
 ---
 
 # Narrated flow video series (odoo_video)
@@ -62,6 +62,45 @@ README table) and `group` (the README section; plan guesses it from the menu
 or model — re-group by feature). `HOOK-LONG`/`SENTENCE-LONG`/`FILLER` WARN on
 the spoken register; lint rules live in `validateVideoStoryboard`.
 
+### The look — ASK, then `operation=style` (gate: no `VIDEO-THEME-UNSET` / `VIDEO-LOGO-UNSET`)
+
+Plan answers `NEEDS_VIDEO_THEME` until the series look is decided. **Ask the
+user two questions before assembling**:
+
+1. Colors: keep the Odoo colors (default) or use their own base colors?
+2. Logo: do the videos carry a logo (which PNG/JPG file) or none?
+
+Optionally, the title-card eyebrow (defaults to the flow group). Then:
+
+- Odoo: `odoo_video operation=style theme=odoo`
+- Own colors: `operation=style theme=custom primary_color=#RRGGBB`
+  (+ `background_color`, `text_color`, `accent_color` — Odoo's for the rest)
+- Logo: `logo=<path>` copies the image to `brand/`; `logo=none` = no logo.
+- `eyebrow="…"`.
+
+Never pick the colors or a logo yourself, and never reuse a brand from
+another project. A style change never needs a re-capture —
+only a re-assemble.
+
+### The tutorial script (per flow)
+
+Each video reads like a step-by-step tutorial:
+
+- `chapter` on the FIRST step of each stage opens "Step N" + that heading
+  (≤ 48 chars, e.g. "Sign in with your network user"); the following steps
+  share it until the next chapter.
+- `caption` is the short pill under the screen naming what to do or fill
+  ("Password: your computer's one", ≤ 70 chars). Without it the pill shows
+  the narration (`captions=false` turns that fallback off).
+- `fill`/`select`/`click`/`highlight` steps get their element boxed in the
+  primary color; a `fill` is TYPED on film, so the viewer sees the field fill.
+- `slide` steps are drawn, not recorded:
+  `{ "id": "x1", "kind": "slide", "procedure": "…", "slide": { "layout": "cards", "eyebrow": "Security", "title": "The system protects you", "items": [{ "title": "…", "text": "…" }] } }`
+  — `cards` 1–4 (title + text), `checklist` 1–6 (title only, e.g. a closing
+  "Good practices"). Items appear one by one over the narration.
+- `summary` is the title-card subtitle; `outro.text` closes over
+  "Next: Tutorial NN · …".
+
 ## Phase 2 — AUDIT (gate: 100% covered or reasoned)
 
 `odoo_video operation=audit` prints the coverage matrix: per-type counts,
@@ -89,13 +128,13 @@ after listening.
 `odoo_video operation=capture flow=<id> allow_actions=true
 confirm_destructive=true` (action steps only, disposable DB; read-only flows
 run without them). Recording is ALWAYS on: `video/raw/<flow>.webm`, per-step
-`startMs`/`endMs`, and `focus` rects for the assembler's zoom. The overlay
-(cursor, click wave, focus ring) is injected only while recording; every PNG
+`startMs`/`endMs`, and `focus` rects for the assembler's highlight box. The
+overlay (cursor, click wave) is injected only while recording; every PNG
 is shot with it hidden. Each step holds the LIVE page for its narration
 length (voice first!) — without a voice report the dwell is a fixed ~0.7 s.
 
 `highlight` resolves a field, a header button, a notebook tab, then a plain
-menu item, hovers it and rings it on film; when nothing is on screen the step
+menu item and hovers it (the assembler boxes it); when nothing is on screen the step
 ERRORS with the probe order — never narrate what is not visible.
 
 A failing step aborts the run; fix the storyboard and resume with
@@ -103,12 +142,14 @@ A failing step aborts the run; fix the storyboard and resume with
 
 ## Phase 5 — ASSEMBLE + INDEX (per flow, then the series)
 
-`odoo_video operation=assemble flow=<id>` writes `<videosDir>/<slug>/NN-titulo.mp4`
+`odoo_video operation=assemble flow=<id>` (blocked with `NEEDS_VIDEO_THEME`
+until the colors and the logo are decided) writes a 1920x1080 `<videosDir>/<slug>/NN-titulo.mp4`
 + `.srt` + `.vtt` at the workspace ROOT (numbered/grouped by `numberFlows`),
 merges `video/series.json` and refreshes `README.md` when ≥2 videos exist.
-The default dressing: entry zoom toward each step's `focus`, burned pill
-captions (`captions=false` disables — srt/vtt always ship), chapter pill the
-first 3 s, hook title card, outro "next" pill, synthesized SFX + music bed
+The tutorial layout: title card (logo if chosen, eyebrow, "Tutorial NN", title,
+summary; the hook is narrated over it), each step's screen in a browser frame
+on the theme canvas with "Step N" + heading, the acted-on element boxed and
+the pill, slides, outro with "Next: …", synthesized SFX + music bed
 with voice ducking (`music`/`sfx` params or the `videoMusic`/`videoSfx`
 config), and 2-pass `loudnorm` to −14 LUFS.
 
@@ -120,8 +161,8 @@ the README still documents them.
 ## Return contract
 
 Per flow: voiced steps / total, capture status (truncated at which step, if
-any), the mp4/srt/vtt paths (new numbered stem), assembly flags (hook, outro,
-zoom, captions, music, sfx) and the measured LUFS. Per series: coverage X/Y,
+any), the mp4/srt/vtt paths (new numbered stem), the theme used, assembly
+flags (narrated title, outro, pills, music, sfx) and the measured LUFS. Per series: coverage X/Y,
 pending seeds, declared skips, orphans. Never play, upload or "improve" the
 mp4 with other tools; if the narration is wrong the fix is the storyboard
 sentence + delete the `.wav`s + re-voice + re-assemble.

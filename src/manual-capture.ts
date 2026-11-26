@@ -172,6 +172,7 @@ export interface UiFamily {
 		field: (name: string) => string;
 		notebookTab: (name: string) => string;
 		menuXmlid: string;
+		/** The webclient's blocking overlay (core/ui/block_ui.xml, 16+). */
 		loading: string;
 		/** A rendered view: the webclient mounts its action AFTER `load`,
 		 *  so this is what "the page is ready" means (blank-shell trap). */
@@ -179,6 +180,7 @@ export interface UiFamily {
 		/** Records painted: a list mounts its table BEFORE its rows arrive. */
 		recordsReady: string;
 		modal: string;
+		/** The OPEN autocomplete dropdown of a many2one (core/autocomplete, 16+). */
 		many2oneDropdown: string;
 		/** The dialog Odoo opens on an unhandled client/RPC error (16 differs). */
 		errorDialog: string;
@@ -193,11 +195,13 @@ export interface UiFamily {
 		/** The control-panel switch button of one view type. */
 		switchView: (type: string) => string;
 		searchInput: string;
-		/** The "Add a line" link of an x2many list. */
+		/** The "Add a line" control of an x2many list (a link up to 19, a button in 20). */
 		addRow: string;
 		/** The statusbar step currently selected. */
 		statusbarCurrent: string;
 	};
+	/** JSON of every visible menu with its xmlid and numeric id (the hash router needs the id). */
+	menusPath: string;
 	verified: string;
 }
 export const UI_FAMILIES: Record<number, UiFamily> = {
@@ -209,11 +213,11 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			field: (name) => `[name="${name}"] input, [name="${name}"]`,
 			notebookTab: (name) => `.nav-link[data-bs-target*="${name}"], .nav-link[name="${name}"]`,
 			menuXmlid: `[data-menu-xmlid]`,
-			loading: ".o_loader, .o_wait",
+			loading: ".o_blockUI",
 			viewReady: ".o_list_view, .o_form_view, .o_kanban_view, .o_dashboard, .o_pivot_view, .o_graph_view, .o_view_nocontent",
 			recordsReady: ".o_data_row, .o_kanban_record, .o_form_sheet, .o_view_nocontent, .o_dashboard",
 			modal: ".modal",
-			many2oneDropdown: ".o_field_many2one input, .ui-autocomplete input",
+			many2oneDropdown: ".o-autocomplete--dropdown-menu",
 			errorDialog: ".o_error_dialog",
 			dangerNotification: ".o_notification.border-danger",
 			invalidField: ".o_field_invalid",
@@ -225,6 +229,7 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			addRow: ".o_field_x2many_list_row_add a",
 			statusbarCurrent: ".o_statusbar_status .o_arrow_button_current",
 		},
+		menusPath: "/web/webclient/load_menus/sdd",
 		verified:
 			"E2E-tested against an Odoo 17 form (tests/capture.mjs) — the baseline family. " +
 			"Error selectors verified in the 17 sources: error_dialogs.xml renders contentClass o_error_dialog, " +
@@ -239,11 +244,11 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			field: (name) => `[name="${name}"] input, [name="${name}"]`,
 			notebookTab: (name) => `.nav-link[href*="${name}"], .nav-link[name="${name}"]`,
 			menuXmlid: `[data-menu-xmlid]`,
-			loading: ".o_loader, .o_wait",
+			loading: ".o_blockUI",
 			viewReady: ".o_list_view, .o_form_view, .o_kanban_view, .o_dashboard, .o_pivot_view, .o_graph_view, .o_view_nocontent",
 			recordsReady: ".o_data_row, .o_kanban_record, .o_form_sheet, .o_view_nocontent, .o_dashboard",
 			modal: ".modal",
-			many2oneDropdown: ".o_field_many2one input, .ui-autocomplete input",
+			many2oneDropdown: ".o-autocomplete--dropdown-menu",
 			errorDialog: ".o_dialog_error, .o_dialog_warning",
 			dangerNotification: ".o_notification.border-danger",
 			invalidField: ".o_field_invalid",
@@ -255,6 +260,7 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			addRow: ".o_field_x2many_list_row_add a",
 			statusbarCurrent: ".o_statusbar_status .o_arrow_button_current",
 		},
+		menusPath: "/web/webclient/load_menus/sdd",
 		verified:
 			"Same selectors as 17 (bootstrap 5 UI) EXCEPT the error dialog: 16 renders contentClass o_dialog_error " +
 			"(and o_dialog_warning for WarningDialog) instead of .o_error_dialog — verified in the 16 sources. " +
@@ -268,11 +274,11 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			field: (name) => `[name="${name}"] input, [name="${name}"]`,
 			notebookTab: (name) => `.nav-link[name="${name}"]`,
 			menuXmlid: `[data-menu-xmlid]`,
-			loading: ".o_loader, .o_wait",
+			loading: ".o_blockUI",
 			viewReady: ".o_list_view, .o_form_view, .o_kanban_view, .o_dashboard, .o_pivot_view, .o_graph_view, .o_view_nocontent",
 			recordsReady: ".o_data_row, .o_kanban_record, .o_form_sheet, .o_view_nocontent, .o_dashboard",
 			modal: ".modal",
-			many2oneDropdown: ".o_field_many2one input, .ui-autocomplete input",
+			many2oneDropdown: ".o-autocomplete--dropdown-menu",
 			errorDialog: ".o_error_dialog",
 			dangerNotification: ".o_notification:has(.o_notification_bar.bg-danger)",
 			invalidField: ".o_field_invalid",
@@ -284,6 +290,7 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			addRow: ".o_field_x2many_list_row_add a",
 			statusbarCurrent: ".o_statusbar_status .o_arrow_button_current",
 		},
+		menusPath: "/web/webclient/load_menus/sdd",
 		verified:
 			"Error selectors verified in the 18 sources: error_dialogs.xml keeps .o_error_dialog, but the danger " +
 			"toast moved to .o_notification_bar.bg-{type} (border-danger is gone). Declared UNTESTED against a " +
@@ -295,13 +302,13 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			headerButton: (name) => `.o_statusbar_buttons button[name="${name}"], header button[name="${name}"]`,
 			statusbar: ".o_form_statusbar",
 			field: (name) => `[name="${name}"] input, [name="${name}"]`,
-			notebookTab: (name) => `[data-tab-id="${name}"], .nav-link[name="${name}"]`,
+			notebookTab: (name) => `.nav-link[name="${name}"]`,
 			menuXmlid: `[data-menu-xmlid]`,
-			loading: ".o_loader, .o_wait",
+			loading: ".o_blockUI",
 			viewReady: ".o_list_view, .o_form_view, .o_kanban_view, .o_dashboard, .o_pivot_view, .o_graph_view, .o_view_nocontent",
 			recordsReady: ".o_data_row, .o_kanban_record, .o_form_sheet, .o_view_nocontent, .o_dashboard",
 			modal: ".modal",
-			many2oneDropdown: ".o_field_many2one input, .ui-autocomplete input",
+			many2oneDropdown: ".o-autocomplete--dropdown-menu",
 			errorDialog: ".o_error_dialog",
 			dangerNotification: ".o_notification:has(.o_notification_bar.bg-danger)",
 			invalidField: ".o_field_invalid",
@@ -313,9 +320,42 @@ export const UI_FAMILIES: Record<number, UiFamily> = {
 			addRow: ".o_field_x2many_list_row_add a",
 			statusbarCurrent: ".o_statusbar_status .o_arrow_button_current",
 		},
+		menusPath: "/web/webclient/load_menus",
 		verified:
 			"E2E-verified against a live Odoo 19.0+e Enterprise instance (quotation list + order form, 1440x900, narrated video). " +
 			"Danger toast verified in the 19 sources as .o_notification_bar.bg-{type} (same marker as 18).",
+	},
+	20: {
+		selectors: {
+			newRecord: ".o-kanban-button-new, .o_list_button_add, .o_form_button_create",
+			headerButton: (name) => `.o_statusbar_buttons button[name="${name}"], header button[name="${name}"]`,
+			statusbar: ".o_form_statusbar",
+			field: (name) => `[name="${name}"] input, [name="${name}"]`,
+			notebookTab: (name) => `.nav-link[name="${name}"]`,
+			menuXmlid: `[data-menu-xmlid]`,
+			loading: ".o_blockUI",
+			viewReady: ".o_list_view, .o_form_view, .o_kanban_view, .o_dashboard, .o_pivot_view, .o_graph_view, .o_view_nocontent",
+			recordsReady: ".o_data_row, .o_kanban_record, .o_form_sheet, .o_view_nocontent, .o_dashboard",
+			modal: ".modal",
+			many2oneDropdown: ".o-autocomplete--dropdown-menu",
+			errorDialog: ".o_error_dialog",
+			dangerNotification: ".o_notification:has(.o_notification_bar.bg-danger)",
+			invalidField: ".o_field_invalid",
+			dataRow: ".o_data_row",
+			saveButton: ".o_form_button_save",
+			discardButton: ".o_form_button_cancel",
+			switchView: (type) => `.o_switch_view.o_${type}`,
+			searchInput: ".o_searchview_input",
+			// 20 renders the x2many "Add a line" as <button class="btn btn-link">
+			// (views/list/list_renderer.xml); the link form is kept for safety.
+			addRow: ".o_field_x2many_list_row_add > button, .o_field_x2many_list_row_add a",
+			statusbarCurrent: ".o_statusbar_status .o_arrow_button_current",
+		},
+		menusPath: "/web/webclient/load_menus",
+		verified:
+			"E2E-verified against a live Odoo 20.0+e Enterprise instance (list, new form, fill, many2one select, " +
+			"notebook tab, x2many add row, save, menu by id, canon crawl; 1440x900). OWL 3 keeps the 19 DOM " +
+			"classes; the x2many add row became a button.",
 	},
 };
 
@@ -342,8 +382,49 @@ export function familyFor(serverVersion: string): RpcResult<{ major: number; fam
 export function actionUrl(baseUrl: string, xmlid: string): string {
 	return `${baseUrl.replace(/\/$/, "")}/web#action=${encodeURIComponent(xmlid)}`;
 }
-export function menuUrl(baseUrl: string, xmlid: string): string {
-	return `${baseUrl.replace(/\/$/, "")}/web#menu_id=${encodeURIComponent(xmlid)}`;
+/**
+ * The control to type into for a field. `field(name)` matches the widget div
+ * FIRST (document order), which `fill` refuses, and a name can repeat: a form
+ * field and an x2many column often share `name`. The row being edited wins,
+ * then an open dialog, then the form; the widget selector is the last resort.
+ */
+export async function editableField(page: PwPage, family: UiFamily, name: string): Promise<string> {
+	const controls = (scope: string): string[] =>
+		["input", "textarea", '[contenteditable="true"]'].map((control) => `${scope}[name="${name}"] ${control}`);
+	for (const scope of [".o_selected_row ", `${family.selectors.modal} `, ""]) {
+		for (const candidate of controls(scope)) {
+			if (await page.$(candidate).catch(() => null)) return candidate;
+		}
+	}
+	return family.selectors.field(name);
+}
+
+/** The hash router reads `menu_id` as a NUMBER (webclient.js): pass the id, never the xmlid. */
+export function menuUrl(baseUrl: string, menuId: number): string {
+	return `${baseUrl.replace(/\/$/, "")}/web#menu_id=${menuId}`;
+}
+
+/**
+ * Numeric id of a menu xmlid, read from the webclient's own menu tree (same
+ * origin, the user's session): only menus that user can see are found.
+ */
+export async function menuIdOf(page: PwPage, family: UiFamily, baseUrl: string, xmlid: string): Promise<number | null> {
+	// The menu tree is read with the page's own session, so the page must be ON
+	// the instance first (a flow can start on about:blank).
+	const origin = new URL(baseUrl).origin;
+	const here = await page.evaluate<string>("location.origin").catch(() => "");
+	if (here !== origin) await page.goto(`${baseUrl.replace(/\/$/, "")}/web`, { waitUntil: "load", timeout: 30_000 });
+	return page.evaluate<number | null>(
+		`(async () => {
+			const res = await fetch(${JSON.stringify(family.menusPath)}, { credentials: "same-origin" });
+			if (!res.ok) return null;
+			const menus = await res.json();
+			for (const menu of Object.values(menus)) {
+				if (menu && menu.xmlid === ${JSON.stringify(xmlid)} && typeof menu.id === "number") return menu.id;
+			}
+			return null;
+		})()`,
+	);
 }
 export function recordUrl(baseUrl: string, model: string, id: number): string {
 	return `${baseUrl.replace(/\/$/, "")}/web#id=${id}&model=${encodeURIComponent(model)}&view_type=form`;
@@ -670,11 +751,11 @@ export async function runStep(
 						: t.kind === "action"
 							? actionUrl(env.baseUrl, t.xmlid ?? "")
 							: t.kind === "menu"
-								? menuUrl(env.baseUrl, t.xmlid ?? "")
+								? await menuIdOf(page, family, env.baseUrl, t.xmlid ?? "").then((id) => (id === null ? null : menuUrl(env.baseUrl, id)))
 								: t.kind === "record"
 									? recordUrl(env.baseUrl, t.model ?? "", t.recordId ?? 0)
 									: null;
-				if (!url) return { ...base, status: "error", error: `unsupported goto target` };
+				if (!url) return { ...base, status: "error", error: t?.kind === "menu" ? `menu ${t.xmlid ?? ""} is not visible to this user` : `unsupported goto target` };
 				// origin lock on explicit URLs too
 				if (!url.startsWith(env.baseUrl)) return { ...base, status: "error", error: `origin lock: ${url} leaves ${env.baseUrl}` };
 				await page.goto(url, { waitUntil: "load", timeout: 30_000 });
@@ -710,7 +791,9 @@ export async function runStep(
 				} else {
 					await page.click(menuSel, { timeout: 10_000 }).catch(async () => {
 						// fall back to direct navigation when the menu is not rendered
-						await page.goto(menuUrl(env.baseUrl, step.target?.xmlid ?? ""), { waitUntil: "load", timeout: 30_000 });
+						const menuId = await menuIdOf(page, family, env.baseUrl, step.target?.xmlid ?? "");
+						if (menuId === null) throw new Error(`menu ${step.target?.xmlid ?? ""} is not visible to this user`);
+						await page.goto(menuUrl(env.baseUrl, menuId), { waitUntil: "load", timeout: 30_000 });
 					});
 				}
 				await page.waitForTimeout(500);
@@ -722,7 +805,7 @@ export async function runStep(
 				break;
 			}
 			case "fill": {
-				const sel = family.selectors.field(step.field ?? "");
+				const sel = await editableField(page, family, step.field ?? "");
 				base.focus = roundRect(await moveAndClick(sel));
 				if (env.recording && base.focus && typeof page.keyboard.type === "function") {
 					// The viewer must SEE the field being filled: clear it, then
@@ -735,7 +818,7 @@ export async function runStep(
 				break;
 			}
 			case "select": {
-				const sel = family.selectors.field(step.field ?? "");
+				const sel = await editableField(page, family, step.field ?? "");
 				base.focus = roundRect(await moveAndClick(sel));
 				await page.fill(sel, step.value ?? "", { timeout: 10_000 });
 				await page.keyboard.press("Enter");

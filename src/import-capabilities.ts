@@ -59,11 +59,22 @@ export interface ImportCapabilities {
 /** Families this plugin has verified contracts for. */
 const FAMILIES: ImportCapabilities[] = [
 	{
-		major: 19,
-		family: "17-19",
+		major: 20,
+		family: "17-20",
 		upload: { path: "/base_import/set_file", fileField: "ufile", idField: "id", response: "json" },
 		apply: { method: "execute_import", signature: ["import_id", "fields", "columns", "options", "dryrun"] },
-		fieldsMethod: "get_fields",
+		fieldsMethod: "get_fields_tree",
+		notes: [
+			"20 binds `ufile` as a controller argument (`set_file(id, ufile, model=None)`); the multipart shape is unchanged.",
+			"A dry run executes ORM logic and can persist mapping preferences: it is not a pure read.",
+		],
+	},
+	{
+		major: 19,
+		family: "17-20",
+		upload: { path: "/base_import/set_file", fileField: "ufile", idField: "id", response: "json" },
+		apply: { method: "execute_import", signature: ["import_id", "fields", "columns", "options", "dryrun"] },
+		fieldsMethod: "get_fields_tree",
 		notes: [
 			"`res.config.settings`-style properties are stored as JSONB from 18 on; write values through the ORM, never a JSONB dictionary.",
 			"Confirm the endpoint shape against the instance: the response is JSON here, and a JSONP body means a different family.",
@@ -71,10 +82,10 @@ const FAMILIES: ImportCapabilities[] = [
 	},
 	{
 		major: 18,
-		family: "17-19",
+		family: "17-20",
 		upload: { path: "/base_import/set_file", fileField: "ufile", idField: "id", response: "json" },
 		apply: { method: "execute_import", signature: ["import_id", "fields", "columns", "options", "dryrun"] },
-		fieldsMethod: "get_fields",
+		fieldsMethod: "get_fields_tree",
 		notes: [
 			"Properties live in JSONB from 18 on, but the value is still written through the ORM normal path.",
 			"A dry run executes ORM logic and can persist mapping preferences outside the savepoint: it is not a pure read.",
@@ -82,10 +93,10 @@ const FAMILIES: ImportCapabilities[] = [
 	},
 	{
 		major: 17,
-		family: "17-19",
+		family: "17-20",
 		upload: { path: "/base_import/set_file", fileField: "ufile", idField: "id", response: "json" },
 		apply: { method: "execute_import", signature: ["import_id", "fields", "columns", "options", "dryrun"] },
-		fieldsMethod: "get_fields",
+		fieldsMethod: "get_fields_tree",
 		notes: [
 			"`ir.property` is still in use on 17; write the normal value through the ORM with the company context.",
 			"A dry run executes ORM logic and can persist mapping preferences: it is not a pure read.",
@@ -94,25 +105,25 @@ const FAMILIES: ImportCapabilities[] = [
 	{
 		major: 16,
 		family: "15-16",
-		upload: { path: "/base_import/set_file", fileField: "ufile", idField: "id", response: "json" },
+		upload: { path: "/base_import/set_file", fileField: "file", idField: "import_id", response: "jsonp" },
 		apply: { method: "execute_import", signature: ["import_id", "fields", "columns", "options", "dryrun"] },
 		fieldsMethod: "get_fields_tree",
-		notes: ["Verify the upload field names on the instance: this family is close to the older JSONP shape."],
+		notes: ["The upload answers JSONP (`set_file(file, import_id, jsonp)`): this plugin parses it as DATA and never executes it."],
 	},
 	{
 		major: 15,
 		family: "15-16",
-		upload: { path: "/base_import/set_file", fileField: "ufile", idField: "id", response: "json" },
+		upload: { path: "/base_import/set_file", fileField: "file", idField: "import_id", response: "jsonp" },
 		apply: { method: "execute_import", signature: ["import_id", "fields", "columns", "options", "dryrun"] },
 		fieldsMethod: "get_fields_tree",
-		notes: ["Verify the upload field names on the instance: this family is close to the older JSONP shape."],
+		notes: ["The upload answers JSONP (`set_file(file, import_id, jsonp)`): this plugin parses it as DATA and never executes it."],
 	},
 	{
 		major: 14,
 		family: "12-14",
 		upload: { path: "/base_import/set_file", fileField: "file", idField: "import_id", response: "jsonp" },
 		apply: { method: "do", signature: ["fields", "columns", "options", "dryrun"] },
-		fieldsMethod: "get_fields_tree",
+		fieldsMethod: "get_fields",
 		notes: ["The upload answers JSONP: this plugin parses it as DATA and never executes it."],
 	},
 	{
@@ -120,7 +131,7 @@ const FAMILIES: ImportCapabilities[] = [
 		family: "12-14",
 		upload: { path: "/base_import/set_file", fileField: "file", idField: "import_id", response: "jsonp" },
 		apply: { method: "do", signature: ["fields", "columns", "options", "dryrun"] },
-		fieldsMethod: "get_fields_tree",
+		fieldsMethod: "get_fields",
 		notes: ["The upload answers JSONP: this plugin parses it as DATA and never executes it."],
 	},
 	{
@@ -128,7 +139,7 @@ const FAMILIES: ImportCapabilities[] = [
 		family: "12-14",
 		upload: { path: "/base_import/set_file", fileField: "file", idField: "import_id", response: "jsonp" },
 		apply: { method: "do", signature: ["fields", "columns", "options", "dryrun"] },
-		fieldsMethod: "get_fields_tree",
+		fieldsMethod: "get_fields",
 		notes: ["The upload answers JSONP: this plugin parses it as DATA and never executes it."],
 	},
 	{
@@ -136,7 +147,7 @@ const FAMILIES: ImportCapabilities[] = [
 		family: "10-11",
 		upload: { path: "/base_import/set_file", fileField: "file", idField: "import_id", response: "jsonp" },
 		apply: { method: "do", signature: ["fields", "options", "dryrun"] },
-		fieldsMethod: "get_fields_tree",
+		fieldsMethod: "get_fields",
 		notes: [
 			"The apply signature has no separate columns argument on this family.",
 			"The upload answers JSONP: this plugin parses it as DATA and never executes it.",
@@ -147,7 +158,7 @@ const FAMILIES: ImportCapabilities[] = [
 		family: "10-11",
 		upload: { path: "/base_import/set_file", fileField: "file", idField: "import_id", response: "jsonp" },
 		apply: { method: "do", signature: ["fields", "options", "dryrun"] },
-		fieldsMethod: "get_fields_tree",
+		fieldsMethod: "get_fields",
 		notes: [
 			"The apply signature has no separate columns argument on this family.",
 			"The upload answers JSONP: this plugin parses it as DATA and never executes it.",

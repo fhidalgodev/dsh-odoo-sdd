@@ -158,7 +158,7 @@ const RULES: Rule[] = [
 		message: "Demo data declares groups, access lines or record rules: access belongs to the module's security model, not to demo/.",
 		hint: "Move the security model to security/ (always loaded) and leave demo/ for records only.",
 		match: (l) =>
-			/model=["'](res\.groups|ir\.model\.access|ir\.rule)["']/.test(l) || /^\s*(access_|rule_)[A-Za-z0-9_]*\s*,/.test(l),
+			/model=["'](res\.groups|ir\.model\.access|ir\.rule|ir\.access)["']/.test(l) || /^\s*(access_|rule_)[A-Za-z0-9_]*\s*,/.test(l),
 	},
 ];
 

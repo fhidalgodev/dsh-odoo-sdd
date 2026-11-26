@@ -3,12 +3,16 @@
  *
  * Inputs: the storyboard flow + capture.json (schema /2, with the recording
  * and per-step timestamps) + the voice report (optional — a silent video is
- * valid). Pipeline per step: cut the raw webm by timestamps, freeze the last
- * frame until the narration fits (`tpad=stop_mode=clone`), reencode to a
- * uniform h264/yuv420p/25fps, concat, then mux the voice track (narrations +
- * silences). SRT + VTT captions are ALWAYS derived (deterministic, no ffmpeg
- * needed to compute them) — they are also the export path to external video
- * platforms. Burning them in (drawtext) is opt-in and font-dependent.
+ * valid) + the series style (theme colors, logo). The video is a TUTORIAL
+ * (video-layout.ts): a title card, then every step's recorded screen framed
+ * on the theme canvas — cut by timestamps, the last frame frozen until the
+ * narration fits (`tpad=stop_mode=clone`) — with "Step N" + chapter heading,
+ * the acted-on element boxed and a short pill; designed slides (cards or a
+ * checklist) where the storyboard asks for them; and an outro naming the next
+ * video. Every segment is reencoded to a uniform 1920x1080 h264/yuv420p/25fps,
+ * concatenated, then muxed with the voice track (narrations + silences). SRT +
+ * VTT captions are ALWAYS derived (deterministic, no ffmpeg needed to compute
+ * them) — they are also the export path to external video platforms.
  *
  * Gates: no recorded capture → NEEDS_VIDEO_CAPTURE; no ffmpeg → NEEDS_FFMPEG.
  * A step that failed mid-capture truncates the video at the last OK step
@@ -21,12 +25,16 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { writeFileAtomic } from "./atomic.js";
 import { posixPath } from "./paths.js";
-import type { Flow } from "./manual-model.js";
+import type { Flow, VideoSlide, VideoStyle } from "./manual-model.js";
 import type { CaptureReport } from "./manual-capture.js";
 import type { RpcResult } from "./manual-capture.js";
 import { ffprobePathOf, probeDurationSeconds, readVoiceReport } from "./video-voice.js";
+import { segmentGraph, type LayoutContext } from "./video-layout.js";
+import { layoutWords, openLookQuestions, resolveTheme, styleProblems } from "./video-theme.js";
 
 const FIXED_DWELL_SECONDS = 2.5;
+/** Title card and outro without narration hold this long. */
+const CARD_SECONDS = 3.5;
 /** Shortest window read from the raw recording (one step can beat one frame). */
 const MIN_CUT_SECONDS = 0.5;
 /** Trim the tail of a window: the next step starts painting on its first frame. */
@@ -36,8 +44,11 @@ const NAV_TAIL_SECONDS = 0.9;
 /** Voice tail after the last word, so a step never cuts the audio. */
 const VOICE_TAIL_SECONDS = 0.35;
 
-/** Common font files for the burned-in captions and pills (regular first). */
+/** Font files for the layout text (regular face), most legible first. */
 const FONT_CANDIDATES = [
+	"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+	"/usr/share/fonts/noto/NotoSans-Regular.ttf",
+	"C:\\Windows\\Fonts\\segoeui.ttf",
 	"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 	"/usr/share/fonts/TTF/DejaVuSans.ttf",
 	"/usr/share/fonts/dejavu/DejaVuSans.ttf",
@@ -46,8 +57,11 @@ const FONT_CANDIDATES = [
 	"/System/Library/Fonts/Supplemental/Arial.ttf",
 ];
 
-/** Bold faces for the chapter pill, the hook title and the outro pill. */
+/** Bold faces for headings, the title card and the pills. */
 const BOLD_FONT_CANDIDATES = [
+	"/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+	"/usr/share/fonts/noto/NotoSans-Bold.ttf",
+	"C:\\Windows\\Fonts\\segoeuib.ttf",
 	"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 	"/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
 	"/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
@@ -57,24 +71,38 @@ const BOLD_FONT_CANDIDATES = [
 	...FONT_CANDIDATES,
 ];
 
+/** Faces known to carry the ✓ glyph of the checklist slides. */
+const CHECK_FONT_CANDIDATES = [
+	"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+	"/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+	"/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+	"C:\\Windows\\Fonts\\seguisym.ttf",
+	"/System/Library/Fonts/Apple Symbols.ttf",
+];
+
 const firstExisting = (paths: string[]): string | undefined => paths.find((f) => existsSync(f));
 
 export interface VideoSegment {
 	stepId: string;
-	/** Where the segment sits in the video's arc (hook → steps → outro). */
-	kind: "hook" | "step" | "outro";
+	/** Where the segment sits in the tutorial (title → steps/slides → outro). */
+	kind: "title" | "step" | "slide" | "outro";
 	/** The capture step kind (goto/click/highlight/…) — drives the SFX pick. */
 	stepKind?: string;
-	/** The narration sentence, or null for a silent step. */
+	/** The narration sentence, or null for a silent segment. */
 	text: string | null;
-	/** Where the step starts inside the raw recording. */
+	/** Where the step starts inside the raw recording (0 for drawn segments). */
 	cutStartSeconds: number;
 	cutEndSeconds: number;
 	/** How long the segment holds in the final video (>= narration). */
 	targetSeconds: number;
 	narrated: boolean;
-	/** Element the step acted on (CSS px of the 1440x900 viewport): zoom target. */
+	/** Element the step acted on (CSS px of the 1440x900 viewport): the box. */
 	focus?: { x: number; y: number; w: number; h: number };
+	/** step: "Step N" (null before the first chapter) + heading. */
+	chapter?: { number: number | null; heading: string };
+	/** step: the pill text (caption, or the narration when captions burn). */
+	pill?: string | null;
+	slide?: VideoSlide;
 }
 
 export interface VideoReport {
@@ -90,17 +118,15 @@ export interface VideoReport {
 	segments: number;
 	/** Present when a capture step failed and the video stops before it. */
 	truncatedAt?: string;
-	/** Why burned-in captions were skipped although they were asked for. */
-	captionsNote?: string;
 	/** Integrated loudness of the final audio (ffmpeg ebur128), when measured. */
 	loudnessLufs?: number;
 	/** The assembly carried a ducking music bed. */
 	music: boolean;
 	/** The assembly carried synthesized UI sfx. */
 	sfx: boolean;
-	/** The video opens with a narrated hook card. */
+	/** The title card is narrated (the flow's hook). */
 	hook: boolean;
-	/** The video closes with a narrated outro card. */
+	/** The video closes with an outro card. */
 	outro: boolean;
 	/**
 	 * Lead-in removed from every step timestamp: the recording starts at its
@@ -178,13 +204,22 @@ export interface AssembleOptions {
 	flow: Flow;
 	language?: string;
 	ffmpegPath: string;
-	/** Burn the captions in (drawtext). Default true at the tool layer. */
+	/**
+	 * Burn the narration into the step pills when a step has no caption of
+	 * its own. Default true at the tool layer; captions always show.
+	 */
 	captions: boolean;
-	/** Flow title for the hook card (flow.title from the caller). */
+	/** Flow title for the title card and the steps before the first chapter. */
 	title: string;
-	/** Chapter pill text ("NN · Group — Title") for the first seconds. */
-	chapterLabel?: string;
-	/** Title of the NEXT series video — paints the outro's "next" pill. */
+	/** The flow's number in the series ("Tutorial NN"). */
+	number: number;
+	/** Title-card eyebrow (series style eyebrow, or the flow group). */
+	eyebrow?: string;
+	/** Title-card subtitle (flow.summary). */
+	summary?: string;
+	/** Theme colors and logo (storyboard.video). Both must be decided. */
+	style: VideoStyle | undefined;
+	/** "Tutorial NN · Title" of the NEXT series video — the outro's "next" line. */
 	nextTitle?: string;
 	/** Synthesized music bed with voice ducking (deps.videoMusic default). */
 	music: boolean;
@@ -242,72 +277,13 @@ function removePreviousArtifacts(workspace: string, previousFile: string): void 
 // Phase 5 helpers — text wrapping, filter graphs, sfx/music, loudness
 // ---------------------------------------------------------------------------
 
-/** Wrap a caption to at most two lines of ~`max` characters (… when cut). */
-export function wrapCaption(text: string, max = 42): string {
-	const words = text.split(/\s+/).filter(Boolean);
-	const lines: string[] = [];
-	let cur = "";
-	let i = 0;
-	for (; i < words.length; i += 1) {
-		const w = words[i] as string;
-		if (cur !== "" && `${cur} ${w}`.length > max) {
-			lines.push(cur);
-			cur = w;
-			if (lines.length === 1) {
-				// last line: fill it, then stop — the rest is dropped
-				const rest = [cur, ...words.slice(i + 1)].join(" ");
-				cur = rest;
-				break;
-			}
-		} else {
-			cur = cur === "" ? w : `${cur} ${w}`;
-		}
-	}
-	if (cur !== "") {
-		if (lines.length === 1 && cur.length > max) {
-			lines.push(`${cur.slice(0, Math.max(0, max - 1)).trimEnd()}…`);
-		} else if (lines.length === 1) {
-			lines.push(cur);
-		} else {
-			lines.push(cur.length > max ? `${cur.slice(0, Math.max(0, max - 1)).trimEnd()}…` : cur);
-		}
-	}
-	return lines.slice(0, 2).join("\n");
-}
-
-/** "Next" pill label per storyboard language (English fallback). */
-const NEXT_WORD: Record<string, string> = { es: "Siguiente", en: "Next", pt: "Próximo", fr: "Suivant" };
-
-/**
- * The per-segment zoompan graph: `pzoom` carries the previous output zoom so
- * the push is CONTINUOUS over video input (zoompan resets `zoom` per input
- * frame — the classic jitter trap, verified on ffmpeg 7.1). The crop is
- * clamped inside the frame around the focus point.
- */
-function zoomFilter(seg: VideoSegment): string {
-	const maxZ = seg.focus ? 1.15 : 1.04;
-	const frames = Math.max(1, Math.round(seg.targetSeconds * 25));
-	const rate = ((maxZ - 1) / frames).toFixed(6);
-	const fx = seg.focus ? seg.focus.x + seg.focus.w / 2 : 720;
-	const fy = seg.focus ? seg.focus.y + seg.focus.h / 2 : 450;
-	return (
-		`zoompan=z='min(pzoom+${rate},${maxZ})'` +
-		`:x='max(0,min(iw-iw/zoom,${fx.toFixed(1)}-iw/zoom/2))'` +
-		`:y='max(0,min(ih-ih/zoom,${fy.toFixed(1)}-ih/zoom/2))'` +
-		`:d=1:s=1440x900:fps=25`
-	);
-}
-
-/** Quote a filesystem path for a filter option (drawtext fontfile/textfile). */
-const fq = (p: string): string => `'${p.replace(/([:'\\])/g, "\\$1")}'`;
-
 /**
  * SFX definition per capture step kind, as a lavfi source + per-segment
  * delay. All synthesized — no third-party assets, fully deterministic.
  * `ms` is when the sound lands inside the segment.
  */
 function sfxFor(seg: VideoSegment): { src: string; filters: string; delayMs: number } | null {
-	const k = seg.kind === "hook" || seg.kind === "outro" ? "whoosh" : (seg.stepKind ?? "");
+	const k = seg.kind === "step" ? (seg.stepKind ?? "") : "whoosh";
 	switch (k) {
 		case "whoosh":
 			return { src: "anoisesrc=color=pink:duration=0.5:amplitude=0.5", filters: "bandpass=f=800:w=600,volume=0.16,afade=t=in:d=0.15,afade=t=out:st=0.35:d=0.15", delayMs: 50 };
@@ -400,6 +376,28 @@ export async function assembleVideo(opts: AssembleOptions): Promise<RpcResult<Vi
 		return { ok: false, errorKind: "needs_ffmpeg", error: `NEEDS_FFMPEG — ${probe.error}. ffmpeg 4.x+ is required (7.x verified); install it or set ffmpegPath.` };
 	}
 
+	// Gate 3: the series look. The colors are the USER's decision (Odoo by
+	// default, or their own): the assembler never picks them silently.
+	const openLook = openLookQuestions(opts.style);
+	if (openLook.length > 0) {
+		return {
+			ok: false,
+			errorKind: "needs_video_theme",
+			error:
+				`NEEDS_VIDEO_THEME — the series look is not decided (${openLook.join(", ")}): ask the user whether to keep the Odoo colors ` +
+				"(default) or use their own base colors (#RRGGBB), and whether the videos carry a logo or none; then run operation=style.",
+		};
+	}
+	const styleIssues = styleProblems(opts.style, opts.workspace);
+	if (styleIssues.length > 0) return { ok: false, error: `the series style is invalid: ${styleIssues.join("; ")} — fix it with operation=style.` };
+
+	// Gate 4: fonts. Every card and heading is drawn text.
+	const fontFile = firstExisting(FONT_CANDIDATES);
+	const boldFont = firstExisting(BOLD_FONT_CANDIDATES) ?? fontFile;
+	if (!fontFile || !boldFont) {
+		return { ok: false, errorKind: "needs_font", error: "NEEDS_FONT — no known font file was found (Noto Sans, DejaVu, Liberation, Segoe UI, Arial): install one of them." };
+	}
+
 	// The recording's t=0 is the FIRST PAINTED FRAME, not the context creation:
 	// on a slow instance the wall-clock offsets can run past the end of the webm
 	// (measured: 8.03 s of offsets in a 6.6 s file). Model it as one constant
@@ -413,90 +411,116 @@ export async function assembleVideo(opts: AssembleOptions): Promise<RpcResult<Vi
 	const videoTime = (ms: number): number => Math.max(0, ms / 1000 - captureOffset);
 	const videoLimit = rawDuration !== null ? Math.max(0.2, rawDuration - CUT_GUARD_SECONDS) : Number.POSITIVE_INFINITY;
 
-	// Segments: OK steps with timestamps, in order; truncate at the first failure.
+	// Segments, in storyboard order: the title card, then every step (a
+	// recorded step needs an OK capture with timestamps — the first failure
+	// truncates the video) or drawn slide, then the outro.
 	const voice = readVoiceReport(opts.workspace, opts.flow.id);
 	const voiceByStep = new Map((voice?.items ?? []).map((i) => [i.stepId, i]));
+	const clean = (value: string | null | undefined): string | null => {
+		const text = (value ?? "").replace(/\s+/g, " ").trim();
+		return text === "" ? null : text;
+	};
+	/** Segment length that fits the narration, or null when it is silent. */
+	const narrationSeconds = (stepId: string, text: string | null): number | null => {
+		const item = voiceByStep.get(stepId);
+		return item && text !== null ? (item.durationSeconds ?? FIXED_DWELL_SECONDS) + VOICE_TAIL_SECONDS : null;
+	};
 	const segments: VideoSegment[] = [];
+	const hookText = clean(opts.flow.hook?.text);
+	const hookSeconds = narrationSeconds("_hook", hookText);
+	segments.push({
+		stepId: "_hook",
+		kind: "title",
+		text: hookSeconds !== null ? hookText : null,
+		cutStartSeconds: 0,
+		cutEndSeconds: 0,
+		targetSeconds: hookSeconds ?? CARD_SECONDS,
+		narrated: hookSeconds !== null,
+	});
+	const captured = new Map(capture.steps.map((s) => [s.id, s]));
+	let chapterCount = 0;
+	let chapter: { number: number | null; heading: string } = { number: null, heading: opts.title };
+	let seenRecording = false;
 	let truncatedAt: string | undefined;
-	for (const step of capture.steps) {
-		if (step.status !== "ok" || step.startMs === undefined || step.endMs === undefined) {
+	for (const step of opts.flow.steps) {
+		const text = clean(step.procedure);
+		const seconds = narrationSeconds(step.id, text);
+		if (step.kind === "slide") {
+			// A slide without its content is a lint ERROR; never draw a guess.
+			if (!step.slide) continue;
+			segments.push({
+				stepId: step.id,
+				kind: "slide",
+				stepKind: "slide",
+				text,
+				cutStartSeconds: 0,
+				cutEndSeconds: 0,
+				targetSeconds: seconds ?? Math.max(3, step.slide.items.length * 1.2 + 1.5),
+				narrated: seconds !== null,
+				slide: step.slide,
+			});
+			continue;
+		}
+		const heading = clean(step.chapter);
+		if (heading !== null) {
+			chapterCount += 1;
+			chapter = { number: chapterCount, heading };
+		}
+		const rec = captured.get(step.id);
+		if (!rec) {
+			// Steps before a resumed capture were not recorded in this run.
+			if (!seenRecording) continue;
 			truncatedAt = step.id;
 			break;
 		}
-		if (videoTime(step.startMs) >= videoLimit) {
+		seenRecording = true;
+		if (rec.status !== "ok" || rec.startMs === undefined || rec.endMs === undefined) {
+			truncatedAt = step.id;
+			break;
+		}
+		if (videoTime(rec.startMs) >= videoLimit) {
 			// The step happened after the recording stopped: nothing to show.
 			truncatedAt = step.id;
 			break;
 		}
-		const v = voiceByStep.get(step.id);
-		const sentence = opts.flow.steps.find((s) => s.id === step.id)?.procedure ?? null;
-		const text = sentence !== null && String(sentence).trim() !== "" ? String(sentence).replace(/\s+/g, " ").trim() : null;
-		const narrated = Boolean(v && text !== null);
-		const target = narrated ? (v?.durationSeconds ?? FIXED_DWELL_SECONDS) + VOICE_TAIL_SECONDS : FIXED_DWELL_SECONDS;
-		const windowStart = videoTime(step.startMs);
-		const windowEnd = Math.min(videoLimit, Math.max(windowStart + MIN_CUT_SECONDS, videoTime(step.endMs) - CUT_GUARD_SECONDS));
+		const windowStart = videoTime(rec.startMs);
+		const windowEnd = Math.min(videoLimit, Math.max(windowStart + MIN_CUT_SECONDS, videoTime(rec.endMs) - CUT_GUARD_SECONDS));
 		// A `goto` spends its window loading: the first frames are the blank shell
 		// (or the page being left). Only its tail — the mounted view held by the
 		// recording dwell — is worth showing, so the video never opens on white.
-		const cutStart =
-			step.kind === "goto"
-				? Math.max(windowStart, windowEnd - NAV_TAIL_SECONDS)
-				: windowStart;
+		const cutStart = rec.kind === "goto" ? Math.max(windowStart, windowEnd - NAV_TAIL_SECONDS) : windowStart;
+		const caption = clean(step.caption);
 		segments.push({
 			stepId: step.id,
 			kind: "step",
-			stepKind: step.kind,
+			stepKind: rec.kind,
 			text,
 			cutStartSeconds: cutStart,
 			// A real step can finish inside one frame (<40 ms). Reading less than
 			// MIN_CUT_SECONDS leaves the encoder nothing to show, so extend the
 			// window forward: the state AFTER the step is the one being narrated.
 			cutEndSeconds: windowEnd,
-			targetSeconds: target,
-			narrated,
-			focus: step.focus,
+			targetSeconds: seconds ?? FIXED_DWELL_SECONDS,
+			narrated: seconds !== null,
+			focus: rec.focus,
+			chapter,
+			pill: caption ?? (opts.captions ? text : null),
 		});
 	}
-	if (segments.length === 0) {
+	if (!segments.some((s) => s.kind === "step")) {
 		return { ok: false, error: `no capturable step survived in capture.json (first failure: ${truncatedAt ?? "none"}) — nothing to assemble.` };
 	}
-
-	// The arc's bookends. The hook FREEZES the tail of the screen it talks
-	// about (`hook.showStep`, or the last OK step) for the length of its
-	// narration; the outro freezes the final frame for its closing line.
-	// Both only exist when their voice was generated — a hook text without
-	// _hook.wav stays a lint finding, not a silent title card.
-	const voiceFileExists = (stepId: string): boolean => {
-		const item = voiceByStep.get(stepId);
-		return Boolean(item && existsSync(join(opts.workspace, item.file)));
-	};
-	const hookText = (opts.flow.hook?.text ?? "").trim();
-	if (hookText !== "" && voiceFileExists("_hook")) {
-		const showId = opts.flow.hook?.showStep;
-		const base = (showId !== undefined ? segments.find((s) => s.stepId === showId) : undefined) ?? segments[segments.length - 1];
-		const hookVoice = voiceByStep.get("_hook");
-		segments.unshift({
-			stepId: "_hook",
-			kind: "hook",
-			text: hookText,
-			cutStartSeconds: Math.max(0, (base?.cutEndSeconds ?? 0) - 1.5),
-			cutEndSeconds: base?.cutEndSeconds ?? 0.5,
-			targetSeconds: (hookVoice?.durationSeconds ?? FIXED_DWELL_SECONDS) + VOICE_TAIL_SECONDS,
-			narrated: true,
-		});
-	}
-	const outroText = (opts.flow.outro?.text ?? "").trim();
-	if (outroText !== "" && voiceFileExists("_outro")) {
-		const last = segments[segments.length - 1];
-		const outroVoice = voiceByStep.get("_outro");
+	const outroText = clean(opts.flow.outro?.text);
+	const outroSeconds = narrationSeconds("_outro", outroText);
+	if (outroText !== null || opts.nextTitle) {
 		segments.push({
 			stepId: "_outro",
 			kind: "outro",
-			text: outroText,
-			cutStartSeconds: Math.max(0, (last?.cutEndSeconds ?? 0.5) - 0.5),
-			cutEndSeconds: last?.cutEndSeconds ?? 0.5,
-			targetSeconds: (outroVoice?.durationSeconds ?? FIXED_DWELL_SECONDS) + VOICE_TAIL_SECONDS,
-			narrated: true,
+			text: outroSeconds !== null ? outroText : null,
+			cutStartSeconds: 0,
+			cutEndSeconds: 0,
+			targetSeconds: outroSeconds ?? CARD_SECONDS,
+			narrated: outroSeconds !== null,
 		});
 	}
 
@@ -505,14 +529,27 @@ export async function assembleVideo(opts: AssembleOptions): Promise<RpcResult<Vi
 	const outDir = join(opts.workspace, "video");
 	mkdirSync(outDir, { recursive: true });
 
-	let captionsBurned = false;
-	let captionsNote: string | undefined;
-	let fontFile: string | undefined;
-	if (opts.captions) {
-		fontFile = firstExisting(FONT_CANDIDATES);
-		if (!fontFile) captionsNote = "captions were NOT burned in: no known font file found (DejaVu/Liberation/Arial) — the .srt/.vtt still ship.";
-	}
-	const boldFont = firstExisting(BOLD_FONT_CANDIDATES) ?? fontFile;
+	let textFiles = 0;
+	const layout: LayoutContext = {
+		theme: resolveTheme(opts.style?.theme),
+		font: fontFile,
+		bold: boldFont,
+		check: firstExisting(CHECK_FONT_CANDIDATES) ?? null,
+		logo: opts.style?.logo ? resolve(opts.workspace, opts.style.logo) : null,
+		words: layoutWords(opts.language),
+		title: opts.title,
+		number: opts.number,
+		eyebrow: opts.eyebrow,
+		summary: opts.summary,
+		nextTitle: opts.nextTitle,
+		textFile: (content) => {
+			textFiles += 1;
+			const file = join(tmp, `text-${String(textFiles).padStart(4, "0")}.txt`);
+			writeFileSync(file, content, { mode: 0o600 });
+			return file;
+		},
+	};
+	const captionsBurned = segments.some((s) => Boolean(s.pill));
 
 	const videoList: string[] = [];
 	const audioList: string[] = [];
@@ -521,62 +558,23 @@ export async function assembleVideo(opts: AssembleOptions): Promise<RpcResult<Vi
 		for (const seg of segments) {
 			const tag = String(index).padStart(3, "0");
 			const segFile = join(tmp, `seg-${tag}.mp4`);
-			const cutDuration = seg.cutEndSeconds - seg.cutStartSeconds;
+			const cutDuration = seg.kind === "step" ? seg.cutEndSeconds - seg.cutStartSeconds : 0;
 			const pad = Math.max(0, seg.targetSeconds - cutDuration);
 			const segDur = cutDuration + pad;
-			// Video: cut → freeze the last frame → the zoompan push → overlays.
-			// Uniform reencode so the concat demuxer can stream-copy later.
-			const filters = [`tpad=stop_mode=clone:stop_duration=${pad.toFixed(3)}`, zoomFilter(seg)];
-			if (index === 0 && opts.chapterLabel && boldFont) {
-				const f = join(tmp, `chapter-${tag}.txt`);
-				writeFileSync(f, opts.chapterLabel, { mode: 0o600 });
-				filters.push(
-					`drawtext=fontfile=${fq(boldFont)}:textfile=${fq(f)}:fontsize=20:fontcolor=white` +
-						":box=1:boxcolor=black@0.55:boxborderw=10:x=18:y=18" +
-						":alpha='if(lt(t,2.4),1,max(0,1-(t-2.4)/0.6))':enable='lt(t,3)'",
-				);
-			}
-			if (seg.kind === "hook" && boldFont) {
-				const f = join(tmp, `title-${tag}.txt`);
-				writeFileSync(f, opts.title, { mode: 0o600 });
-				filters.push(
-					`drawtext=fontfile=${fq(boldFont)}:textfile=${fq(f)}:fontsize=48:fontcolor=white` +
-						":borderw=2:bordercolor=black@0.7:x=(w-text_w)/2:y=h*0.16" +
-						":alpha='min(1,t/0.5)'",
-				);
-			}
-			if (seg.kind === "outro" && opts.nextTitle && boldFont) {
-				const lang = (opts.language ?? "en").split(/[-_]/)[0]?.toLowerCase() ?? "en";
-				const f = join(tmp, `next-${tag}.txt`);
-				writeFileSync(f, `${NEXT_WORD[lang] ?? NEXT_WORD["en"]}: ${opts.nextTitle}`, { mode: 0o600 });
-				filters.push(
-					`drawtext=fontfile=${fq(boldFont)}:textfile=${fq(f)}:fontsize=28:fontcolor=white` +
-						":box=1:boxcolor=black@0.6:boxborderw=12:x=(w-text_w)/2:y=h-150" +
-						":alpha='min(1,t/0.5)'",
-				);
-			}
-			if (opts.captions && fontFile && seg.text !== null) {
-				const textFile = join(tmp, `cap-${tag}.txt`);
-				writeFileSync(textFile, wrapCaption(seg.text), { mode: 0o600 });
-				// Bottom by default; when the focus lives in the bottom third the
-				// pill would sit ON it, so the caption moves up.
-				const focusBottom = seg.focus !== undefined && seg.focus.y + seg.focus.h / 2 > (900 * 2) / 3;
-				const y = focusBottom ? "70" : "h-th-70";
-				const fadeEnd = Math.max(0.5, segDur - 0.3).toFixed(3);
-				filters.push(
-					`drawtext=fontfile=${fq(fontFile)}:textfile=${fq(textFile)}:fontsize=30:fontcolor=white` +
-						`:box=1:boxcolor=black@0.55:boxborderw=12:x=(w-text_w)/2:y=${y}` +
-						`:alpha='if(lt(t,0.3),t/0.3,if(gt(t,${fadeEnd}),max(0,(${segDur.toFixed(3)}-t)/0.3),1))'`,
-				);
-				captionsBurned = true;
-			}
+			const graph = segmentGraph(
+				{ ...seg, text: seg.kind === "outro" ? outroText : seg.text },
+				layout,
+				segDur,
+				pad,
+			);
 			// `-t` MUST be an INPUT option here (before -i): as an output option
 			// it also caps the frames tpad appends, cutting the freeze short and
 			// leaving the narration hanging over a shorter clip.
 			const v = await runFfmpeg(opts.ffmpegPath, [
 				"-y", "-loglevel", "error",
-				"-ss", seg.cutStartSeconds.toFixed(3), "-t", cutDuration.toFixed(3), "-i", rawPath,
-				"-vf", filters.join(","),
+				...(graph.usesRaw ? ["-ss", seg.cutStartSeconds.toFixed(3), "-t", cutDuration.toFixed(3), "-i", rawPath] : []),
+				...(layout.logo ? ["-i", layout.logo] : []),
+				"-filter_complex", graph.graph, "-map", "[out]",
 				"-r", "25", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-an",
 				segFile,
 			]);
@@ -724,12 +722,11 @@ export async function assembleVideo(opts: AssembleOptions): Promise<RpcResult<Vi
 			segments: segments.length,
 			music: opts.music && hasVoice,
 			sfx: opts.sfx,
-			hook: segments.some((s) => s.kind === "hook"),
+			hook: segments.some((s) => s.kind === "title" && s.narrated),
 			outro: segments.some((s) => s.kind === "outro"),
 			...(lufs !== undefined ? { loudnessLufs: lufs } : {}),
 			...(captureOffset > 0 ? { captureOffsetSeconds: captureOffset, rawDurationSeconds: rawDuration } : {}),
 			...(truncatedAt ? { truncatedAt } : {}),
-			...(captionsNote ? { captionsNote } : {}),
 		};
 		writeFileAtomic(join(opts.workspace, "video", "video.json"), JSON.stringify(report, null, 2) + "\n");
 		// series.json is the durable per-flow map the index operation reads:

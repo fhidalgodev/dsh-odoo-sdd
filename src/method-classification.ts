@@ -59,6 +59,7 @@ export const READ_METHODS: ReadonlySet<string> = new Set([
 	"exists",
 	"check_access_rights",
 	"check_access_rule",
+	"has_access",
 ]);
 
 /** The mutations the journal can replay: pre-image in, restore out. */
@@ -85,13 +86,16 @@ export const MUTATING_METHODS: ReadonlySet<string> = CRUD_METHODS;
  * Methods the ORM CHANGED the visibility of, keyed by the first major where the
  * plugin's classification stops being true.
  *
- * Both entries were verified in the installed sources, not assumed:
+ * Every entry was verified in the installed sources, not assumed:
  * - `exists` is `@api.private` since 19 (`odoo/orm/models.py`: the decorator sits
  *   right above it) and public in 18 (`odoo/models.py`, `@api.returns('self')`).
  *   `get_public_method` refuses private names, so calling it over RPC on 19 can
  *   only ever produce an AccessError.
  * - `name_get` left the core in 18 (it is in `odoo/models.py` up to 17,
  *   deprecated there, and absent from 18 on).
+ * - `check_access_rights` / `check_access_rule` left the ORM in 20
+ *   (`odoo/orm/models.py` only has `check_access`, `@api.private`, and the
+ *   public `has_access(operation)`, which exists since 18).
  *
  * Advertising them as free reads was the plugin's own version of a stale
  * assumption: the tool description promised a query the server would refuse.
@@ -101,12 +105,16 @@ export const MUTATING_METHODS: ReadonlySet<string> = CRUD_METHODS;
 const READ_METHOD_RETIRED: ReadonlyMap<string, number> = new Map([
 	["exists", 19],
 	["name_get", 18],
+	["check_access_rights", 20],
+	["check_access_rule", 20],
 ]);
 
-/** The replacement to point at, per retired method. */
-const READ_METHOD_REPLACEMENT: ReadonlyMap<string, string> = new Map([
-	["exists", "search_count with the same domain, or read the ids you already have"],
-	["name_get", "read the `display_name` field, which is a stored computed field since 17"],
+/** Why each retired method is gone, and the replacement to point at. */
+const READ_METHOD_RETIREMENT: ReadonlyMap<string, { why: string; use: string }> = new Map([
+	["exists", { why: "it is @api.private since 19", use: "search_count with the same domain, or read the ids you already have" }],
+	["name_get", { why: "it left the core in 18", use: "read the `display_name` field, which is a stored computed field since 17" }],
+	["check_access_rights", { why: "it left the ORM in 20", use: "has_access with the operation (\"read\", \"write\", \"create\", \"unlink\")" }],
+	["check_access_rule", { why: "it left the ORM in 20", use: "has_access with the operation, called on the record ids" }],
 ]);
 
 /**
@@ -127,12 +135,63 @@ export function retiredReadReason(method: string, major: number | null): string 
 	// No version to judge by: keep the historical answer rather than inventing a
 	// restriction the server may not have.
 	if (major === null || major < retiredFrom) return null;
-	const replacement = READ_METHOD_REPLACEMENT.get(method);
+	const retirement = READ_METHOD_RETIREMENT.get(method);
 	return (
 		`"${method}" is classified as a read but this server (Odoo ${major}) does not expose it over ` +
-		`RPC any more${method === "exists" ? ": it is @api.private since 19" : ": it left the core in 18"}. ` +
-		`Use ${replacement ?? "a supported query"} instead — nothing was sent.`
+		`RPC any more: ${retirement?.why ?? "it was removed"}. ` +
+		`Use ${retirement?.use ?? "a supported query"} instead — nothing was sent.`
 	);
+}
+
+/** First major whose public `read_group` takes (domain, groupby, aggregates…). */
+export const READ_GROUP_AGGREGATES_MAJOR = 20;
+
+/**
+ * The `read_group` call this server understands.
+ *
+ * Up to 19 the public method is `read_group(domain, fields, groupby, offset,
+ * limit, orderby, lazy)`. From 20 `read_group` returns raw tuples with
+ * `(domain, groupby, aggregates, having, offset, limit, order)`, so the plugin
+ * calls the web client's `formatted_read_group` instead: same arguments, dict
+ * rows, and present since 19 (`addons/web/models/models.py`).
+ *
+ * The 19-style `fields` translate to aggregates: `"amount:sum"` stays, the
+ * alias form `"total:sum(amount)"` becomes `"amount:sum"`, a plain name that is
+ * also grouped on is dropped (the group key already carries it), and `__count`
+ * is always added. A plain name with no aggregator is refused: 20 has no
+ * default aggregator to fall back to over RPC.
+ * @param major - the ORM major version, or null when it is unknown.
+ * @param call - the tool's domain, fields, groupby, limit, offset and order.
+ * @returns the method, positional args and kwargs, or the refusal reason.
+ */
+export function planReadGroup(
+	major: number | null,
+	call: { domain: unknown[]; fields: string[]; groupby: string[]; limit?: number; offset?: number; order?: string },
+): { ok: true; method: string; args: unknown[]; kwargs: Record<string, unknown> } | { ok: false; reason: string } {
+	const window: Record<string, unknown> = {};
+	if (call.limit !== undefined) window["limit"] = call.limit;
+	if (call.offset !== undefined) window["offset"] = call.offset;
+	if (major === null || major < READ_GROUP_AGGREGATES_MAJOR) {
+		if (call.order !== undefined) window["orderby"] = call.order;
+		return { ok: true, method: "read_group", args: [call.domain, call.fields, call.groupby], kwargs: window };
+	}
+	const aggregates = new Set<string>(["__count"]);
+	for (const raw of call.fields) {
+		const field = raw.trim();
+		const alias = /^\w+:(\w+)\((\w+)\)$/.exec(field);
+		if (alias) aggregates.add(`${alias[2]}:${alias[1]}`);
+		else if (/^\w+:\w+$/.test(field) || field === "__count") aggregates.add(field);
+		else if (!call.groupby.some((g) => g.split(":")[0] === field)) {
+			return {
+				ok: false,
+				reason:
+					`read_group on Odoo ${major} needs each aggregated field as "field:aggregator" (e.g. "amount_total:sum"); ` +
+					`"${field}" has none. Group on it with groupby, or name the aggregator — nothing was sent.`,
+			};
+		}
+	}
+	if (call.order !== undefined) window["order"] = call.order;
+	return { ok: true, method: "formatted_read_group", args: [call.domain, call.groupby, [...aggregates]], kwargs: window };
 }
 
 /**

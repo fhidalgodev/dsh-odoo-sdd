@@ -29,9 +29,9 @@ produce `security-report.md` with a verdict backed by concrete findings.
    row and every referenced group resolves (in-module `res.groups` record or a
    `base.*` group).
 3. Cross-check the code against the DECIDED permissions: no model may be more
-   permissive in `ir.model.access.csv` than `## Security` states.
+   permissive in its ACL (20+:`ir.access.csv`) than `## Security` states.
 4. Check record rules where the architecture requires them (multi-company,
-   warehouse, owner-only) and confirm they carry a `groups` field.
+   warehouse, owner-only); confirm they carry groups.
 5. Look for secrets, `sudo()` without justification, public routes
    (`auth="none"`), disabled CSRF, `eval`/`exec`/`pickle`, raw SQL by
    concatenation, and `t-raw` (XSS).

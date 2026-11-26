@@ -26,6 +26,7 @@ import { importRecording } from "./manual-import.js";
 import {
 	collectCanon,
 	canonFingerprint,
+	moduleModelRows,
 	summarizeCanon,
 	type Canon,
 	type CanonClient,
@@ -323,13 +324,13 @@ export function registerManualTool(
 				if (!model && requestedModules.length > 0) {
 					// Module-first request: the canon is still read per model, so the
 					// first model the module implements becomes the primary one.
-					const pick = await client.executeKw<Row[]>("ir.model", "search_read", [[["modules", "like", requestedModules[0]]], ["model", "modules"]], { limit: 200 });
+					const pick = await moduleModelRows(client, requestedModules[0], ["model", "modules"]);
 					if (!pick.ok) {
 						return { ok: false, operation: "canon" as string, summary: "BLOCKED", artifacts, detail: `BLOCKED — could not list the module's models: ${pick.error}` };
 					}
-					const first = pick.value.find((r) => String(r["modules"] ?? "").split(",").map((x) => x.trim()).includes(requestedModules[0]));
+					const first = pick.value[0];
 					if (!first) {
-						return { ok: false, operation: "canon" as string, summary: "BLOCKED", artifacts, detail: `BLOCKED — module "${requestedModules[0]}" declares no model in ir.model.modules: check the technical name.` };
+						return { ok: false, operation: "canon" as string, summary: "BLOCKED", artifacts, detail: `BLOCKED — module "${requestedModules[0]}" declares or extends no model (ir.model.data): check the technical name and that it is installed.` };
 					}
 					model = String(first["model"] ?? "");
 				}

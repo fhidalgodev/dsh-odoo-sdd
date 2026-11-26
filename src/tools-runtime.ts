@@ -13,6 +13,7 @@ import { existsSync, readFileSync, readdirSync, lstatSync } from "node:fs";
 import { basename, join } from "node:path";
 import { resolveModuleDir } from "./paths.js";
 import { coverageReport } from "./coverage.js";
+import { manifestMajor } from "./test-scan.js";
 import type { RpcErrorKind } from "./odoo-client.js";
 
 /** Live dependencies provided by the registrant. */
@@ -43,6 +44,8 @@ export interface RuntimeDeps {
 			 * restriction" rather than "assume the newest".
 			 */
 			readonly serverMajor?: number | null;
+			/** Connectivity probe; resolves `serverMajor` as a side effect. */
+			version?(): Promise<unknown>;
 		} | null;
 		report: string;
 	};
@@ -97,6 +100,7 @@ import {
 	MUTATING_METHODS,
 	isReadMethod,
 	retiredReadReason,
+	planReadGroup,
 	isCallableMethodName,
 	isBusinessMethod,
 	isIndeterminateFor,
@@ -124,13 +128,13 @@ export function registerRuntimeTools(
 			"Execute a JSON-RPC call (execute_kw) against the connected instance. ANY public method of the model is " +
 			"callable, and what it needs is decided by what it is. " +
 			`READS (${[...READ_METHODS].join(", ")}) run freely. ` +
-			"Two names in that read list are VERSION-DEPENDENT and refused early with the replacement named: " +
-			"`exists` (private since Odoo 19 — use search_count) and `name_get` (left the core in 18 — read " +
-			"`display_name`). " +
+			"VERSION-DEPENDENT reads are refused early with the replacement named: `exists` (private since 19), " +
+			"`name_get` (gone in 18), `check_access_rights`/`check_access_rule` (gone in 20 — use has_access). " +
+			"read_group on 20 takes fields as \"field:agg\". " +
 			`CRUD mutations (${[...MUTATING_METHODS].join(", ")}) require confirm_destructive=true AND the model in ` +
 			"executeAllowlist, and are journaled so sdd_checkpoint can undo them. Every OTHER method is a BUSINESS " +
-			'ACTION (action_*, button_*, do_*…): it runs with confirm_destructive=true and NO allowlist, because the ' +
-			"plugin cannot replay its effect — it is never journaled, no undo exists for it, and a timeout is " +
+			"ACTION (action_*, button_*, do_*…): it runs with confirm_destructive=true and NO allowlist — never " +
+			"journaled, no undo, and a timeout is " +
 			"reported as an INDETERMINATE outcome instead of a plain failure. Declare `precondition` (checked before " +
 			"the call) and `postcondition` (checked after) to carry a state guard and a state proof; without the " +
 			"postcondition the result only means the server accepted the call. PRIVATE methods (`_name`) are refused: " +
@@ -309,16 +313,9 @@ export function registerRuntimeTools(
 					callKwargs["limit"] = a.limit;
 				}
 			} else if (method === "read_group") {
-				// Aggregations: positional (domain, fields, groupby) with the
-				// optional pagination/order in kwargs.
-				callArgs = [
-					Array.isArray(a.domain) ? a.domain : [],
-					Array.isArray(a.fields) ? a.fields : [],
-					Array.isArray(a.groupby) ? a.groupby : [],
-				];
-				if (typeof a.limit === "number") callKwargs["limit"] = a.limit;
-				if (typeof a.offset === "number") callKwargs["offset"] = a.offset;
-				if (typeof a.order === "string" && a.order !== "") callKwargs["orderby"] = a.order;
+				// Aggregations: the shape depends on the server major, which only
+				// the client knows — planned below, once the client is resolved.
+				callArgs = [];
 			} else if (method === "fields_get") {
 				// Field discovery: no positional args, just the requested
 				// attributes. Lets the pipeline stop guessing field names.
@@ -433,6 +430,24 @@ export function registerRuntimeTools(
 			const retired = retiredReadReason(method, client.serverMajor ?? null);
 			if (retired !== null) return { denied: true, reason: retired, result: "" };
 
+			// read_group changed its public signature in 20: plan it for THIS server.
+			let rpcMethod = method;
+			if (method === "read_group") {
+				if ((client.serverMajor ?? null) === null && client.version) await client.version();
+				const plan = planReadGroup(client.serverMajor ?? null, {
+					domain: Array.isArray(a.domain) ? a.domain : [],
+					fields: Array.isArray(a.fields) ? a.fields.map(String) : [],
+					groupby: Array.isArray(a.groupby) ? a.groupby.map(String) : [],
+					...(typeof a.limit === "number" ? { limit: a.limit } : {}),
+					...(typeof a.offset === "number" ? { offset: a.offset } : {}),
+					...(typeof a.order === "string" && a.order !== "" ? { order: a.order } : {}),
+				});
+				if (!plan.ok) return { denied: true, reason: plan.reason, result: "" };
+				rpcMethod = plan.method;
+				callArgs = plan.args;
+				callKwargs = { ...callKwargs, ...plan.kwargs };
+			}
+
 			// The state guard runs BEFORE anything is sent: a declared precondition
 			// that does not hold is a refusal with no side effect at all.
 			if (precondition !== undefined) {
@@ -468,7 +483,7 @@ export function registerRuntimeTools(
 			}
 
 			// ---- execute ----------------------------------------------------
-			const rpc = await client.executeKw<unknown>(model, method, callArgs, callKwargs, undefined, exec?.signal as AbortSignal | undefined);
+			const rpc = await client.executeKw<unknown>(model, rpcMethod, callArgs, callKwargs, undefined, exec?.signal as AbortSignal | undefined);
 			if (!rpc.ok) {
 				// A MUTATION that never answered is an UNKNOWN outcome, not a
 				// failure: the call was sent and the server may have acted, so a
@@ -579,7 +594,7 @@ export function registerRuntimeTools(
 		description:
 			"Validate a module directory WITHOUT a running instance: __manifest__.py present, declared data " +
 			"XML files exist (and every views/*.xml is declared), and the SECURITY model is coherent — every new " +
-			"model (models/*.py `_name`) must have a line in security/ir.model.access.csv, and referenced group " +
+			"model (models/*.py `_name`) must have a line in security/ir.model.access.csv (security/ir.access.csv on 20+), and referenced group " +
 			"xmlids must resolve inside the module (or be base.* groups). Also checks the OCA metadata the project " +
 			"itself requires: manifest keys named by `<projectRoot>/.pylintrc` (`manifest-required-keys`, " +
 			"`manifest-required-authors`) plus `license`/`version`, `website`, README.rst and " +
@@ -619,7 +634,7 @@ export function registerRuntimeTools(
 			const moduleDir = resolveModuleDir(args.module_dir, projectRoot);
 			const moduleName = basename(moduleDir);
 			const manifestPath = join(moduleDir, "__manifest__.py");
-			const findings: Array<{ severity: string; file: string; message: string }> = [];
+			const findings: ValidateFinding[] = [];
 			if (!existsSync(manifestPath)) {
 				findings.push({ severity: "ERROR", file: manifestPath, message: "__manifest__.py not found." });
 				return {
@@ -901,81 +916,68 @@ export function registerRuntimeTools(
 			}
 
 			// ---- security coherence -----------------------------------------
-			const aclPath = join(moduleDir, "security", "ir.model.access.csv");
-			const aclExists = existsSync(aclPath);
-			if (newModels.length > 0 && !aclExists) {
-				findings.push({
-					severity: "ERROR",
-					file: "security/ir.model.access.csv",
-					message: `Module declares ${newModels.length} new model(s) (${newModels.map((m) => m.name).join(", ")}) but has no ACL file.`,
-				});
-			}
-			if (aclExists) {
-				const acl = readFileSync(aclPath, "utf8");
-				const aclLines = acl.split(/\r?\n/).filter((l) => l.trim() !== "" && !l.trim().startsWith("id,"));
-				const aclModels = new Set<string>();
-				const referencedGroups = new Set<string>();
-				// Odoo derives a model's xmlid from its name with dots as underscores.
-				const modelKey = (name: string): string => name.replace(/\./g, "_").replace(/^model_/, "");
-				for (const line of aclLines) {
-					const parts = line.split(",");
-					if (parts.length < 5) {
-						findings.push({ severity: "WARN", file: "security/ir.model.access.csv", message: `Malformed ACL row (expected id,name,model_id:id,group_id:id,perm_*): ${line.slice(0, 60)}` });
+			// Odoo 20 replaced ir.model.access AND ir.rule with ir.access: one CSV
+			// `id,name,model_id,group_id/id,operation,domain` where model_id is the
+			// model NAME and operation a "crud" subset. The old files no longer load.
+			const targetMajor = manifestMajor(manifestText);
+			if (targetMajor !== null && targetMajor >= 20) {
+				validateIrAccess(moduleDir, moduleName, declaredXml, newModels, findings);
+			} else {
+				const aclPath = join(moduleDir, "security", "ir.model.access.csv");
+				const aclExists = existsSync(aclPath);
+				if (newModels.length > 0 && !aclExists) {
+					findings.push({
+						severity: "ERROR",
+						file: "security/ir.model.access.csv",
+						message: `Module declares ${newModels.length} new model(s) (${newModels.map((m) => m.name).join(", ")}) but has no ACL file.`,
+					});
+				}
+				if (aclExists) {
+					const acl = readFileSync(aclPath, "utf8");
+					const aclLines = acl.split(/\r?\n/).filter((l) => l.trim() !== "" && !l.trim().startsWith("id,"));
+					const aclModels = new Set<string>();
+					const referencedGroups = new Set<string>();
+					// Odoo derives a model's xmlid from its name with dots as underscores.
+					const modelKey = (name: string): string => name.replace(/\./g, "_").replace(/^model_/, "");
+					for (const line of aclLines) {
+						const parts = line.split(",");
+						if (parts.length < 5) {
+							findings.push({ severity: "WARN", file: "security/ir.model.access.csv", message: `Malformed ACL row (expected id,name,model_id:id,group_id:id,perm_*): ${line.slice(0, 60)}` });
+							continue;
+						}
+						aclModels.add(modelKey(parts[2]!.trim()));
+						const groupRef = parts[3]!.trim();
+						if (groupRef !== "" && groupRef !== "group_id:id") referencedGroups.add(groupRef);
+					}
+					for (const model of newModels) {
+						if (!aclModels.has(modelKey(model.name))) {
+							findings.push({
+								severity: "ERROR",
+								file: "security/ir.model.access.csv",
+								message: `New model "${model.name}" (${model.file}) has no ACL row — add model_${modelKey(model.name)}.`,
+							});
+						}
+					}
+					// Groups must resolve inside the module (declared res.groups records)
+					// or be a base group; an external module cannot be verified locally.
+					warnForeignGroups(moduleDir, moduleName, declaredXml, referencedGroups, "security/ir.model.access.csv", findings);
+				}
+
+				// ---- record rules reference groups ------------------------------
+				for (const rel of declaredXml) {
+					let xml = "";
+					try {
+						xml = readFileSync(join(moduleDir, rel), "utf8");
+					} catch {
 						continue;
 					}
-					aclModels.add(modelKey(parts[2]!.trim()));
-					const groupRef = parts[3]!.trim();
-					if (groupRef !== "" && groupRef !== "group_id:id") referencedGroups.add(groupRef);
-				}
-				for (const model of newModels) {
-					if (!aclModels.has(modelKey(model.name))) {
-						findings.push({
-							severity: "ERROR",
-							file: "security/ir.model.access.csv",
-							message: `New model "${model.name}" (${model.file}) has no ACL row — add model_${modelKey(model.name)}.`,
-						});
-					}
-				}
-				// Groups must resolve inside the module (declared res.groups records)
-				// or be a base group; an external module cannot be verified locally.
-				const declaredGroupIds = new Set<string>();
-				for (const rel of declaredXml) {
-					try {
-						const xml = readFileSync(join(moduleDir, rel), "utf8");
-						for (const m of xml.matchAll(/<record[^>]*\bid=["']([^"']+)["'][^>]*model=["']res\.groups["']/g)) declaredGroupIds.add(m[1]!);
-						for (const m of xml.matchAll(/<record[^>]*\bmodel=["']res\.groups["'][^>]*\bid=["']([^"']+)["']/g)) declaredGroupIds.add(m[1]!);
-					} catch {
-						// unreadable file already reported
-					}
-				}
-				for (const ref of referencedGroups) {
-					const bare = ref.includes(".") ? ref.split(".").pop()! : ref;
-					const isBase = ref.startsWith("base.") || ref.startsWith("base_");
-					const isOwn = declaredGroupIds.has(bare) || ref === `${moduleName}.${bare}`;
-					if (!isBase && !isOwn) {
+					if (/model=["']ir\.rule["']/.test(xml) && !/groups/.test(xml)) {
 						findings.push({
 							severity: "WARN",
-							file: "security/ir.model.access.csv",
-							message: `Group "${ref}" is neither a base.* group nor a res.groups record declared by this module — verify it exists.`,
+							file: rel,
+							message: "Record rule (ir.rule) without an explicit `groups` field — it applies globally.",
 						});
 					}
-				}
-			}
-
-			// ---- record rules reference groups ------------------------------
-			for (const rel of declaredXml) {
-				let xml = "";
-				try {
-					xml = readFileSync(join(moduleDir, rel), "utf8");
-				} catch {
-					continue;
-				}
-				if (/model=["']ir\.rule["']/.test(xml) && !/groups/.test(xml)) {
-					findings.push({
-						severity: "WARN",
-						file: rel,
-						message: "Record rule (ir.rule) without an explicit `groups` field — it applies globally.",
-					});
 				}
 			}
 
@@ -1010,7 +1012,7 @@ export function registerRuntimeTools(
 			const errors = findings.filter((f) => f.severity === "ERROR").length;
 			const resolved = `Resolved module_dir: ${deps.display(moduleDir)} (project root: ${deps.display(projectRoot)})`;
 			const detail = (findings.length === 0
-				? `Module structure and security model OK (${newModels.length} new model(s), ACL present=${aclExists}).`
+				? `Module structure and security model OK (${newModels.length} new model(s), ACL present=${existsSync(join(moduleDir, "security", targetMajor !== null && targetMajor >= 20 ? "ir.access.csv" : "ir.model.access.csv"))}).`
 				: `${errors} ERROR(s), ${findings.length - errors} WARNING(s) — ${newModels.length} new model(s). Review findings.`) +
 				coverageLines.join("\n") +
 				`\n${resolved}`;
@@ -1035,6 +1037,157 @@ export function registerRuntimeTools(
  * @param args - the tool arguments, to name what the caller can page with.
  * @returns a bounded string, marked as partial when it was cut.
  */
+/** One odoo_validate finding. */
+type ValidateFinding = { severity: string; file: string; message: string };
+
+/**
+ * Warn about groups that resolve neither to a base group nor to a res.groups
+ * record this module declares: an external module cannot be verified locally.
+ */
+function warnForeignGroups(
+	moduleDir: string,
+	moduleName: string,
+	declaredXml: string[],
+	referencedGroups: Set<string>,
+	file: string,
+	findings: ValidateFinding[],
+): void {
+	const declaredGroupIds = new Set<string>();
+	for (const rel of declaredXml) {
+		try {
+			const xml = readFileSync(join(moduleDir, rel), "utf8");
+			for (const m of xml.matchAll(/<record[^>]*\bid=["']([^"']+)["'][^>]*model=["']res\.groups["']/g)) declaredGroupIds.add(m[1]!);
+			for (const m of xml.matchAll(/<record[^>]*\bmodel=["']res\.groups["'][^>]*\bid=["']([^"']+)["']/g)) declaredGroupIds.add(m[1]!);
+		} catch {
+			// unreadable file already reported
+		}
+	}
+	for (const ref of referencedGroups) {
+		const bare = ref.includes(".") ? ref.split(".").pop()! : ref;
+		const isBase = ref.startsWith("base.") || ref.startsWith("base_");
+		const isOwn = declaredGroupIds.has(bare) || ref === `${moduleName}.${bare}`;
+		if (!isBase && !isOwn) {
+			findings.push({
+				severity: "WARN",
+				file,
+				message: `Group "${ref}" is neither a base.* group nor a res.groups record declared by this module — verify it exists.`,
+			});
+		}
+	}
+}
+
+/** One CSV line split on commas outside double quotes (domains carry commas). */
+export function splitCsvLine(line: string): string[] {
+	const out: string[] = [];
+	let cell = "";
+	let quoted = false;
+	for (let i = 0; i < line.length; i += 1) {
+		const ch = line[i]!;
+		if (ch === '"') {
+			if (quoted && line[i + 1] === '"') {
+				cell += '"';
+				i += 1;
+			} else quoted = !quoted;
+		} else if (ch === "," && !quoted) {
+			out.push(cell);
+			cell = "";
+		} else cell += ch;
+	}
+	out.push(cell);
+	return out;
+}
+
+/** The `operation` values ir.access accepts: non-empty "crud" subsets, in that order. */
+const IR_ACCESS_OPERATION = /^c?r?u?d?$/;
+
+/**
+ * Security coherence for a module targeting Odoo 20+, where `ir.access`
+ * replaces `ir.model.access` and `ir.rule` (`odoo/addons/base/models/ir_access.py`).
+ * Every new model needs a row in `security/ir.access.csv`
+ * (`id,name,model_id,group_id/id,operation,domain`); the legacy files are
+ * ERRORS because the models they target no longer exist on 20.
+ */
+function validateIrAccess(
+	moduleDir: string,
+	moduleName: string,
+	declaredXml: string[],
+	newModels: Array<{ name: string; file: string }>,
+	findings: ValidateFinding[],
+): void {
+	const file = "security/ir.access.csv";
+	if (existsSync(join(moduleDir, "security", "ir.model.access.csv"))) {
+		findings.push({
+			severity: "ERROR",
+			file: "security/ir.model.access.csv",
+			message: "ir.model.access does not exist on Odoo 20 — move the rows to security/ir.access.csv (id,name,model_id,group_id/id,operation,domain).",
+		});
+	}
+	for (const rel of declaredXml) {
+		let xml = "";
+		try {
+			xml = readFileSync(join(moduleDir, rel), "utf8");
+		} catch {
+			continue;
+		}
+		if (/model=["']ir\.rule["']/.test(xml)) {
+			findings.push({
+				severity: "ERROR",
+				file: rel,
+				message: "ir.rule does not exist on Odoo 20 — declare the rule as an ir.access record with a `domain` (and a `group_id`, or it restricts every user).",
+			});
+		}
+		if (/model=["']ir\.access["']/.test(xml) && !/group_id/.test(xml)) {
+			findings.push({
+				severity: "WARN",
+				file: rel,
+				message: "ir.access record without `group_id` — it is a RESTRICTION on every user, not a permission.",
+			});
+		}
+	}
+	const aclPath = join(moduleDir, "security", "ir.access.csv");
+	if (!existsSync(aclPath)) {
+		if (newModels.length > 0) {
+			findings.push({
+				severity: "ERROR",
+				file,
+				message: `Module declares ${newModels.length} new model(s) (${newModels.map((m) => m.name).join(", ")}) but has no ${file}.`,
+			});
+		}
+		return;
+	}
+	const lines = readFileSync(aclPath, "utf8").split(/\r?\n/).filter((l) => l.trim() !== "");
+	const header = lines[0]?.trim() ?? "";
+	if (!header.startsWith("id,name,model_id,group_id")) {
+		findings.push({ severity: "ERROR", file, message: `Unexpected header "${header.slice(0, 60)}" — expected id,name,model_id,group_id/id,operation,domain.` });
+		return;
+	}
+	const accessModels = new Set<string>();
+	const referencedGroups = new Set<string>();
+	for (const line of lines.slice(1)) {
+		const parts = splitCsvLine(line).map((p) => p.trim());
+		if (parts.length < 5) {
+			findings.push({ severity: "WARN", file, message: `Malformed row (expected id,name,model_id,group_id/id,operation,domain): ${line.slice(0, 60)}` });
+			continue;
+		}
+		// model_id carries the model NAME on 20; tolerate the legacy model_x_y id.
+		accessModels.add(parts[2]!.replace(/^model_/, "").replace(/\./g, "_"));
+		if (parts[3] !== "") referencedGroups.add(parts[3]!);
+		const operation = parts[4]!;
+		if (operation === "" || !IR_ACCESS_OPERATION.test(operation)) {
+			findings.push({ severity: "ERROR", file, message: `Row "${parts[0]}": operation "${operation}" is not a "crud" subset in c,r,u,d order (e.g. r, cru, crud).` });
+		}
+		if (parts[3] === "") {
+			findings.push({ severity: "WARN", file, message: `Row "${parts[0]}" has no group — on 20 that RESTRICTS every user instead of granting access.` });
+		}
+	}
+	for (const model of newModels) {
+		if (!accessModels.has(model.name.replace(/\./g, "_"))) {
+			findings.push({ severity: "ERROR", file, message: `New model "${model.name}" (${model.file}) has no ir.access row — add one with model_id ${model.name}.` });
+		}
+	}
+	warnForeignGroups(moduleDir, moduleName, declaredXml, referencedGroups, file, findings);
+}
+
 function boundResult(value: unknown, model: string, method: string, args: Record<string, unknown>): string {
 	const MAX = 4000;
 	let text: string;

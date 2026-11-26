@@ -1429,6 +1429,35 @@ writeFileSync(join(modValid, "security", "ir.model.access.csv"), "id,name\\n", {
 let v = await validateD.execute({ module_dir: modValid });
 check("odoo_validate accepts a valid module", v.valid === true);
 
+// --- odoo_validate on an Odoo 20 module: ir.access replaces the ACL + ir.rule ---
+const mod20 = join(dir, "mod_20");
+mkdirSync(join(mod20, "security"), { recursive: true });
+mkdirSync(join(mod20, "models"), { recursive: true });
+writeFileSync(
+	join(mod20, "__manifest__.py"),
+	"{'name':'t20','version':'20.0.1.0.0','license':'AGPL-3','author':'Acme','website':'https://example.com','depends':['base'],'data':['security/rules.xml']}",
+	{ mode: 0o600 },
+);
+writeFileSync(join(mod20, "models", "m.py"), "class A(models.Model):\n    _name = 'acme.order'\n", { mode: 0o600 });
+writeFileSync(join(mod20, "security", "rules.xml"), '<odoo><record id="r" model="ir.rule"><field name="name">x</field></record></odoo>', { mode: 0o600 });
+writeFileSync(join(mod20, "security", "ir.model.access.csv"), "id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink\naccess_a,a,model_acme_order,base.group_user,1,1,1,1\n", { mode: 0o600 });
+v = await validateD.execute({ module_dir: mod20 });
+check("odoo_validate on 20 rejects ir.model.access.csv", v.valid === false && v.findings.some((f) => f.severity === "ERROR" && f.file === "security/ir.model.access.csv" && /ir\.access\.csv/.test(f.message)));
+check("odoo_validate on 20 rejects ir.rule records", v.findings.some((f) => f.severity === "ERROR" && f.file === "security/rules.xml" && /ir\.rule does not exist/.test(f.message)));
+check("odoo_validate on 20 asks for security/ir.access.csv", v.findings.some((f) => f.severity === "ERROR" && f.file === "security/ir.access.csv"));
+rmSync(join(mod20, "security", "ir.model.access.csv"));
+writeFileSync(join(mod20, "security", "rules.xml"), "<odoo></odoo>", { mode: 0o600 });
+writeFileSync(
+	join(mod20, "security", "ir.access.csv"),
+	"id,name,model_id,group_id/id,operation,domain\naccess_acme_order_user,acme user,acme.order,base.group_user,cru,\nrule_own,own,acme.order,base.group_user,r,\"[('user_id', '=', user.id)]\"\n",
+	{ mode: 0o600 },
+);
+v = await validateD.execute({ module_dir: mod20 });
+check("odoo_validate on 20 accepts a coherent ir.access.csv (domains with commas included)", v.findings.every((f) => f.severity !== "ERROR"), JSON.stringify(v.findings));
+writeFileSync(join(mod20, "security", "ir.access.csv"), "id,name,model_id,group_id/id,operation,domain\nbad,bad,other.model,,rw,\n", { mode: 0o600 });
+v = await validateD.execute({ module_dir: mod20 });
+check("odoo_validate on 20 flags a bad operation, a group-less row and an uncovered model", v.findings.some((f) => /operation "rw"/.test(f.message)) && v.findings.some((f) => /RESTRICTS every user/.test(f.message)) && v.findings.some((f) => /acme\.order.*no ir\.access row/.test(f.message)));
+
 // --- odoo_validate + spec_dir: requirement coverage through the tool -------
 // The spec declares a shall requirement, the module annotates it in a comment
 // and the test plan passes AC1: covered, no orphans, so `valid` stays true.
@@ -2765,6 +2794,38 @@ console.log("== odoo_execute capability (context, read_group, fields_get) ==");
 	rpcCalls.length = 0;
 	await rx.execute({ model: "sale.order", method: "read_group", domain: [], fields: ["amount_total:sum"], groupby: ["partner_id"], limit: 5, offset: 10 });
 	check("read_group forwards offset", rpcCalls[0].kwargs.offset === 10);
+	{
+		const v20Tools = new Map();
+		const v20Calls = [];
+		runtimeMod2.registerRuntimeTools(
+			{ tools: { register: (t) => v20Tools.set(t.name, t) } },
+			{
+				client: () => ({
+					client: {
+						serverMajor: 20,
+						executeKw: async (model, method, args, kwargs) => {
+							v20Calls.push({ model, method, args, kwargs });
+							return { ok: true, value: [] };
+						},
+					},
+					report: "stub",
+				}),
+				status: () => ({ detail: "stub" }),
+				projectRoot: dir,
+				allowlist: () => allow,
+				display: (v) => v,
+			},
+		);
+		const x20 = v20Tools.get("odoo_execute");
+		await x20.execute({ model: "sale.order", method: "read_group", domain: [], fields: ["amount_total:sum"], groupby: ["partner_id"], offset: 2 });
+		check(
+			"odoo_execute read_group on Odoo 20 calls formatted_read_group",
+			v20Calls[0]?.method === "formatted_read_group" && JSON.stringify(v20Calls[0].args[2]) === JSON.stringify(["__count", "amount_total:sum"]) && v20Calls[0].kwargs.offset === 2,
+			JSON.stringify(v20Calls[0]),
+		);
+		const refused = await x20.execute({ model: "sale.order", method: "check_access_rights", args: ["read"] });
+		check("odoo_execute refuses check_access_rights on Odoo 20 before sending", refused.denied === true && v20Calls.length === 1);
+	}
 	// A bad offset is refused, not clamped: a silently wrong window looks like a
 	// complete answer.
 	rpcCalls.length = 0;
@@ -4502,6 +4563,27 @@ console.log("== version-dependent method classification ==");
 	// It is still classified as a READ (a harmless query), never as a mutation:
 	// demanding confirmation for it would train the operator to confirm blindly.
 	check("a retired read is not reclassified as a mutation", clsV.isReadMethod("exists") === true && clsV.isCrudMutation("exists") === false);
+	// Odoo 20 dropped check_access_rights / check_access_rule from the ORM:
+	// only the private check_access and the public has_access(operation) remain.
+	check("check_access_rights is still a read on 19", clsV.retiredReadReason("check_access_rights", 19) === null);
+	check(
+		"check_access_rights / check_access_rule are refused on 20, pointing at has_access",
+		["check_access_rights", "check_access_rule"].every((m) => /has_access/.test(clsV.retiredReadReason(m, 20) ?? "")),
+	);
+	check("has_access is advertised as a read", clsV.isReadMethod("has_access") && clsV.advertisedReadMethods(20).includes("has_access"));
+	// read_group changed its public signature in 20 (domain, groupby, aggregates…).
+	const rg19 = clsV.planReadGroup(19, { domain: [], fields: ["amount_total:sum"], groupby: ["partner_id"], order: "amount_total desc" });
+	check("read_group keeps the 19 positional shape below 20", rg19.ok && rg19.method === "read_group" && rg19.kwargs.orderby === "amount_total desc");
+	const rg20 = clsV.planReadGroup(20, { domain: [["state", "=", "sale"]], fields: ["amount_total:sum", "total:sum(amount_untaxed)", "partner_id"], groupby: ["partner_id"], limit: 5, order: "amount_total desc" });
+	check(
+		"read_group on 20 becomes formatted_read_group with aggregates",
+		rg20.ok && rg20.method === "formatted_read_group" &&
+			JSON.stringify(rg20.args) === JSON.stringify([[["state", "=", "sale"]], ["partner_id"], ["__count", "amount_total:sum", "amount_untaxed:sum"]]) &&
+			rg20.kwargs.order === "amount_total desc" && rg20.kwargs.limit === 5 && rg20.kwargs.orderby === undefined,
+		JSON.stringify(rg20),
+	);
+	const rgBad = clsV.planReadGroup(20, { domain: [], fields: ["amount_total"], groupby: ["partner_id"] });
+	check("read_group on 20 refuses a field with no aggregator", !rgBad.ok && /field:aggregator/.test(rgBad.reason));
 }
 
 // == the JSON-2 transport (Odoo 19+) =======================================
@@ -4518,6 +4600,12 @@ console.log("== JSON-2 transport (Odoo 19+) ==");
 
 	// ---- the translation table, method by method -------------------------
 	const plan = (method, args, kwargs = {}) => apiMod.planJson2Body(method, args, kwargs);
+	const frg = plan("formatted_read_group", [[], ["partner_id"], ["__count"]], { limit: 3, order: "partner_id" });
+	check(
+		"formatted_read_group travels by name on JSON-2",
+		frg !== null && JSON.stringify(frg.groupby) === JSON.stringify(["partner_id"]) && JSON.stringify(frg.aggregates) === JSON.stringify(["__count"]) && frg.limit === 3 && frg.order === "partner_id",
+		JSON.stringify(frg),
+	);
 	check("search_read becomes NAMED parameters", JSON.stringify(plan("search_read", [[]], { limit: 10, order: "id" })) === JSON.stringify({ domain: [], limit: 10, order: "id" }));
 	check("search_count keeps domain and limit but drops offset", JSON.stringify(plan("search_count", [[]], { limit: 5, offset: 9 })) === JSON.stringify({ domain: [], limit: 5 }));
 	check("read_group names (domain, fields, groupby)", JSON.stringify(plan("read_group", [[], ["name"], ["state"]], { orderby: "id" })) === JSON.stringify({ domain: [], fields: ["name"], groupby: ["state"], orderby: "id" }));
@@ -4556,6 +4644,15 @@ console.log("== JSON-2 transport (Odoo 19+) ==");
 		check("...and the body carries the NAMED parameters", call.body.domain !== undefined && call.body.limit === 3);
 		check("...and it never authenticates first (no uid round-trip)", !seen.some((c) => c.url.includes("/jsonrpc")));
 		check("the client reports the transport it used", j2.transport.api === "json2" && /json\/2/.test(j2.transport.reason));
+		// JSON-2 serializes the recordset create() returns: one dict answers [id].
+		// The classic contract (a bare id) is what every caller is written against.
+		j2Responder = () => new Response(JSON.stringify([47]), { status: 200 });
+		const one = await j2.executeKw("res.partner", "create", [{ name: "x" }]);
+		check("JSON-2 create of ONE dict answers the bare id, like execute_kw", one.ok && one.value === 47, JSON.stringify(one));
+		j2Responder = () => new Response(JSON.stringify([47, 48]), { status: 200 });
+		const many = await j2.executeKw("res.partner", "create", [[{ name: "x" }, { name: "y" }]]);
+		check("...while a LIST of dicts keeps the id list", many.ok && JSON.stringify(many.value) === "[47,48]", JSON.stringify(many));
+		j2Responder = () => new Response(JSON.stringify([]), { status: 200 });
 
 		// ---- errors: the classification must come from the HTTP status ----
 		const statusCase = async (status, body) => {
@@ -4877,6 +4974,11 @@ msgstr ""
 	await runExport(alreadyActive);
 	check("an already active language is not installed again", !alreadyActive.calls.some((c) => c.model === "base.language.install"));
 	check("the version boundary is the same one that dropped ir.translation", i18nMod.I18N_MODERN_MAJOR === 16);
+	// A Binary read is a base64 string up to 19 and {content, size} from 20.
+	check(
+		"binaryBase64 reads both Binary shapes (19 string, 20 object) and empties",
+		i18nMod.binaryBase64("QUJD") === "QUJD" && i18nMod.binaryBase64({ content: "QUJD", size: 3 }) === "QUJD" && i18nMod.binaryBase64(false) === null && i18nMod.binaryBase64({ content: false }) === null && i18nMod.binaryBase64("") === null,
+	);
 
 	// ---- the second export preserves the first one's work ----------------
 	const second = await runExport(fakeClient(19, true));

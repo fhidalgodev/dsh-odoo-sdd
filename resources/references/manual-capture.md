@@ -39,11 +39,13 @@ annotated with a `data-dsh-step` label that is removed before saving the PNG
 
 ## UI families per version
 
-`UI_FAMILIES` is indexed by major (15–19); a major with no family is
+`UI_FAMILIES` is indexed by major (16–20); a major with no family is
 refused (`familyFor` → BLOCKED) instead of guessing selectors. Family 17
-is **verified with E2E** (`tests/capture.mjs`); 15/16/18/19 share
-equivalent selectors and are DECLARED UNTESTED: contrast them against
-a real dev instance before capturing production. Browser `auto` =
+is **verified with E2E** (`tests/capture.mjs`), 19 and 20 against live
+19.0+e / 20.0+e instances (20 renders the x2many "Add a line" as a
+`<button>`); 16/18 share equivalent selectors checked in their sources.
+Contrast an unverified family against a real dev instance before capturing
+production. Browser `auto` =
 Playwright's Chromium → system Chrome → Edge; with none of them, the answer
 is `NEEDS_BROWSER` with the remedy (`npx playwright-core install chromium`).
 

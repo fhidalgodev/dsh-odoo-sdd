@@ -234,7 +234,7 @@ async function exportPo(
 		EXPORT_TIMEOUT_MS,
 	);
 	if (!generated.ok) return { ok: false, reason: `export failed: ${generated.error}` };
-	const row = await client.executeKw<Array<{ data: string | false; name: string }>>(
+	const row = await client.executeKw<Array<{ data: BinaryRead; name: string }>>(
 		"base.language.export",
 		"read",
 		[[created.value], ["data", "name"]],
@@ -243,10 +243,25 @@ async function exportPo(
 	);
 	if (!row.ok) return { ok: false, reason: `could not read the exported file: ${row.error}` };
 	const record = row.value[0];
-	if (record === undefined || record.data === false || record.data === "") {
+	const base64 = record === undefined ? null : binaryBase64(record.data);
+	if (record === undefined || base64 === null) {
 		return { ok: false, reason: "Odoo returned an empty export (no terms for that module and language)" };
 	}
-	return { ok: true, content: Buffer.from(record.data, "base64").toString("utf8"), name: record.name };
+	return { ok: true, content: Buffer.from(base64, "base64").toString("utf8"), name: record.name };
+}
+
+/**
+ * A Binary field as `read` returns it: a base64 string up to 19, and from 20 a
+ * `{content, size, filename?}` object whose `content` is the base64 payload
+ * (`odoo/orm/fields_binary.py::convert_to_read`). `false` = empty.
+ */
+type BinaryRead = string | false | { content?: string | false; size?: number; filename?: string };
+
+/** The base64 payload of a Binary read, or null when it is empty. */
+export function binaryBase64(value: BinaryRead | undefined): string | null {
+	if (typeof value === "string") return value === "" ? null : value;
+	if (value && typeof value === "object" && typeof value.content === "string" && value.content !== "") return value.content;
+	return null;
 }
 
 /** The tool's own result shape, kept flat so the schema stays checkable. */

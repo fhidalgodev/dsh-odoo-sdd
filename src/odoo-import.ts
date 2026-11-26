@@ -75,10 +75,11 @@ export function readWebSession(projectRoot: string): WebSession | null {
  * @returns the token, or null when the page does not carry one.
  */
 export function extractCsrfToken(html: string): string | null {
-	// Odoo renders `odoo.csrf_token = "…";` (and a meta tag on some versions).
+	// Odoo renders `odoo.csrf_token = "…";`, a quoted `"csrf_token": "…"` key,
+	// an UNQUOTED `csrf_token: "…"` key (20's session info) or a meta tag.
 	const patterns = [
 		/odoo\.csrf_token\s*=\s*["']([^"']+)["']/,
-		/csrf_token["']\s*[:=]\s*["']([^"']+)["']/,
+		/\bcsrf_token["']?\s*[:=]\s*["']([^"']+)["']/,
 		/<meta[^>]+name=["']csrf-token["'][^>]+content=["']([^"']+)["']/i,
 	];
 	for (const pattern of patterns) {
@@ -615,16 +616,21 @@ export function registerImportTool(ctx: { tools: { register(tool: unknown): void
 				if (prepared === null) {
 					return { ...base, status: "not-prepared", detail: `No prepared file for batch ${batchId}. Run use=prepare first.` };
 				}
+				// get_fields / get_fields_tree(model, depth) are @api.model: the TARGET
+				// model is their first argument, not the importer's.
 				const fieldsResult = await client.executeKw<unknown>(
 					"base_import.import",
 					caps.capabilities.fieldsMethod,
-					[],
+					[prepared.model],
 					{},
 				);
+				// parse_preview(self, options, count=10) runs ON the importer record;
+				// the sheet travels inside `options` (options["sheet"]), never as `count`.
+				const previewOptions = { ...(args.options ?? {}), ...(args.sheet ? { sheet: args.sheet } : {}) };
 				const parseResult = await client.executeKw<unknown>(
 					"base_import.import",
 					"parse_preview",
-					[prepared.importId, args.options ?? {}, args.sheet ?? false],
+					[[prepared.importId], previewOptions],
 					{},
 				);
 				if (!parseResult.ok) {

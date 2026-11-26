@@ -36,6 +36,24 @@ const SKIP = (name) => {
 const fam17 = capture.familyFor("17.0");
 check("familyFor resolves 17.0 to the verified baseline", fam17.ok && fam17.value.major === 17);
 check("familyFor resolves 19.0 (declared untested, still supported)", capture.familyFor("19.0+e").ok);
+check("familyFor resolves 20.0", capture.familyFor("20.0").ok && capture.familyFor("20.0+e").value.major === 20);
+check("20 clicks the x2many add row as a <button>", capture.UI_FAMILIES[20].selectors.addRow.includes(".o_field_x2many_list_row_add > button"));
+check("menuUrl passes the NUMERIC menu id the hash router reads", capture.menuUrl("http://h:8069/", 42) === "http://h:8069/web#menu_id=42");
+check(
+	"every family waits on the real block overlay and the OPEN autocomplete",
+	[16, 17, 18, 19, 20].every((m) => capture.UI_FAMILIES[m].selectors.loading === ".o_blockUI" && capture.UI_FAMILIES[m].selectors.many2oneDropdown === ".o-autocomplete--dropdown-menu"),
+);
+{
+	// fill/select type into the CONTROL: the widget div comes first in document
+	// order and a form field often shares its name with an x2many column.
+	const pageWith = (present) => ({ $: async (sel) => (present.includes(sel) ? {} : null) });
+	const f20 = capture.UI_FAMILIES[20];
+	check("editableField prefers the row being edited", (await capture.editableField(pageWith(['[name="name"] input', '.o_selected_row [name="name"] input']), f20, "name")) === '.o_selected_row [name="name"] input');
+	check("editableField then the form input", (await capture.editableField(pageWith(['[name="name"] input']), f20, "name")) === '[name="name"] input');
+	check("editableField finds a textarea", (await capture.editableField(pageWith(['[name="note"] textarea']), f20, "note")) === '[name="note"] textarea');
+	check("editableField falls back to the widget selector", (await capture.editableField(pageWith([]), f20, "x")) === f20.selectors.field("x"));
+}
+check("19+ read menus without a cache segment, 16-18 with one", capture.UI_FAMILIES[20].menusPath === "/web/webclient/load_menus" && capture.UI_FAMILIES[19].menusPath === "/web/webclient/load_menus" && capture.UI_FAMILIES[17].menusPath.startsWith("/web/webclient/load_menus/"));
 const fam14 = capture.familyFor("14.0");
 check("familyFor REJECTS an unverified major", !fam14.ok && /not verified/.test(fam14.error));
 const famBad = capture.familyFor("weird");

@@ -421,7 +421,10 @@ export class OdooClient {
 						ok: false,
 						error:
 							`${who}${detail} — the JSON-2 API authenticates with an API key sent as ` +
-							"`Authorization: Bearer` (Settings > Users > API Keys), so a password cannot be used on it",
+							"`Authorization: Bearer` (Settings > Users > API Keys), so a password cannot be used on it" +
+							(this.#serverMajor !== null && this.#serverMajor >= 20
+								? "; on Odoo 20 the key must also have the scope `rpc` (the API key wizard default)"
+								: ""),
 						errorKind: "server",
 						fallback: true,
 					};
@@ -468,6 +471,13 @@ export class OdooClient {
 			const json2 = await this.#rpcJson2<T>(model, method, body, timeoutMs, signal);
 			if (json2.ok) {
 				this.#json2 = "available";
+				// `execute_kw` answers create({...}) with the new id, but JSON-2
+				// serializes the returned recordset, so a single dict comes back as
+				// [id]. Every caller (journal, batches, import, i18n) is written
+				// against the classic contract: keep ONE shape whatever the transport.
+				if (method === "create" && !Array.isArray(args[0]) && Array.isArray(json2.value) && json2.value.length === 1) {
+					return { ok: true, value: json2.value[0] as T };
+				}
 				return { ok: true, value: json2.value };
 			}
 			if (json2.fallback !== true) {

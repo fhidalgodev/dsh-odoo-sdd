@@ -42,7 +42,8 @@ export type StepKind =
 	| "assert"
 	| "explore"
 	| "screenshot"
-	| "highlight";
+	| "highlight"
+	| "slide";
 
 export interface Step {
 	id: string;
@@ -66,6 +67,49 @@ export interface Step {
 	 * …). Explicit coverage, added on top of what the step covers on its own.
 	 */
 	covers?: string[];
+	/**
+	 * VIDEO only: opens a numbered chapter ("Step N" + this heading) that the
+	 * following steps share until the next chapter.
+	 */
+	chapter?: string;
+	/** VIDEO only: the short label on the step's pill (default: the narration). */
+	caption?: string;
+	/** VIDEO only, kind "slide": a designed slide instead of a recorded screen. */
+	slide?: VideoSlide;
+}
+
+/** A designed VIDEO slide: a row of cards or a checklist, revealed one by one. */
+export interface VideoSlide {
+	layout: "cards" | "checklist";
+	/** Small line above the title (e.g. "Remember"). */
+	eyebrow?: string;
+	title: string;
+	/** cards: 1–4 (title + text); checklist: 1–6 (title only). */
+	items: { title: string; text?: string }[];
+}
+
+/**
+ * VIDEO only: the base colors of the series. `odoo` is the default look;
+ * `custom` takes the user's own colors (hex #RRGGBB).
+ */
+export interface VideoTheme {
+	preset: "odoo" | "custom";
+	primary?: string;
+	background?: string;
+	text?: string;
+	accent?: string;
+}
+
+/** VIDEO only: the look of the series (asked once, at plan time). */
+export interface VideoStyle {
+	theme?: VideoTheme;
+	/**
+	 * Logo image (PNG/JPG), relative to the video workspace. `null` = the user
+	 * chose no logo; absent = not asked yet (the look is still open).
+	 */
+	logo?: string | null;
+	/** Line above the title card (e.g. "Company · Product"). */
+	eyebrow?: string;
 }
 
 /** Evidence that a screenshot was taken for one step. */
@@ -168,6 +212,8 @@ export interface Storyboard {
 	 * a gap — and the reason is the whole point of writing it down.
 	 */
 	videoSkip?: Record<string, string>;
+	/** VIDEO only: theme colors, logo and title-card eyebrow. */
+	video?: VideoStyle;
 	updatedAt?: string;
 }
 
@@ -365,7 +411,7 @@ export function sha256Of(data: string | Buffer): string {
 import type { Canon, CanonModule } from "./manual-canon.js";
 
 /** Steps that only LOOK at the instance — always allowed to capture. */
-export const READ_ONLY_KINDS: readonly StepKind[] = ["goto", "menu", "wait", "assert", "explore", "screenshot", "confirm", "highlight"];
+export const READ_ONLY_KINDS: readonly StepKind[] = ["goto", "menu", "wait", "assert", "explore", "screenshot", "confirm", "highlight", "slide"];
 /** Steps that MUTATE the record — gated behind `allow_actions` (Fase 3). */
 export const ACTION_KINDS: readonly StepKind[] = ["new", "fill", "select", "press", "click", "drag"];
 
@@ -618,6 +664,11 @@ export function validateStoryboard(sb: Storyboard, canon: Canon | null): Storybo
 		for (const e of src?.errors ?? []) if (e.kind === "raise" && e.method) raising.add(e.method);
 	}
 	for (const flow of sb.flows) {
+		for (const step of flow.steps) {
+			if (step.kind === "slide") {
+				out.push({ rule: "SLIDE-VIDEO-ONLY", severity: "ERROR", flow: flow.id, step: step.id, message: "slide steps belong to odoo_video storyboards: a manual has no slide to render." });
+			}
+		}
 		if (flow.role && canon && roleXmlids.size > 0 && !roleXmlids.has(flow.role)) {
 			const known = inventories.flatMap((m) => m.menus.flatMap((menu) => menu.groups ?? [])).includes(flow.role);
 			if (!known) out.push({ rule: "ROLE-UNKNOWN", severity: "WARN", flow: flow.id, message: `role "${flow.role}" is not one of the groups the canon read for ${canon?.model ?? "this manual"}.` });
